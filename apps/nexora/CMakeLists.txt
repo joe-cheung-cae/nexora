@@ -1,0 +1,53 @@
+add_executable(nexora main.cpp)
+target_link_libraries(nexora PRIVATE nexora::core)
+set_target_properties(nexora PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+target_compile_definitions(nexora PRIVATE "NEXORA_CONFIGURATION=\"$<CONFIG>\"")
+target_include_directories(nexora PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+
+set(NEXORA_HAS_CUDA 0)
+set(NEXORA_HAS_MPI 0)
+if(NEXORA_GPU_BACKEND STREQUAL "CUDA")
+    set(NEXORA_HAS_CUDA 1)
+    target_sources(nexora PRIVATE CudaSmoke.cu)
+    target_link_libraries(nexora PRIVATE CUDA::cudart)
+    set_target_properties(nexora PROPERTIES
+        CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED YES CUDA_EXTENSIONS NO
+        CUDA_RUNTIME_LIBRARY Shared)
+endif()
+if(NEXORA_ENABLE_MPI)
+    set(NEXORA_HAS_MPI 1)
+    target_sources(nexora PRIVATE MpiSmoke.cpp)
+    target_link_libraries(nexora PRIVATE MPI::MPI_C)
+    target_compile_definitions(nexora PRIVATE OMPI_SKIP_MPICXX=1 MPICH_SKIP_MPICXX=1)
+endif()
+configure_file(BuildInfo.hpp.in BuildInfo.hpp @ONLY)
+
+if(BUILD_TESTING)
+    add_test(NAME nexora_cli_version COMMAND nexora --version)
+    add_test(NAME nexora_cli_inspect_build COMMAND nexora inspect-build)
+    add_test(NAME nexora_cli_invalid_command COMMAND nexora invalid)
+    set_tests_properties(nexora_cli_invalid_command PROPERTIES WILL_FAIL TRUE)
+    set_tests_properties(nexora_cli_version nexora_cli_inspect_build nexora_cli_invalid_command
+        PROPERTIES LABELS smoke TIMEOUT 10)
+
+    if(NEXORA_HAS_CUDA)
+        add_test(NAME nexora_cuda_smoke COMMAND nexora smoke-cuda)
+        set_tests_properties(nexora_cuda_smoke PROPERTIES LABELS "smoke;cuda" SKIP_RETURN_CODE 77 TIMEOUT 60)
+    else()
+        add_test(NAME nexora_cli_cuda_disabled COMMAND nexora smoke-cuda)
+        set_tests_properties(nexora_cli_cuda_disabled PROPERTIES LABELS smoke WILL_FAIL TRUE TIMEOUT 10)
+    endif()
+
+    if(NEXORA_HAS_MPI)
+        if(NOT MPIEXEC_EXECUTABLE)
+            message(FATAL_ERROR "MPI smoke testing requires MPIEXEC_EXECUTABLE when BUILD_TESTING is enabled.")
+        endif()
+        add_test(NAME nexora_mpi_smoke COMMAND
+            "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+            "$<TARGET_FILE:nexora>" ${MPIEXEC_POSTFLAGS} smoke-mpi)
+        set_tests_properties(nexora_mpi_smoke PROPERTIES LABELS "smoke;mpi" PROCESSORS 2 TIMEOUT 60)
+    else()
+        add_test(NAME nexora_cli_mpi_disabled COMMAND nexora smoke-mpi)
+        set_tests_properties(nexora_cli_mpi_disabled PROPERTIES LABELS smoke WILL_FAIL TRUE TIMEOUT 10)
+    endif()
+endif()

@@ -1,0 +1,1 @@
+nexora_add_test(nexora_simulation_tests simulation_tests.cpp nexora::simulation)

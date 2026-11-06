@@ -1,0 +1,5 @@
+add_library(nexora_core INTERFACE)
+add_library(nexora::core ALIAS nexora_core)
+set_target_properties(nexora_core PROPERTIES EXPORT_NAME core)
+target_include_directories(nexora_core INTERFACE $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include> $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/generated/include> $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+target_link_libraries(nexora_core INTERFACE nexora_build_options)

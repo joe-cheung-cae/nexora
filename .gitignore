@@ -1,0 +1,12 @@
+/build/
+/build-*/
+/install/
+/install-*/
+/results/
+/.cache/
+/generated/
+/local-data/
+CMakeUserPresets.json
+compile_commands.json
+__pycache__/
+.DS_Store

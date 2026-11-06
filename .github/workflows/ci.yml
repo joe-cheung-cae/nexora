@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  cpu:
+    name: CPU / ${{ matrix.platform }} / ${{ matrix.compiler }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-24.04
+            compiler: GCC
+            cc: gcc
+            cxx: g++
+          - platform: ubuntu-24.04
+            compiler: Clang
+            cc: clang
+            cxx: clang++
+          - platform: windows-2022
+            compiler: MSVC
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Report tool versions
+        run: cmake --version
+      - name: Configure CPU debug (Linux)
+        if: runner.os == 'Linux'
+        run: cmake --preset cpu-debug
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+      - name: Configure CPU debug (Windows / MSVC)
+        if: runner.os == 'Windows'
+        run: cmake -S . -B build/windows -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON -DNEXORA_GPU_BACKEND=NONE -DNEXORA_ENABLE_MPI=OFF
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: cmake --build --preset cpu-debug
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: cmake --build build/windows --config Debug
+      - name: Test (Linux)
+        if: runner.os == 'Linux'
+        run: ctest --preset cpu-debug
+      - name: Test (Windows)
+        if: runner.os == 'Windows'
+        run: ctest --test-dir build/windows -C Debug --output-on-failure
+      - name: Check architecture boundaries
+        if: runner.os == 'Linux'
+        run: python3 tools/check_dependencies.py --graph build/cpu-debug/nexora-target-graph.json
+      - name: Check architecture boundaries (Windows)
+        if: runner.os == 'Windows'
+        run: python tools/check_dependencies.py --graph build/windows/nexora-target-graph.json
+
+  mpi-smoke:
+    name: Optional MPI C API smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MPI
+        run: sudo apt-get update && sudo apt-get install -y libopenmpi-dev openmpi-bin ninja-build
+      - name: Report tool versions
+        run: cmake --version
+      - name: Configure MPI
+        run: cmake --preset mpi-debug
+      - name: Build
+        run: cmake --build --preset mpi-debug
+      - name: Run two-rank smoke test
+        run: ctest --preset mpi-debug --output-on-failure
+      - name: Check architecture boundaries
+        run: python3 tools/check_dependencies.py --graph build/mpi-debug/nexora-target-graph.json
