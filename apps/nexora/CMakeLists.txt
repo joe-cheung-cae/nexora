@@ -1,19 +1,11 @@
 add_executable(nexora main.cpp)
-target_link_libraries(nexora PRIVATE nexora::core)
-set_target_properties(nexora PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+target_link_libraries(nexora PRIVATE nexora::core Kokkos::kokkos)
 target_compile_definitions(nexora PRIVATE "NEXORA_CONFIGURATION=\"$<CONFIG>\"")
 target_include_directories(nexora PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 
 set(NEXORA_HAS_CUDA 0)
 set(NEXORA_HAS_MPI 0)
-if(NEXORA_GPU_BACKEND STREQUAL "CUDA")
-    set(NEXORA_HAS_CUDA 1)
-    target_sources(nexora PRIVATE CudaSmoke.cu)
-    target_link_libraries(nexora PRIVATE CUDA::cudart)
-    set_target_properties(nexora PROPERTIES
-        CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED YES CUDA_EXTENSIONS NO
-        CUDA_RUNTIME_LIBRARY Shared)
-endif()
+# CudaSmoke.cu is dormant bootstrap code pending the approved GPU migration.
 if(NEXORA_ENABLE_MPI)
     set(NEXORA_HAS_MPI 1)
     target_sources(nexora PRIVATE MpiSmoke.cpp)

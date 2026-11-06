@@ -1,14 +1,21 @@
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.25.2)
+
+include(CMakePackageConfigHelpers)
 
 set(config_args)
 if(config)
     set(config_args --config "${config}")
 endif()
 
-file(REMOVE_RECURSE "${scratch}/installed" "${scratch}/relocated" "${scratch}/consumer")
+file(REMOVE_RECURSE "${scratch}/installed" "${scratch}/relocated" "${scratch}/consumer"
+    "${scratch}/consumer-source" "${scratch}/negative")
 execute_process(COMMAND "${CMAKE_COMMAND}" --install "${project_build}"
     ${config_args} --prefix "${scratch}/installed" COMMAND_ERROR_IS_FATAL ANY)
 file(RENAME "${scratch}/installed" "${scratch}/relocated")
+
+set(consumer_copy "${scratch}/consumer-source")
+file(COPY "${consumer_source}/CMakeLists.txt" "${consumer_source}/main.cpp" "${kokkos_test_source}"
+    DESTINATION "${consumer_copy}")
 
 set(generator_args -G "${generator}")
 if(generator_platform)
@@ -18,10 +25,85 @@ if(generator_toolset)
     list(APPEND generator_args -T "${generator_toolset}")
 endif()
 
-execute_process(COMMAND "${CMAKE_COMMAND}" -S "${consumer_source}" -B "${scratch}/consumer"
-    ${generator_args} "-DCMAKE_CXX_COMPILER=${compiler}" "-DCMAKE_BUILD_TYPE=${config}"
-    "-DNexora_DIR=${scratch}/relocated/${package_dir}" COMMAND_ERROR_IS_FATAL ANY)
+set(configure_args ${generator_args}
+    "-DCMAKE_MAKE_PROGRAM=${make_program}"
+    "-DCMAKE_CXX_COMPILER=${cxx_compiler}"
+    "-DCMAKE_CXX_FLAGS=${cxx_flags}"
+    "-DCMAKE_BUILD_TYPE=${config}")
+if(APPLE)
+    string(REPLACE ";" "\\;" osx_architectures "${osx_architectures}")
+    list(APPEND configure_args
+        "-DCMAKE_OSX_ARCHITECTURES=${osx_architectures}"
+        "-DCMAKE_OSX_DEPLOYMENT_TARGET=${osx_deployment_target}"
+        "-DCMAKE_OSX_SYSROOT=${osx_sysroot}")
+endif()
+
+set(nexora_arg "-DNexora_DIR=${scratch}/relocated/${package_dir}")
+set(source_arg "-DCMAKE_C_COMPILER=${c_compiler}")
+execute_process(COMMAND "${CMAKE_COMMAND}" -S "${consumer_copy}" -B "${scratch}/consumer"
+    ${configure_args} "${nexora_arg}" "-DKokkos_DIR=${kokkos_dir}" COMMAND_ERROR_IS_FATAL ANY)
 execute_process(COMMAND "${CMAKE_COMMAND}" --build "${scratch}/consumer" ${config_args}
     COMMAND_ERROR_IS_FATAL ANY)
 execute_process(COMMAND "${CMAKE_CTEST_COMMAND}" --test-dir "${scratch}/consumer"
-    -C "${config}" --output-on-failure COMMAND_ERROR_IS_FATAL ANY)
+    -C "${config}" --verbose COMMAND_ERROR_IS_FATAL ANY)
+
+function(expect_configure_rejection case source expected_diagnostic)
+    execute_process(COMMAND "${CMAKE_COMMAND}" -S "${source}" -B "${scratch}/negative/${case}"
+        ${configure_args} ${ARGN}
+        RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+    string(FIND "${output}\n${error}" "${expected_diagnostic}" diagnostic_position)
+    if(result STREQUAL "0" OR diagnostic_position EQUAL -1)
+        message(FATAL_ERROR "${case} did not reject the configuration as expected.\n${output}\n${error}")
+    endif()
+    message(STATUS "${case} rejected with '${expected_diagnostic}'")
+endfunction()
+
+function(expect_source_and_consumer_rejection case expected_diagnostic)
+    expect_configure_rejection("source-${case}" "${project_source}" "${expected_diagnostic}"
+        "${source_arg}" ${ARGN})
+    expect_configure_rejection("consumer-${case}" "${consumer_copy}" "${expected_diagnostic}"
+        "${nexora_arg}" ${ARGN})
+endfunction()
+
+# Restrict package discovery to this scratch root so a system Kokkos cannot mask a failure.
+set(fixture_root "${scratch}/negative/packages")
+set(isolate_kokkos "-DCMAKE_FIND_ROOT_PATH=${fixture_root}" "-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY")
+expect_source_and_consumer_rejection(missing-kokkos
+    "Could not find a package configuration file provided by \"Kokkos\""
+    ${isolate_kokkos} "-DKokkos_DIR=${fixture_root}/missing")
+
+set(wrong_version_dir "${fixture_root}/wrong-version")
+file(WRITE "${wrong_version_dir}/KokkosConfig.cmake" "# Mock Kokkos package for version rejection.\n")
+write_basic_package_version_file("${wrong_version_dir}/KokkosConfigVersion.cmake"
+    VERSION 5.2.1 COMPATIBILITY ExactVersion ARCH_INDEPENDENT)
+expect_source_and_consumer_rejection(wrong-kokkos-version "version: 5.2.1"
+    ${isolate_kokkos} "-DKokkos_DIR=${wrong_version_dir}")
+
+expect_configure_rejection(source-legacy-gpu-backend "${project_source}" "NEXORA_GPU_BACKEND was removed"
+    "${source_arg}" "-DKokkos_DIR=${kokkos_dir}" "-DNEXORA_GPU_BACKEND=NONE")
+expect_source_and_consumer_rejection(cxx17 "Nexora requires C++20"
+    "-DKokkos_DIR=${kokkos_dir}" "-DCMAKE_CXX_STANDARD=17")
+
+function(expect_incompatible_kokkos case expected_diagnostic incompatible_setting)
+    set(mock_dir "${fixture_root}/${case}")
+    file(WRITE "${mock_dir}/KokkosConfig.cmake" [=[
+# Mock same-version Kokkos metadata. The last setting is deliberately incompatible.
+set(Kokkos_DEVICES SERIAL)
+set(Kokkos_CXX_STANDARD 20)
+set(Kokkos_COMPILE_LANGUAGE CXX)
+set(Kokkos_CXX_COMPILER_ID "${CMAKE_CXX_COMPILER_ID}")
+set(Kokkos_CXX_COMPILER_VERSION "${CMAKE_CXX_COMPILER_VERSION}")
+add_library(Kokkos::kokkos INTERFACE IMPORTED)
+]=] "${incompatible_setting}\n")
+    write_basic_package_version_file("${mock_dir}/KokkosConfigVersion.cmake"
+        VERSION 5.2.2 COMPATIBILITY ExactVersion ARCH_INDEPENDENT)
+    expect_source_and_consumer_rejection("${case}" "${expected_diagnostic}"
+        ${isolate_kokkos} "-DKokkos_DIR=${mock_dir}")
+endfunction()
+
+expect_incompatible_kokkos(unsupported-kokkos-devices "requires a Serial-only Kokkos package"
+    "set(Kokkos_DEVICES OPENMP SERIAL)")
+expect_incompatible_kokkos(wrong-kokkos-standard "requires Kokkos C++20/CXX"
+    "set(Kokkos_CXX_STANDARD 23)")
+expect_incompatible_kokkos(wrong-kokkos-compiler "requires the Kokkos compiler identity/version"
+    "set(Kokkos_CXX_COMPILER_VERSION 0.0.1)")

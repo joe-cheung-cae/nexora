@@ -1,23 +1,30 @@
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.25.2)
+if(DEFINED CMAKE_CXX_STANDARD AND NOT CMAKE_CXX_STANDARD STREQUAL "20")
+    message(FATAL_ERROR "Nexora requires C++20, matching the provisioned Kokkos package.")
+endif()
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 project(Nexora VERSION 0.1.0 LANGUAGES C CXX)
 
 include(CTest)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-set(NEXORA_GPU_BACKEND "NONE" CACHE STRING "GPU runtime for the build (NONE or CUDA)")
-set_property(CACHE NEXORA_GPU_BACKEND PROPERTY STRINGS NONE CUDA)
 option(NEXORA_ENABLE_MPI "Build the MPI C API smoke probe" OFF)
 
-if(NEXORA_GPU_BACKEND STREQUAL "CUDA")
-    if(NOT CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES MATCHES "(^|;)native(;|$)")
-        message(FATAL_ERROR "Set CMAKE_CUDA_ARCHITECTURES to an explicit target, e.g. 80.")
-    endif()
-    enable_language(CUDA)
-    find_package(CUDAToolkit REQUIRED)
-elseif(NOT NEXORA_GPU_BACKEND STREQUAL "NONE")
-    message(FATAL_ERROR "Unsupported NEXORA_GPU_BACKEND='${NEXORA_GPU_BACKEND}'. Select NONE or CUDA.")
+if(DEFINED NEXORA_GPU_BACKEND)
+    message(FATAL_ERROR "NEXORA_GPU_BACKEND was removed; select a verified local Kokkos package with Kokkos_DIR. This slice supports Serial only.")
 endif()
+if(DEFINED CMAKE_CUDA_ARCHITECTURES)
+    message(FATAL_ERROR "This CPU slice does not accept CMAKE_CUDA_ARCHITECTURES; GPU profiles require separate implementation and validation.")
+endif()
+
+# Dependency acquisition is a separate preparation step. Never download or fall back.
+set(Kokkos_LAUNCH_COMPILER OFF)
+find_package(Kokkos 5.2.2 EXACT CONFIG REQUIRED)
+include(cmake/NexoraKokkos.cmake)
+nexora_validate_kokkos()
 
 if(NEXORA_ENABLE_MPI)
     include(cmake/NexoraMPI.cmake)
@@ -29,7 +36,7 @@ configure_file(cmake/Version.hpp.in "${NEXORA_GENERATED_INCLUDE_DIR}/nexora/core
 add_library(nexora_build_options INTERFACE)
 add_library(nexora::build_options ALIAS nexora_build_options)
 set_target_properties(nexora_build_options PROPERTIES EXPORT_NAME build_options)
-target_compile_features(nexora_build_options INTERFACE cxx_std_17)
+target_compile_features(nexora_build_options INTERFACE cxx_std_20)
 
 add_subdirectory(src/core)
 add_subdirectory(src/exec)
@@ -49,6 +56,7 @@ if(BUILD_TESTING)
     add_subdirectory(tests/exec)
     add_subdirectory(tests/data)
     add_subdirectory(tests/simulation)
+    add_subdirectory(tests/kokkos)
     add_subdirectory(tests/package)
 endif()
 
@@ -76,6 +84,7 @@ install(EXPORT NexoraTargets NAMESPACE nexora:: DESTINATION "${nexora_package_di
 install(FILES
     "${PROJECT_BINARY_DIR}/NexoraConfig.cmake"
     "${PROJECT_BINARY_DIR}/NexoraConfigVersion.cmake"
+    "${PROJECT_SOURCE_DIR}/cmake/NexoraKokkos.cmake"
     DESTINATION "${nexora_package_dir}")
 
 include(cmake/NexoraTargetGraph.cmake)

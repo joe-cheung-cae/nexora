@@ -1,4 +1,5 @@
 #include <nexora/core/Version.hpp>
+#include <Kokkos_Core.hpp>
 
 #include "BuildInfo.hpp"
 
@@ -38,7 +39,10 @@ void inspect_build() {
               << "cxx_language=" << cxx_language << '\n'
               << "cmake_version=" << cmake_version << '\n'
               << "configuration=" << NEXORA_CONFIGURATION << '\n'
-              << "cpu_execution=on\n"
+              << "cpu_execution=kokkos_serial\n"
+              << "kokkos_version=" << KOKKOS_VERSION_MAJOR << '.' << KOKKOS_VERSION_MINOR
+              << '.' << KOKKOS_VERSION_PATCH << '\n'
+              << "kokkos_execution_space=" << Kokkos::DefaultExecutionSpace::name() << '\n'
               << "cuda_smoke=" << (NEXORA_HAS_CUDA ? "on" : "off") << '\n'
               << "mpi_smoke=" << (NEXORA_HAS_MPI ? "on" : "off") << '\n';
 #if NEXORA_HAS_CUDA
