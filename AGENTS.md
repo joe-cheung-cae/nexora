@@ -1,28 +1,19 @@
 # Repository guidance
 
-## Names
+## Task execution
 
-- Product/project: **Nexora**.
-- CMake package/project: **Nexora**. Exported targets use `nexora::`.
-- CLI executable: **`nexora`**.
-- Language: C++17.
-- C++ namespaces: **`nexora::`**.
-- CMake options and preprocessor configuration macros: **`NEXORA_*`**.
+- Prioritize completing and verifying the requested task. Keep planning proportional to complexity, make the smallest complete change, and add abstractions, dependencies, or refactoring only when the task requires them.
+- Reuse existing algorithms, data structures, APIs, and utilities when they meet requirements and preserve correctness. Extend them when appropriate.
+- For work with separable subtasks, define their scope and dependencies, then delegate them to subagents using different models matched to complexity and required capabilities. Run independent subtasks in parallel. The lead agent integrates and verifies the result.
 
-Do not introduce the former CFDX name into new public interfaces.
+## Project constraints
 
-## Engineering rules
-
-- Preserve the dependency direction in `docs/architecture/overview.md`; the dependency checker is authoritative for target links and public header includes.
-- Make the smallest focused change that solves the task. Do not change numerical formulas, defaults, tolerances, or physical conventions unless explicitly requested and backed by validation evidence.
-- Do not add automatic downloads or mandatory third-party dependencies. Keep optional dependencies behind explicit options and describe them.
-- Public headers must not expose CUDA or MPI implementation types. Keep platform-specific details in optional implementation targets.
-- Adding or changing state requires considering ownership, communication, and checkpoint implications; note when those facilities are not implemented yet.
-- Add tests for new modules and behavior. Numerical changes require correctness evidence. Performance changes require correctness evidence and a reproducible benchmark.
-- Unsupported features must fail clearly; do not silently substitute a different backend, algorithm, or capability.
-- Do not claim a configuration is validated merely because it compiles. Record actual test hardware and execution where relevant.
-- Preserve third-party and legacy provenance. Do not copy code of unclear origin into the project.
+- Use **Nexora** for the product and CMake project/package, `nexora` for the CLI and C++ namespace, `nexora::` for exported targets, and `NEXORA_*` for build options and configuration macros.
+- Follow the [architecture dependency rules](docs/architecture/overview.md) and check target links and includes with `tools/check_dependencies.py`. Keep CUDA and MPI types private to optional implementation targets.
+- When changing state, account for ownership, communication, and checkpointing. Document any gaps.
+- Change numerical formulas, defaults, tolerances, or physical conventions only on explicit request and with correctness evidence. Reject unsupported capabilities explicitly.
 
 ## Build and validation
 
-The required baseline is CPU C++17 / CMake 3.24+ / Ninja. Keep the CPU-only configure path free of CUDA, MPI, and network requirements. Run the relevant configure, build, and CTest preset after changes when verification is requested or needed to substantiate a claim.
+- Keep the default CPU-only C++17 / CMake 3.24+ / Ninja build offline and free of third-party dependencies. Keep optional dependencies opt-in and documented.
+- Use [CONTRIBUTING.md](CONTRIBUTING.md) for presets, tests, benchmarks, and dependency provenance. Run the relevant checks for the change and substantiate runtime support with execution results and relevant hardware details.
