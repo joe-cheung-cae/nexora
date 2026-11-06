@@ -14,7 +14,8 @@ execute_process(COMMAND "${CMAKE_COMMAND}" --install "${project_build}"
 file(RENAME "${scratch}/installed" "${scratch}/relocated")
 
 set(consumer_copy "${scratch}/consumer-source")
-file(COPY "${consumer_source}/CMakeLists.txt" "${consumer_source}/main.cpp" "${kokkos_test_source}"
+file(COPY "${consumer_source}/CMakeLists.txt" "${consumer_source}/main.cpp"
+    "${consumer_source}/time.cpp" "${kokkos_test_source}"
     DESTINATION "${consumer_copy}")
 
 set(generator_args -G "${generator}")

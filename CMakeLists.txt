@@ -59,6 +59,7 @@ if(BUILD_TESTING)
     add_subdirectory(tests/data)
     add_subdirectory(tests/simulation)
     add_subdirectory(tests/kokkos)
+    add_subdirectory(tests/reference)
     add_subdirectory(tests/package)
 endif()
 
