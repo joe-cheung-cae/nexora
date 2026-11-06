@@ -1,6 +1,6 @@
 # Nexora 当前架构入口
 
-修订时间：`2026-11-06T15:58:40+08:00`。**这是唯一有效的架构入口。Kokkos 单一路线已由维护者确定；以下目标尚未实现，源码、构建和功能迁移须另获明确批准。**
+修订时间：`2026-11-06T15:58:40+08:00`。**这是唯一有效的架构入口。首个受限 Kokkos Serial CPU 切片已获授权并实现；完整 Phase 1 及后续迁移仍须另获批准。**
 
 ## 1. 决策与文档效力
 
@@ -18,15 +18,17 @@ Nexora 自有数值计算和存储统一使用 Kokkos，包括默认 CPU、可�
 | [Checkpoint 与重启](checkpoint-restart.md) | R0 的同配置范围、兼容检查/拒绝/验收；R1–R3 延期边界 |
 | [构建与依赖政策](build-and-validation.md) | 版本锁定、工具链、离线供给、安装消费与配置能力 |
 
-本轮文件清单与一致性检查见[文档审查记录](documentation-audit.md)，该记录不新增架构规范。
+先前设计文档的文件清单与一致性检查见[文档审查记录](documentation-audit.md)，该记录不新增架构规范；当前 CPU 实施与验证见 [CPU 切片验证](kokkos-cpu-slice-validation.md)。
 
 [ADR-001](../adr/ADR-001-module-boundaries.md)、[ADR-002](../adr/ADR-002-language-and-backend-baseline.md) 已被替代，只解释 bootstrap 源码。[归档 v1.2](../archive/CFDX_Multimethod_HPC_Architecture_Plan_v1.2_NVIDIA_Integration.md) 全篇为历史材料，其中的目录树、配置、代码、阶段和验收不是当前要求。历史中的物理问题可作为调研线索，须经现行计划重新采纳。[ADR-014](../adr/ADR-014-license-and-provenance.md) 的项目许可证待定与来源审查继续有效。
 
 ## 2. 当前实现（源码事实）
 
-基线提交为 `3495e7e80d9439a6af0e00be1d444f52d6fc8552`。当前 CMake 仍为 C++17 / CMake 3.24+，CPU 无第三方依赖；这只是尚未迁移的现状，不能作为新增实现的政策。现有 `Buffer` 是 host 字节分配；`ExecContext` 同步调用；`CompletionToken` 只保存 `Status`；`FieldView` 是非拥有 host view。`ParticipantIF` 和 `Simulation` 只支持一个同步参与者窗口。没有 Kokkos、真实 SPH/FVM/FEM/LBM/DEM/MBD solver、MPI halo、持久 checkpoint 或通用 GPU execution 实现。
+首个切片要求本地 exact Kokkos 5.2.2 Serial-only、C++20 与 CMake 3.25.2+。`data → Kokkos::kokkos` 公开传递依赖；typed View 测试和只链接 `nexora::data` 的独立安装消费者执行 Kokkos 路径。CLI 报告 Kokkos 构建元数据。实际检查见 [CPU 切片验证](kokkos-cpu-slice-validation.md)。旧 `Buffer`、`ExecContext`、`FieldView`、control 和 exec 导出暂时保留，旧消费测试独立保留；这不是最终目标图。
 
-当前 CUDA/MPI 仅是 CLI smoke 探针。`cpu_execution`、`cuda_smoke`、`mpi_smoke` 是当前 build metadata，不代表目标 Kokkos 或方法支持。已有测试、CI 定义和旧文档中的历史测试记录不能被解释为目标通过。本轮不声称执行了目标 CPU/CUDA/HIP 验收。
+任何 `NEXORA_GPU_BACKEND` 值均被拒绝；旧 native CUDA 源文件休眠。OpenMP、CUDA/HIP 尚未实现；可选 MPI smoke 保留但本切片未验证。没有真实 SPH/FVM/FEM/LBM/DEM/MBD solver、MPI halo 或持久 checkpoint。现有 CI 未配置 Kokkos 依赖，不能作为本切片证据。
+
+下图为原 bootstrap 图，现行 transitional 图还包括 `data → Kokkos::kokkos` 和 CLI 的 Kokkos 边：
 
 ```mermaid
 flowchart TD
@@ -41,7 +43,7 @@ flowchart TD
   C --> B["build_options"]
 ```
 
-实际源文件与 target 的完整证据见[源码盘点](migration-roadmap.md#source-inventory)。当前 `tools/check_dependencies.py` 只检查这套 bootstrap 边界；其通过不证明下述目标图已实现。
+实际源文件与 target 的完整证据见[源码盘点](migration-roadmap.md#source-inventory)。当前 `tools/check_dependencies.py` 检查过渡图，其通过不证明下述目标图已实现。
 
 ## 3. 批准后模块图
 
@@ -123,7 +125,7 @@ flowchart TD
 - P2 的 concrete participant 按用途链接 `parallel_api`、`io_checkpoint`；应用注入 `parallel_mpi`。外部 SDK 和 MPI 原生头保持私有；静态库的传递链接需求仍必须由安装配置解析，不能用 `PRIVATE` 掩盖真实依赖。
 - 图中 CLI 的 optional smoke 边是私有诊断边 `nexora → MPI::MPI_C`；该探针保留，但不是 parallel_mpi 数值支持证据。旧 CUDA native 探针改用 Kokkos，CLI 不保留直接 CUDA runtime 链接；原生 stream 测试放在私有 interop target。
 - Kokkos CUDA 构建自身的公开编译/链接要求可经 `Kokkos::kokkos` 传递。禁止的是 Nexora 公共契约暴露原生 `cudaStream_t`/`hipStream_t`/`MPI_Comm`，不是假装设备工具链没有依赖。
-- 更新检查器时同时核对 target 边、header 所属子集、可选节点、源文件归属和安装导出；反例必须失败。当前检查器、CMake 和 CI 本轮不改。
+- 完整迁移时同时核对 target 边、header 所属子集、可选节点、源文件归属和安装导出；反例必须失败。当前切片已更新 CMake、Kokkos 直接边及头边界检查和包测试；完整 schema 拆分与 CI 供给仍待实施。
 
 ## 5. 交付与支持口径
 
@@ -135,4 +137,4 @@ Phase 1 直接建立 Kokkos 基础及 SPH/FVM 代表性结构切片；完整方�
 
 首个 CUDA 构建按 [nvcc_wrapper/CXX 与安装消费契约](build-and-validation.md#cuda-build-contract)：锁定 Kokkos 的 CUDA+Serial、C++20、单一 GPU 架构，匹配的 wrapper/工具链用于 Nexora 和下游数值消费者；删除旧 `NEXORA_GPU_BACKEND`，从已验证的安装包推导构建组合。尚无 runner 配置或构建执行证据。
 
-开始实现需要维护者批准 [Phase 1 的具体变更包](phase-1-design-review.md#approval)。Kokkos 单一路线本身不再列为待决项。
+超出已授权受限 CPU 切片的实现需要维护者批准 [Phase 1 的具体变更包](phase-1-design-review.md#approval)。Kokkos 单一路线本身不再列为待决项。

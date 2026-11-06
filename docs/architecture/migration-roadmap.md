@@ -1,6 +1,6 @@
 # Kokkos 迁移路线与历史计划对照
 
-> **目标路线已定，代码迁移待实施。** 源码盘点于 `2026-11-06T14:52:47+08:00`，任务对照复核于 `2026-11-06T15:46:36+08:00`。当前实现仍为原有 CPU 骨架及可选 CUDA/MPI CLI 探针。本次文档修订未改动源码、构建脚本或测试，也未取得 Kokkos 执行证据。
+> **首个受限 Serial CPU 切片已实现，完整迁移仍待批准。** 以下盘点以 `2026-11-06T14:52:47+08:00` 的 bootstrap 为基线；表中旧类型去向仍是目标，当前差异见本段和 [CPU 切片验证](kokkos-cpu-slice-validation.md)。当前 `data` 公开传递 Kokkos，CLI 报告 Kokkos 元数据，新安装消费者只链接 `nexora::data`；旧 exec/data/control 源、导出及独立旧消费者暂留。OpenMP/GPU 未实现；旧 CUDA 源休眠，旧 GPU 选项任意值均拒绝；可选 MPI smoke 未验证。
 
 当前架构入口为 [架构总览](overview.md)，执行、字段和存储契约见 [Kokkos 设计](kokkos-design.md)，首阶段工作和验收见 [Phase 1 设计](phase-1-design-review.md)。下文用 `P1-01`–`P1-11` 表示首期计划任务。远期机械与外部集成的 50 个历史 ID 见[后续任务对照](follow-on-task-plan.md)。共享值类型 `TimeInterval` 计划在 P1-03 移至 `core/Time.hpp`，保留原类型与 duration 语义；`TimeConstraint` 及 `TrialReport` 保留 participant 职责，MBD engine 使用独立报告，由 participant 转换。
 
@@ -13,7 +13,7 @@
 | `ExecContext` / `CpuContext` | 已实现。`CpuContext` 是别名。调用方线程先逐个检查依赖状态，再同步调用函数。唯一编译单元 `CpuExecutor.cpp` 实现依赖检查。 [头文件](../../include/nexora/exec/ExecContext.hpp) [实现](../../src/exec/cpu/CpuExecutor.cpp) | **移除**。方法以具体 Kokkos execution-space 实例提交类型化算子；前置失败由调用侧 `Status`/`Result` 短路，完成顺序按设计规定的实例与 fence 建立。`P1-05/06` 验证，`P1-11` 切换调用者。 |
 | `CompletionToken` / `Event` | 已实现。`Event` 是别名，`wait()` 只返回已经保存的 `Status`。类型不记录设备事件、异步任务或保活引用。 [源码](../../include/nexora/exec/CompletionToken.hpp) | **移除**。同步公开边界继续返回 `Status`/`Result`；异步的完成与所有权分别由 Kokkos 同步点和明确的 owner/lease 管理。`P1-04/05/06` 验证，`P1-11` 删除。 |
 | `AllocationRef` / `BorrowedBuffer` / 旧 allocation lease | 仅见于旧架构或 Phase 1 草案，源码中没有这些分配或租约类型。 | **取消通用分配引用和字节租约**。普通存储使用 managed View 的持有关系。确有外部借用时，在边界保留外部 owner，满足写入完成、消费完成和释放顺序，再构造受限的 unmanaged View。由 `P1-04` 验证受控借用；真实外部库按集成单独验收。 |
-| `ExecutionQueue` / `ExecutionEvent`，旧 `BackendKind` / `DeviceId` | 仅为旧设计提案。可选 CLI 探针中的私有 CUDA stream/event 属于独立诊断。 [探针](../../apps/nexora/CudaSmoke.cu) | **取消抽象**。方法使用具体 Kokkos execution space；配置保留构建与设备能力语义。同一实例顺序、跨实例 fence、主机可见性和外部通信交接分别按 Kokkos 设计执行，由 `P1-04/05` 验证。 |
+| `ExecutionQueue` / `ExecutionEvent`，旧 `BackendKind` / `DeviceId` | 仅为旧设计提案。旧 native CUDA 源中的 stream/event 现已休眠。 [探针](../../apps/nexora/CudaSmoke.cu) | **取消抽象**。方法使用具体 Kokkos execution space；配置保留构建与设备能力语义。同一实例顺序、跨实例 fence、主机可见性和外部通信交接分别按 Kokkos 设计执行，由 `P1-04/05` 验证。 |
 | `MemorySpace` | 已实现的 `host/device/unified` 枚举。`FieldDescriptor` 默认记录 `host`。枚举不控制分配或可访问性。 [源码](../../include/nexora/exec/MemorySpace.hpp) | **迁移并移除旧枚举**。实际 memory space、访问限制、layout、extent 和 stride 由 View/具体绑定决定。端口保留独立的领域元数据。完成描述符和消费面迁移后移除 exec include，见 `P1-03/11`。 |
 | `FieldView<T>` | 已实现的连续借用 host view，持有 `ArrayView<T>`、分量数和 `LayoutVersion`，校验形状；当前只有 data 单测使用。 [源码](../../include/nexora/data/FieldView.hpp) [测试](../../tests/data/data_tests.cpp) | **迁移用途**。求解字段使用带领域语义的 typed View 绑定；显式 host 检查或导出使用可访问的 host View/镜像。用形状和版本回归覆盖旧测试意图后，在 `P1-11` 清理旧头。 |
 | `KernelView<T>` / `FieldKernelView<T>` | `KernelView<T>` 已在 `FieldView.hpp` 定义，仅含指针、大小和步幅。未见调用点。`FieldKernelView<T>` 仅为旧草案提案。 [源码](../../include/nexora/data/FieldView.hpp) | **删除前者，取消后者**。内核直接捕获类型化的 View 或 subview，不从通用指针描述重造 Kokkos 视图。由 `P1-03/05/11` 完成。 |
@@ -21,23 +21,23 @@
 | `FieldDescriptor` / `FieldRegistry` | 已实现。描述符验证名称、单位非空、分量数、有效时间区间及 association；另有 layout、stride、设备和各类版本字段。Registry 验证后按 `FieldId` 保存描述符，拒绝重复 ID。 [描述符](../../include/nexora/data/FieldDescriptor.hpp) [注册表](../../include/nexora/data/FieldRegistry.hpp) | **保留语义元数据和注册表职责**。拆开物理语义、版本与实际 View 布局；不从字符串或旧枚举推断真实存储。字段及状态 owner 仍是方法或参与者。`P1-03` 移除 exec 依赖；跨端口物理兼容见 `CPL-001`。 |
 | `ArrayView<T>`，ID/版本、`Status`/`Result`、checked cast、`Vec`/`Tensor` | 已实现的 core 基础。`ArrayView` 是不持有 owner 的 host 范围。 [源码目录](../../include/nexora/core/) | **保留 host/API 职责**。数值数组与内核参数迁入 Kokkos。单独审查设备可调用类型，保持 core 对后端无依赖。 |
 | `ParticipantIF`、`PortDescriptor`、`TimeConstraint`、`Simulation` | 已实现同步、单参与者生命周期。调用方持有参与者；参与者实现 accepted checkpoint 和恢复；Simulation 持有接受时钟，校验端口与时间、调用试算和提交，按已有契约尝试恢复。现有测试采用 dummy 参与者。 [接口](../../include/nexora/participant/) [实现](../../src/simulation/Simulation.cpp) [测试](../../tests/simulation/simulation_tests.cpp) | **保留并接真实参考状态**。`P1-06` 验证以 Kokkos 存储区分 accepted/trial、恢复与已接受输出。多参与者协调、域分解与持久化重启各自留给后续任务。 |
-| typed operator set、`reference*`、provider 选择 | 当前无 reference 方法、求解方法、provider 注册表或计算 DSL。CLI 只处理帮助、版本、构建信息和 CUDA/MPI 诊断。 [入口](../../apps/nexora/main.cpp) | **保留类型化算子契约，取消 provider 设施**。`P1-05/06/07/08/09` 接同一算子源码、参考参与者、代表性 SPH/FVM 阶段与 CLI 装配。CPU 与可选 GPU 是该算子的 Kokkos 实例。 |
+| typed operator set、`reference*`、provider 选择 | 当前无 reference 方法、求解方法、provider 注册表或计算 DSL。CLI 处理帮助、版本、Kokkos 构建信息及可选 MPI 诊断。 [入口](../../apps/nexora/main.cpp) | **保留类型化算子契约，取消 provider 设施**。`P1-05/06/07/08/09` 接同一算子源码、参考参与者、代表性 SPH/FVM 阶段与 CLI 装配。CPU 与可选 GPU 是该算子的 Kokkos 实例。 |
 
 <a id="targets"></a>
 ## 模块、构建目标和检查器
 
-箭头从目标指向当前实际的直接链接依赖。内部 target 为 `nexora_*`，安装导出的名字为 `nexora::*`。实际直连与 checker 允许的边分别核对。 [顶层 CMake](../../CMakeLists.txt) [检查器](../../tools/check_dependencies.py)
+箭头从目标指向直接链接依赖；表格以切片前 bootstrap 为基线，以下列出的切片差异覆盖表中旧图。内部 target 为 `nexora_*`，安装导出的名字为 `nexora::*`。实际直连与 checker 允许的边分别核对。 [顶层 CMake](../../CMakeLists.txt) [检查器](../../tools/check_dependencies.py)
 
 | 当前模块或 target | 当前实际直连及用途 | 迁移去向 |
 |---|---|---|
 | `build_options`、`core` | `build_options` 无直连，`core → build_options`。两者均为 INTERFACE，负责语言特性、公共与生成头文件。 [core CMake](../../src/core/CMakeLists.txt) | 保留。Kokkos 依赖落在实际消费 View/执行 API 的边界，不加入 core 公共依赖。语言与工具链按选定 Kokkos 版本确定。 |
 | `exec_api`、`exec_cpu` | INTERFACE `exec_api → core`；STATIC `exec_cpu → exec_api`。两者均已导出，`exec_cpu` 只编译 `CpuExecutor.cpp`。 [exec CMake](../../src/exec/CMakeLists.txt) | `P1-11` 一并删除源码、头、目标与旧包导出。目标图中不保留旧 exec 别名或第二条 CPU 执行路径。 |
-| `data` | INTERFACE `data → core, exec_api`；现有字段和注册表均为头文件实现。 [data CMake](../../src/data/CMakeLists.txt) | 拆去 `exec_api` 边。新增 `data_schema → core` 承载纯元数据；`data → data_schema, Kokkos::kokkos` 承载 typed 字段绑定，并声明公开传递依赖。 |
+| `data` | INTERFACE `data → core, exec_api, Kokkos::kokkos`；旧字段和注册表仍为头文件实现。 [data CMake](../../src/data/CMakeLists.txt) | 拆去 `exec_api` 边。新增 `data_schema → core` 承载纯元数据；`data → data_schema, Kokkos::kokkos` 承载 typed 字段绑定，并声明公开传递依赖。 |
 | `participant_api`、`simulation` | INTERFACE `participant_api → data`；STATIC `simulation → participant_api`。两者均已导出。 [simulation CMake](../../src/simulation/CMakeLists.txt) | 保留生命周期边界，`participant_api` 依赖改为 `data_schema` 与实际使用的 core，`simulation` 保留指向 `participant_api` 的直接边。Kokkos 状态及算子实例放进实际方法/参与者实现。 |
-| `nexora` CLI | `nexora → core`，可选私有 `CUDA::cudart`、`MPI::MPI_C` 只供原探针。当前开关为 `NEXORA_GPU_BACKEND=NONE/CUDA` 与 `NEXORA_ENABLE_MPI`。MPI C API 从 C++ 链接的能力在配置期检查。 [CLI CMake](../../apps/nexora/CMakeLists.txt) [MPI 检查](../../cmake/NexoraMPI.cmake) | 保留 CLI 装配入口及诊断的可验证语义。CUDA 探针迁成 Kokkos 设备诊断，移除旧 `CudaSmoke.cu` 的 native kernel、分配、stream/event 和直接 runtime 链接。可选 MPI 探针仍是独立诊断，真实通信由后续专项验收。 |
+| `nexora` CLI | `nexora` 链接 core 和 Kokkos，可选私有 `MPI::MPI_C` 供保留探针。`NEXORA_GPU_BACKEND` 任意值均被拒绝；`NEXORA_ENABLE_MPI` 仍可选。MPI C API 从 C++ 链接的能力在配置期检查。 [CLI CMake](../../apps/nexora/CMakeLists.txt) [MPI 检查](../../cmake/NexoraMPI.cmake) | 保留 CLI 装配入口及诊断的可验证语义。CUDA 探针迁成 Kokkos 设备诊断，移除旧 `CudaSmoke.cu` 的 native kernel、分配、stream/event 和直接 runtime 链接。可选 MPI 探针仍是独立诊断，真实通信由后续专项验收。 |
 | 原草案 `exec_cuda`、`reference_contract`、`reference_cpu`、`reference_cuda` | 均无 CMake 声明或实现。 | 取消 backend 专属执行目标。参考参与者与算子签名继续按职责组织，同一算子模板实例化所选 Kokkos execution space；内部目标只随实际使用者增加。 |
-| 测试和安装消费 | `nexora_exec_tests → exec_cpu`，`nexora_data_tests → data`。`nexora_install_consumer` 另起项目，直连已安装的 `nexora::simulation` 和 `nexora::exec_cpu`，实际调用 `Buffer`/`CpuContext`。 [exec 测试](../../tests/exec/CMakeLists.txt) [安装消费者](../../tests/package/consumer/) | 原测试验证意图迁到 Kokkos 执行、字段与生命周期测试；独立消费项目走新导出目标，实际执行 Kokkos 路径。更新包依赖解析并做干净安装与独立消费验证。 |
-| CMake 目标图、依赖检查与 CI | 配置后生成直接边 JSON。checker 维护目标/包含白名单，要求旧 exec 目标存在，检查越层 include；当前按整个 CLI 目录放行 CUDA/MPI 头。已有 CPU CI 及两 rank MPI smoke CI；CUDA CTest 可在无设备时跳过。 [目标图](../../cmake/NexoraTargetGraph.cmake) [检查器](../../tools/check_dependencies.py) [CI](../../.github/workflows/ci.yml) | `P1-02/11` 同步更新目标图、安装导出、配置矩阵及 checker。检查 Kokkos 实际消费边、可选目标和平台源文件归属。保留 MPI/CUDA 平台头隔离；编译或跳过分别记录，实机执行单独验收。 |
+| 测试和安装消费 | `nexora_exec_tests → exec_cpu`，`nexora_data_tests → data`。独立新消费者仅链接已安装的 `nexora::data` 并执行 Kokkos 路径；旧消费者另行保留并调用 `Buffer`/`CpuContext`。 [exec 测试](../../tests/exec/CMakeLists.txt) [安装消费者](../../tests/package/consumer/) | 原测试验证意图迁到 Kokkos 执行、字段与生命周期测试；独立消费项目走新导出目标，实际执行 Kokkos 路径。更新包依赖解析并做干净安装与独立消费验证。 |
+| CMake 目标图、依赖检查与 CI | 配置后生成直接边 JSON。checker 维护目标/包含白名单，要求旧 exec 目标存在，检查越层 include；当前按整个 CLI 目录放行 CUDA/MPI 头。已有 CI 尚未提供 Kokkos，不能作为当前切片的执行证据；MPI smoke 未验证。 [目标图](../../cmake/NexoraTargetGraph.cmake) [检查器](../../tools/check_dependencies.py) [CI](../../.github/workflows/ci.yml) | `P1-02/11` 同步更新目标图、安装导出、配置矩阵及 checker。检查 Kokkos 实际消费边、可选目标和平台源文件归属。保留 MPI/CUDA 平台头隔离；编译或跳过分别记录，实机执行单独验收。 |
 
 <a id="cutover"></a>
 ## Phase 1 顺序与旧层删除条件

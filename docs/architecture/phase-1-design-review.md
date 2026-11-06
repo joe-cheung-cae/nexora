@@ -1,12 +1,12 @@
 # Nexora Phase 1：Kokkos 基础与代表性切片评审
 
-修订时间：`2026-11-06T15:58:40+08:00`。**本稿取代原 Phase 1 多 backend 方案。Kokkos 单一路线已确定；本稿是待实施设计，不是已实现能力。正式源码、CMake、CI、测试代码和功能开发须另获明确批准。**
+修订时间：`2026-11-06T15:58:40+08:00`。**本稿取代原 Phase 1 多 backend 方案。Kokkos 单一路线已确定；首个受限 Serial CPU 切片已获授权并实现；完整 Phase 1 及其余源码、CMake、CI、测试和功能迁移仍须另获明确批准。**
 
 唯一架构入口：[overview](overview.md)。关键类型和生命周期：[kokkos-design](kokkos-design.md)。当前源码、旧类型/target 处置及归档逐项映射：[migration-roadmap](migration-roadmap.md)。依赖版本和离线过程：[build-and-validation](build-and-validation.md)。
 
 ## 1. 当前基础与 Phase 1 出口
 
-当前提交 `3495e7e80d9439a6af0e00be1d444f52d6fc8552` 实现了 host Buffer、同步 ExecContext、字段元数据、一个同步参与者的窗口控制、CLI 诊断、安装消费与依赖检查。没有 Kokkos、真实方法求解器、通用 GPU executor、分布式 halo 或持久 checkpoint。已有 dummy 参与者测试不证明实际数组的恢复；原评审稿中的历史 CPU/设备测试描述不能作为本轮目标证据。
+当前切片引入 exact Kokkos Serial 包、typed View 执行测试和经 `nexora::data` 的安装消费；旧 host Buffer、同步 ExecContext、字段元数据及单参与者控制仍暂留。没有真实方法求解器、通用 GPU executor、分布式 halo 或持久 checkpoint。实际证据见 [CPU 切片验证](kokkos-cpu-slice-validation.md)。已有 dummy 参与者测试不证明实际数组的恢复；原评审稿中的历史 CPU/设备测试描述不能作为本轮目标证据。
 
 P1 直接交付 Kokkos 默认 CPU 和可选 CUDA 的**同一算子源码**、typed 字段、权限/外部 owner、accepted/trial 与恢复，以及 SPH 非规则邻域、FVM 面通量/单元累积两个代表性结构切片。简单标量 reference 保留用于基础生命周期测试。P1 不关闭完整 SPH/DEM 或 FVM solver 的物理验证，不提前宣称 FEM/LBM/MBD 已可用。
 
@@ -14,7 +14,7 @@ P1 直接交付 Kokkos 默认 CPU 和可选 CUDA 的**同一算子源码**、typ
 
 ## 2. 实施任务与依赖
 
-下表路径都是**批准后修改/新增/删除的落点**，不是本轮已创建的源码。每项需同时交付所列接口和验证；内部 target 使用 `nexora_*`，导出 target 使用 `nexora::*`。
+下表定义**完整任务的实施落点与验收**，不能视为全部获批或完成。当前仅落实 P1-01a/02 的有限 CPU 构建、依赖和计算冒烟子集，详见 [CPU 切片验证](kokkos-cpu-slice-validation.md)。内部 target 使用 `nexora_*`，导出 target 使用 `nexora::*`。
 
 | 任务 | 文件/目录及 target | 接口与前置依赖 | 通过条件 |
 |---|---|---|---|
@@ -60,7 +60,7 @@ P1-01 必须从有来源和复用权利的参考公式/数据冻结核函数、�
 <a id="acceptance"></a>
 ## 4. 构建、数值、生命周期与性能验收矩阵
 
-**以下是通过条件，所有 Kokkos 项目当前均“未实施/未执行”。** 每个报告记录 ISO 8601 秒级时间及 timezone；CPU 型号/线程/NUMA、GPU 型号/内存/架构、OS、compiler/stdlib、Kokkos commit/digest/options、toolkit/driver、MPI 版本（适用时）、命令、输入/参考 hash 与 passed/failed/skipped。时序/生命周期测试要证明实际发生预期先后关系，不能仅凭偶然结果正确。
+**以下是完整 Phase 1 的通过条件；有限 CPU 切片的单独证据见 [验证记录](kokkos-cpu-slice-validation.md)，不代表这些完整门槛通过。** 每个报告记录 ISO 8601 秒级时间及 timezone；CPU 型号/线程/NUMA、GPU 型号/内存/架构、OS、compiler/stdlib、Kokkos commit/digest/options、toolkit/driver、MPI 版本（适用时）、命令、输入/参考 hash 与 passed/failed/skipped。时序/生命周期测试要证明实际发生预期先后关系，不能仅凭偶然结果正确。
 
 | ID / 任务 | 工作负载与正反例 | 通过条件与证据 |
 |---|---|---|
@@ -101,7 +101,7 @@ P1-01 必须从有来源和复用权利的参考公式/数据冻结核函数、�
 <a id="approval"></a>
 ## 6. 实现所需审批与未决事项
 
-Kokkos 单一路线已定，本表不要求再次确认选型。以下事项在源码迁移前形成具体实施批准：
+Kokkos 单一路线已定，本表不要求再次确认选型。首个受限 CPU 切片之外的事项须在迁移前形成具体实施批准：
 
 | 项目 | 本稿提出的具体决定 | 尚需维护者批准/提供 |
 |---|---|---|
@@ -112,4 +112,4 @@ Kokkos 单一路线已定，本表不要求再次确认选型。以下事项在�
 | A5 外部 engine 与高级集成 | 本轮只确定边界，不选择 Chrono/Newton 的生产引擎，不建设 Warp provider | 未来立项时批准具体 engine/formulation/恢复级别及复用权利；不作为 P1 通用基础设施实施的前置。 |
 | A6 P2 持久重启实施包 | IO-001 仅 R0；按现行兼容、完整性和 CP-01–08 关闭，不扩展恢复等级 | P2 立项时批准实际无损 codec/容器、原子发布与受支持存储系统、同配置 profile 和完整状态清单；R1–R3 需另行设计和批准。不阻塞 P1。 |
 
-以上未决项不影响已确定的架构方向。本轮交付只修改文档；所有目标运行证据和实现审批均明确保留，不将计划写成完成。
+以上未决项不影响已确定的架构方向。首个受限 CPU 切片的单独授权及实际证据不批准或关闭本表其余工作；不得把局部计算冒烟等同于完整 P1。

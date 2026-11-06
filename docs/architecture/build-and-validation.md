@@ -1,23 +1,23 @@
 # Build and validation specification
 
-- Status: proposed target, pending [phase-1 design approval](phase-1-design-review.md) and implementation
+- Status: limited Serial CPU slice implemented; full [Phase 1](phase-1-design-review.md) and other profiles remain unapproved
 - Official-source verification: `2026-11-06T15:45:05+08:00` (CUDA compilation/package contract; no build or dependency acquisition)
 - Entry point: [architecture overview](overview.md); foundation contracts: [Kokkos design](kokkos-design.md)
 
-This document specifies the future build. No source, CMake, preset, CI, or test changes accompany it. The current C++17/CMake 3.24 native bootstrap, old package exports, and current dependency checker remain unchanged and do not validate this specification. Existing bootstrap commands are isolated in [CONTRIBUTING.md](../../CONTRIBUTING.md).
+The current CPU slice and local provisioning are described below. Later CUDA and complete Phase 1 sections remain proposed targets. Legacy exec/data/control exports and their separate consumer remain temporarily. CI has not been updated to provision Kokkos; no CI execution is claimed. Actual slice results are recorded in [CPU slice validation](kokkos-cpu-slice-validation.md).
 
-## Proposed dependency and language lock
+## Dependency and language lock
 
-| Item | Proposed requirement | Evidence or rationale |
+| Item | Requirement | Evidence or rationale |
 | --- | --- | --- |
 | Kokkos | **5.2.2**, commit **`8e15454876298832f013ebcaf08d53825b5bda40`** | [Official release](https://github.com/kokkos/kokkos/releases/tag/5.2.2), [release commit](https://github.com/kokkos/kokkos/commit/8e15454876298832f013ebcaf08d53825b5bda40); release date shown as 2026-09-10; exact seconds/timezone were not obtained from the release summary |
 | C++ | **20**, consistent for Kokkos, Nexora and downstream consumers | Pinned [standard selection](https://github.com/kokkos/kokkos/blob/8e15454876298832f013ebcaf08d53825b5bda40/cmake/kokkos_pick_cxx_std.cmake) and [standard validation](https://github.com/kokkos/kokkos/blob/8e15454876298832f013ebcaf08d53825b5bda40/cmake/kokkos_test_cxx_std.cmake) |
 | CMake | **3.25.2+** for every Nexora target configuration | Kokkos's [top-level minimum is 3.22](https://github.com/kokkos/kokkos/blob/8e15454876298832f013ebcaf08d53825b5bda40/CMakeLists.txt), but [CUDA as a CMake language requires 3.25.2](https://github.com/kokkos/kokkos/blob/8e15454876298832f013ebcaf08d53825b5bda40/cmake/kokkos_enable_options.cmake); use one stricter project floor |
 | Generator / architecture | Ninja; 64-bit target; record exact Ninja version | Reproducible runner profile; Kokkos's pinned top-level source treats 32-bit as experimental |
-| Default CPU execution | Kokkos Serial, with GPU and MPI disabled | Nexora's proposed baseline, not an upstream support claim |
+| Default CPU execution | Kokkos Serial, with GPU and MPI disabled | Current limited slice; not a general upstream support claim |
 | License | `Apache-2.0 WITH LLVM-exception` | [Pinned upstream LICENSE](https://github.com/kokkos/kokkos/blob/8e15454876298832f013ebcaf08d53825b5bda40/LICENSE); Nexora's own license remains pending |
 
-This is a version-and-revision lock recommendation, not a completed artifact manifest. No source archive was acquired or validated in this phase. The archive SHA-256 must be recorded before dependency provisioning is accepted; do not substitute an invented digest or silently use an unverified archive. `latest`, `develop`, a moving branch, and a version range are not acceptable dependency locks.
+The official release archive SHA-256 is `d6557aaef39302282a15f9c770433d1fcdf4e961dfd6d9ed726b9d0d0f546b9f`, verified against its official manifest; the annotated tag resolves to the locked commit. See [provenance](../../third_party/README.md). `latest`, `develop`, a moving branch, and a version range are not acceptable dependency locks.
 
 The live [requirements page](https://kokkos.org/kokkos-core-wiki/get-started/requirements.html) and [configuration guide](https://kokkos.org/kokkos-core-wiki/get-started/configuration-guide.html) are useful references, but the exact commit's source takes precedence where a general documentation minimum differs. In particular, a generic CMake 3.16 claim must not override the pinned source requirements above.
 
@@ -37,20 +37,43 @@ Choose exact compiler, standard library, toolkit, driver and OS patch versions w
 
 ## Offline dependency lifecycle
 
-**Proposed process, pending approval and implementation:**
+**Provisioning process:**
 
 1. A separate, explicitly networked acquisition job obtains the official 5.2.2 source distribution or a Git checkout at the locked commit. The Nexora configure/build never performs this step.
 2. For an archive, obtain the release's [SHA-256 manifest](https://github.com/kokkos/kokkos/releases/download/5.2.2/kokkos-5.2.2-SHA-256.txt), signature and provenance listed on the release page; verify the artifact and record the resulting digest and verification method. For Git, verify the full commit and release-tag association and preserve the checkout identity. Any packaged Git snapshot also receives an artifact SHA-256.
-3. Store the source, license/notices, provenance and manifest in an approved local artifact cache or mirror. Record local patches explicitly; the proposed baseline has none. No binaries or large archives belong in this repository.
+3. Store the source, license/notices, provenance and manifest in an approved local artifact cache or mirror. Record local patches explicitly; the acquired archive has none. No binaries or large archives belong in this repository.
 4. On the offline machine, verify the cached artifact digest before unpacking; build and install Kokkos with the chosen C++ standard, compiler, architecture and execution-space options. Give each incompatible configuration a separate prefix. Pre-provision any compiler/OpenMP/GPU/MPI runtime dependencies as well.
 5. Configure Nexora against that exact installed Kokkos using `Kokkos_DIR` or a controlled `CMAKE_PREFIX_PATH`. Prefer installed-package discovery for the first implementation; do not introduce download-based FetchContent or a package-manager bootstrap. Missing/incompatible dependencies fail with an actionable error.
 6. Build, test and install Nexora, then build and run a separate downstream consumer with the network disabled. Record source IDs, digests, configuration, command outputs and execution evidence. Keep local paths in a manifest, not embedded as mandatory absolute paths in exported targets.
 
 “Offline” means all inputs are already provisioned. It does not mean dependency-free. Reproducibility means the source/toolchain/options/hardware profile is recorded and repeatable; it does not promise bitwise-identical numerical results across execution spaces or compilers. Never change numerical tolerances merely to make a new backend pass.
 
-## Proposed build and package examples
+## Current Serial provisioning and proposed package examples
 
-**All commands and CMake snippets in this document are 批准后目标 (proposed targets), pending approval and implementation. They are not current repository instructions and were not executed in this phase.** Placeholder paths must be replaced with verified local inputs. The example uses a Serial dependency with no Kokkos tests, examples or benchmarks; this avoids silently adding their dependencies. Nexora's own acceptance tests remain required.
+The following is the separately networked acquisition and offline local provisioning used for the current Serial slice. Choose paths appropriate to the machine. Confirm the manifest line matches before extraction and retain license notices as described in [third-party provenance](../../third_party/README.md).
+
+```sh
+curl -fLO https://github.com/kokkos/kokkos/releases/download/5.2.2/kokkos-5.2.2.tar.gz
+curl -fLO https://github.com/kokkos/kokkos/releases/download/5.2.2/kokkos-5.2.2-SHA-256.txt
+shasum -a 256 kokkos-5.2.2.tar.gz
+git ls-remote https://github.com/kokkos/kokkos.git 'refs/tags/5.2.2*'
+tar -xzf kokkos-5.2.2.tar.gz
+cmake -S kokkos-5.2.2 -B <kokkos-build> -G Ninja \
+  -DCMAKE_CXX_STANDARD=20 -DCMAKE_CXX_STANDARD_REQUIRED=ON \
+  -DCMAKE_CXX_EXTENSIONS=OFF -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=<kokkos-prefix> -DCMAKE_INSTALL_LIBDIR=lib \
+  -DBUILD_SHARED_LIBS=OFF -DKokkos_ENABLE_SERIAL=ON \
+  -DKokkos_ENABLE_OPENMP=OFF -DKokkos_ENABLE_CUDA=OFF \
+  -DKokkos_ENABLE_HIP=OFF -DKokkos_ENABLE_SYCL=OFF \
+  -DKokkos_ENABLE_TESTS=OFF -DKokkos_ENABLE_EXAMPLES=OFF \
+  -DKokkos_ENABLE_BENCHMARKS=OFF
+cmake --build <kokkos-build>
+cmake --install <kokkos-build>
+```
+
+The slice checks 64-bit target, exact version, Serial-only devices, C++20/CXX and matching compiler ID and exact version. Installed Nexora also compares Kokkos architecture, options and TPL metadata. Source revision, digest and custom standard-library or ABI settings require manifest verification; these checks do not prove arbitrary ABI compatibility. See [CONTRIBUTING](../../CONTRIBUTING.md) for current Nexora commands, including `--fresh` for old caches. The installed CPU consumer links only `nexora::data` and obtains Kokkos transitively. Legacy exports and their separate consumer remain temporarily.
+
+**The following design examples are proposed targets beyond the current limited slice.** Placeholder paths must be replaced with verified local inputs. The example uses a Serial dependency with no Kokkos tests, examples or benchmarks; this avoids silently adding their dependencies. Nexora's own acceptance tests remain required.
 
 ```sh
 # 批准后目标 / PROPOSED — pending approval and implementation; local verified source only.
@@ -72,7 +95,7 @@ ctest --test-dir <nexora-serial-build> --output-on-failure
 cmake --install <nexora-serial-build> --prefix <nexora-prefix>
 ```
 
-After implementation, the Nexora package must propagate Kokkos through `nexora::data`, which publicly exposes the designated Kokkos numerical storage contract. The schema-only `nexora::data_schema`, `nexora::participant_api`, and orchestration layers follow the dependency boundaries in the overview. There is no new `exec` provider target. The old `nexora::exec_cpu` export is retired during the approved cutover.
+The current Nexora package propagates Kokkos through `nexora::data`, which publicly exposes the designated Kokkos numerical storage contract. The proposed schema-only `nexora::data_schema`, participant and orchestration boundaries remain future work. The old `nexora::exec_cpu` export remains temporarily and is retired at the eventual cutover.
 
 ```cmake
 # 批准后目标 / PROPOSED — pending approval and implementation, NexoraConfig.cmake dependency.
@@ -100,7 +123,7 @@ The exact revision/digest must also be checked through the provisioned manifest:
 
 **批准后目标 — the first CUDA path is `nvcc_wrapper` with CMake's `CXX` language.** It uses the same Kokkos-based `.cpp` numerical source and explicit template instantiations as CPU. Nexora may retain `LANGUAGES C CXX` for the MPI C API probe; its C compiler is an ordinary compatible host C compiler. CUDA kernels, private stream-interop test code and downstream numerical consumers are compiled as `CXX` with the wrapper. This does not add a native CUDA backend.
 
-The first CUDA profile has exactly Kokkos **CUDA + Serial** enabled, one explicitly selected NVIDIA GPU architecture, C++20 without extensions, and CUDA relocatable device code disabled. Kokkos and Nexora are built in fresh, separate build directories. OpenMP + CUDA, HIP, CMake `CUDA`-language compilation, mixed-language Kokkos, Clang CUDA, compiler-launcher redirection, and RDC/device functions linked across translation units are outside this initial profile; each needs a separate reviewed build/consumer profile. The independent CPU OpenMP profile remains available. CMake 3.25.2 stays the common Nexora floor even though the selected wrapper route does not itself require Kokkos's stricter CUDA-language floor.
+The first CUDA profile has exactly Kokkos **CUDA + Serial** enabled, one explicitly selected NVIDIA GPU architecture, C++20 without extensions, and CUDA relocatable device code disabled. Kokkos and Nexora are built in fresh, separate build directories. OpenMP + CUDA, HIP, CMake `CUDA`-language compilation, mixed-language Kokkos, Clang CUDA, compiler-launcher redirection, and RDC/device functions linked across translation units are outside this initial profile; each needs a separate reviewed build/consumer profile. The independent CPU OpenMP profile is proposed, not implemented. CMake 3.25.2 stays the common Nexora floor even though the selected wrapper route does not itself require Kokkos's stricter CUDA-language floor.
 
 ### Fixed-source basis
 
@@ -232,14 +255,14 @@ Use the downstream `LANGUAGES CXX` CMake example above; its `main.cpp` acceptanc
 
 | Target configuration | Required provisioned inputs | Intended acceptance level | Current Kokkos implementation evidence |
 | --- | --- | --- | --- |
-| Serial CPU | Locked Kokkos Serial + C++20 compiler | Required default | Not implemented or run |
+| Serial CPU | Locked Kokkos Serial + C++20 compiler | Required default | Limited slice implemented; see [validation](kokkos-cpu-slice-validation.md) for results |
 | OpenMP CPU | Locked Kokkos OpenMP + compiler OpenMP runtime | Explicit CPU performance profile | Not implemented or run |
 | CUDA | Locked Kokkos CUDA + toolkit/host compiler/driver + explicit GPU architecture | Optional initial GPU profile | Not implemented or run |
 | HIP | Locked Kokkos HIP + ROCm/driver + explicit GPU architecture | Optional later profile | Not implemented or run |
 | CPU + MPI | Above CPU inputs + MPI C API/runtime | Optional distributed profile | Not implemented or run |
 | CUDA or HIP + MPI | Matching GPU inputs + MPI runtime | Optional; host-staging baseline first | Not implemented or run |
 
-These are selected target combinations, not supported-runtime claims. Use one selected GPU backend per build; CUDA+HIP in one Nexora build is rejected by policy. Unsupported execution-space requests must fail explicitly. GPU-aware MPI/direct device buffers require separate capability and lifetime validation; ordinary MPI discovery does not establish that capability. Serial and OpenMP use the same kernels; no independent native CPU implementation is retained.
+Except for the limited Serial CPU slice, these are future target combinations, not supported-runtime claims. Use one selected GPU backend per build; CUDA+HIP in one Nexora build is rejected by policy. Unsupported execution-space requests must fail explicitly. GPU-aware MPI/direct device buffers require separate capability and lifetime validation; ordinary MPI discovery does not establish that capability. The future Serial and OpenMP profiles use the same kernels. Legacy native CPU execution remains temporarily for existing bootstrap consumers and is not the new numerical path.
 
 Execution-space selection belongs to the verified installed Kokkos configuration and approved Nexora instantiation policy. The [first CUDA contract](#cuda-build-contract) defines the replacement configuration interface: remove/reject `NEXORA_GPU_BACKEND`, derive the permitted profile from exported `Kokkos_DEVICES`, and validate compiler/architecture compatibility. HIP and GPU+MPI rows are later target configurations, not additional combinations accepted by the initial CUDA profile. Record enabled spaces, actual selected execution space and build/validation status separately.
 
@@ -253,4 +276,4 @@ The detailed representative cases and task dependencies are owned by [phase-1 de
 - For each accepted profile, preserve manifest, exact commands, exit statuses, passed/failed/skipped counts, build metadata, compiler/runtime versions, hardware/device details, and ISO 8601 timestamps with seconds and timezone.
 - Distinguish **configured**, **compiled**, **executed**, **numerically validated**, and **performance measured**. A configuration flag proves only requested/available build capability; a skipped or missing-device test establishes no device execution. Record performance only with workload, synchronization, repetitions, tolerance and comparison baseline fixed.
 
-No Kokkos compile, CPU run, GPU run, MPI numerical run, offline dependency installation, or installed Kokkos-backed Nexora consumer has been performed by this design-only change. Bootstrap checks can establish that documentation editing did not change the old implementation; they cannot satisfy the acceptance above.
+See [CPU slice validation](kokkos-cpu-slice-validation.md) for actual results and limits. GPU and MPI numerical acceptance and full Phase 1 remain outstanding.
