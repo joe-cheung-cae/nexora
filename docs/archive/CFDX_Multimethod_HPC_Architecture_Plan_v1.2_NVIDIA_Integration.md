@@ -1,5 +1,7 @@
 # 多方法 CFD / 多物理场 HPC 平台架构与仓库设计计划（含 MBD、Warp、Newton 与 Omniverse 集成）
 
+> **已归档 · Superseded**。全文只作历史设计记录。当前 Nexora 以 Kokkos 为唯一内部计算与数值存储基础，CPU 必需，GPU 和 MPI 可选。旧原生执行与内存层、provider/DSL/runtime、目标图和任务前置均已被替代。现行入口为 [架构总览](../architecture/overview.md)、[Kokkos 设计](../architecture/kokkos-design.md)、[Phase 1 设计](../architecture/phase-1-design-review.md) 与 [迁移路线](../architecture/migration-roadmap.md)。原稿日期仅精确到日，原始记录未提供时分秒或时区；保留历史原文，不推测缺失部分。
+
 > **工作代号：CFDX · 版本：1.2（外部集成整合版）· 日期：2026-11-03**  
 > 面向 FVM、FEM、SPH、LBM、DEM 五种数值方法与 MBD 多体动力学子系统，以及流固、流粒、刚柔、接触、传热、多区域和多时间尺度耦合。  
 > 设计基线：C++17、CUDA 优先、CPU 参考实现、可选 MPI C API、现代 CMake、离线可复现构建。  
@@ -92,6 +94,8 @@ MBD 是处理刚体/机构运动、关节、约束及扩展刚柔动力学的求
 <a id="sec-01"></a>
 ## 1. 范围、约束与优先级
 
+> **已归档 · Superseded**。本节的历史基线及边界已被 [架构总览](../architecture/overview.md) 替代。
+
 ### 1.1 平台的准确定位
 
 平台以 CFD 为中心，但 DEM 属于颗粒/接触动力学，FEM 还承担结构、热和约束问题，MBD 负责刚体、机构、关节和机械约束动力学。因此，顶层不宜命名为 `UniversalFluidSolver`，而应采用 `Simulation + Participants + Couplings`。
@@ -150,6 +154,8 @@ MBD 是处理刚体/机构运动、关节、约束及扩展刚柔动力学的求
 
 <a id="sec-02"></a>
 ## 2. 总体架构与依赖方向
+
+> **已归档 · Superseded**。本节的历史基线及边界已被 [架构总览](../architecture/overview.md) 替代。
 
 ### 2.1 逻辑分层
 
@@ -260,6 +266,8 @@ CI 同时检查 target 依赖和 `#include` 边界。只有文档分层、没有
 
 <a id="sec-03"></a>
 ## 3. 领域划分与对象模型
+
+> **已归档 · Superseded**。本节的历史基线及边界已被 [架构总览](../architecture/overview.md) 替代。
 
 ### 3.1 建议的顶层组合关系
 
@@ -378,6 +386,8 @@ Host 边界使用统一 `Status/Result<T>` 或异常转换层，device 内不抛
 <a id="sec-05"></a>
 ## 5. L1：执行、内存与异步运行时
 
+> **已归档 · Superseded**。本节的历史执行、存储或同步契约已被 [Kokkos 设计](../architecture/kokkos-design.md) 替代。
+
 ### 5.1 抽象单位
 
 | 对象 | 职责 |
@@ -446,6 +456,8 @@ Warp/Newton 同进程接入复用 `ExecContext/BufferLease/CompletionToken`；�
 
 <a id="sec-06"></a>
 ## 6. L2：数据、场与状态所有权
+
+> **已归档 · Superseded**。本节的历史执行、存储或同步契约已被 [Kokkos 设计](../architecture/kokkos-design.md) 替代。
 
 ### 6.1 三种视图必须分开
 
@@ -852,6 +864,8 @@ SPH 边界粒子、BCE 或 SDF 代理附着到 BodyId，只接收 MBD 运动，�
 <a id="sec-12"></a>
 ## 12. L5：LBM 子系统
 
+> **已归档 · Superseded**。本节的旧 backend/provider、DSL 或执行运行时设计已作废；现行边界见 [架构总览](../architecture/overview.md)。
+
 ### 12.1 第一类状态是分布函数，不是速度压力
 
 `LbmState` 保存 \(f_q\)、格点标记、边界链接、forcing 参数、必要的热/相场分布及 streaming parity。宏观密度/速度可以是缓存，但不能靠它们无损恢复全部分布函数。
@@ -1173,6 +1187,8 @@ Chrono 的 FSI 资料展示了流体与多体之间交换运动、力和力矩�
 
 <a id="sec-14"></a>
 ## 14. 参与者接口与生命周期
+
+> **已归档 · Superseded**。本节保留历史验收要求；现行首期任务见 [Phase 1 设计](../architecture/phase-1-design-review.md)。
 
 ### 14.1 最小可耦合参与者
 
@@ -1504,6 +1520,8 @@ SPH 恢复积分历史、粒子生成序列和必要边界状态；DEM 恢复切
 <a id="sec-18"></a>
 ## 18. 分布式、多 GPU 与通信计算重叠
 
+> **已归档 · Superseded**。本节的历史执行、存储或同步契约已被 [Kokkos 设计](../architecture/kokkos-design.md) 替代。
+
 ### 18.1 三层拆分
 
 ```text
@@ -1590,6 +1608,8 @@ MPI 继续承担分区、halo 和耦合规约；对外 RPC 由受控 gateway 排
 
 <a id="sec-19"></a>
 ## 19. 多 DSL / Backend 适配与算子实现注册
+
+> **已归档 · Superseded**。本节的旧 backend/provider、DSL 或执行运行时设计已作废；现行边界见 [架构总览](../architecture/overview.md)。
 
 ### 19.1 必须区分七种角色
 
@@ -1680,6 +1700,8 @@ validation suite ID + artifact checksum
 
 <a id="sec-20"></a>
 ## 20. 算例描述、Python 与运行入口
+
+> **已归档 · Superseded**。本节的旧 backend/provider、DSL 或执行运行时设计已作废；现行边界见 [架构总览](../architecture/overview.md)。
 
 ### 20.1 配置与外部集成分层
 
@@ -1824,6 +1846,8 @@ MBD 模型、耦合关系和 CPU/GPU/MPI 放置分离描述，完整示例见第
 
 <a id="sec-21"></a>
 ## 21. 仓库总体文件结构
+
+> **已归档 · Superseded**。本节的旧目录、target、依赖与构建方案已作废；当前方案见 [架构总览](../architecture/overview.md) 与 [目标迁移](../architecture/migration-roadmap.md#targets)。
 
 ### 21.1 采用单仓库、多个库 target
 
@@ -2100,6 +2124,8 @@ CMakeUserPresets.json
 
 <a id="sec-22"></a>
 ## 22. 各模块内部文件结构
+
+> **已归档 · Superseded**。本节的旧目录、target、依赖与构建方案已作废；当前方案见 [架构总览](../architecture/overview.md) 与 [目标迁移](../architecture/migration-roadmap.md#targets)。
 
 ### 22.1 公共头与实现的对应原则
 
@@ -2458,6 +2484,8 @@ src/simulation/
 <a id="sec-23"></a>
 ## 23. CMake Target、依赖与构建规范
 
+> **已归档 · Superseded**。本节的旧目录、target、依赖与构建方案已作废；当前方案见 [架构总览](../architecture/overview.md) 与 [目标迁移](../architecture/migration-roadmap.md#targets)。
+
 ### 23.1 推荐 target 划分
 
 | Target alias | 主要职责 | 直接依赖示例 |
@@ -2637,6 +2665,8 @@ Linux 的 `-static-libstdc++/-static-libgcc` 可在发布 preset 中针对最终
 <a id="sec-24"></a>
 ## 24. I/O、检查点与可复现性
 
+> **已归档 · Superseded**。本节的历史持久化及恢复等级不再提供有效定义。现行仅采纳 [R0 同配置重启及 CP 验收](../architecture/checkpoint-restart.md)，R1–R3 延期、需另行设计和批准；数据保活见 [Kokkos 设计](../architecture/kokkos-design.md)。
+
 ### 24.1 可视化输出与恢复文件分开
 
 可视化文件强调易读和体积，可以只包含位置、速度、压力、温度等；checkpoint 必须包含足以继续相同算法的完整状态。不能把一帧 VTK 文件直接当作所有方法通用的 restart。
@@ -2725,6 +2755,8 @@ HDF5 并行性、线程安全和 MPI 线程级别按实际构建验证。首期�
 
 <a id="sec-25"></a>
 ## 25. 测试、验证与性能验收
+
+> **已归档 · Superseded**。本节保留历史验收要求；现行首期任务见 [Phase 1 设计](../architecture/phase-1-design-review.md)。
 
 ### 25.1 测试分层
 
@@ -2839,6 +2871,8 @@ M_{peak}\approx M_{primary}+M_{history}+M_{checkpoint}
 <a id="sec-26"></a>
 ## 26. 可选接入外部 CUDA/SPH/DEM 求解器
 
+> **已归档 · Superseded**。本节保留历史集成方案；外部能力的现行范围与前置见 [I0–I7 重映射](../architecture/migration-roadmap.md#legacy-integrations)。
+
 ### 26.1 迁移单元
 
 迁移的最小单位不是“整个 Solver 类”，而是：
@@ -2885,6 +2919,8 @@ M_{peak}\approx M_{primary}+M_{history}+M_{checkpoint}
 
 <a id="sec-27"></a>
 ## 27. 分阶段开发计划与交付门槛
+
+> **已归档 · Superseded**。本节的旧阶段、MVP 门槛与依赖已被替代。逐项对应见 [P0–P7 重映射](../architecture/migration-roadmap.md#legacy-p0-p7)。
 
 ### 27.1 以可验收能力推进，而不是以目录数量推进
 
@@ -2934,6 +2970,8 @@ P3/P4/P5 可以由不同方法团队并行，但必须依赖 P1 的数据契约�
 <a id="sec-28"></a>
 ## 28. 扩展开发工作流与变更治理
 
+> **已归档 · Superseded**。本节的旧 backend/provider、DSL 或执行运行时设计已作废；现行边界见 [架构总览](../architecture/overview.md)。
+
 ### 28.1 增加一种物理模型
 
 先定义变量、参数、单位、适用范围和局部关系，再在特定方法中离散实现。提交最小解析/制造解或局部模型测试，记录是否引入历史状态，以及 checkpoint/通信需要新增哪些字段。
@@ -2978,6 +3016,8 @@ case schema、checkpoint schema、operator semantic revision、provider ABI 和�
 
 <a id="sec-29"></a>
 ## 29. 风险、待决项与架构决策记录
+
+> **已归档 · Superseded**。本节的历史基线及边界已被 [架构总览](../architecture/overview.md) 替代。
 
 ### 29.1 主要风险
 
@@ -3039,6 +3079,8 @@ case schema、checkpoint schema、operator semantic revision、provider ABI 和�
 
 <a id="sec-30"></a>
 ## 30. 第一批可直接拆解的开发任务
+
+> **已归档 · Superseded**。本节的任务依赖及完成条件已被替代。逐项对应见 [任务 ID 重映射](../architecture/migration-roadmap.md#legacy-task-ids)。
 
 ### 30.1 P0/P1 主干任务
 
@@ -3448,6 +3490,8 @@ on failure: drain trial work, restore all states, reduce to a legal window
 <a id="sec-33"></a>
 ## 33. MBD 的 HPC、DSL、Backend 与分布式设计
 
+> **已归档 · Superseded**。本节保留历史机械设计；计算边界与前置见 [M0–M7 重映射](../architecture/migration-roadmap.md#legacy-mbd)。
+
 ### 33.1 增加“动力学引擎”维度，不把它叫作硬件 backend
 
 ```text
@@ -3549,6 +3593,8 @@ Kokkos/SYCL/HIP 可按具体批量算子评估；Triton 仅在规约或规则批
 
 <a id="sec-34"></a>
 ## 34. MBD 仓库增量、依赖与 CMake 设计
+
+> **已归档 · Superseded**。本节保留历史机械设计；计算边界与前置见 [M0–M7 重映射](../architecture/migration-roadmap.md#legacy-mbd)。
 
 ### 34.1 顶层新增模块及依赖约束
 
@@ -3834,6 +3880,8 @@ v1.1 的单选 `CFDX_MBD_ENGINE` 在迁移时转换为引擎构建项和 partici
 <a id="sec-35"></a>
 ## 35. MBD 模型 DSL、耦合配置与能力校验
 
+> **已归档 · Superseded**。本节保留历史机械设计；计算边界与前置见 [M0–M7 重映射](../architecture/migration-roadmap.md#legacy-mbd)。
+
 ### 35.1 配置文件继续分离物理、执行与构建能力
 
 新增 `mbd_model.yaml` 描述机械模型；`case.yaml` 描述参与者、耦合、物理算法与时间；`execution.yaml` 选择引擎、设备和传输；build/engine manifests 说明发行物实际能力。
@@ -4081,6 +4129,8 @@ execution:
 <a id="sec-36"></a>
 ## 36. MBD 验证、分阶段交付与可拆解任务
 
+> **已归档 · Superseded**。本节保留历史机械设计。阶段范围见 [M0–M7 重映射](../architecture/migration-roadmap.md#legacy-mbd)，§36.5 全部任务见 [MBD-001–020 逐项处置](../architecture/follow-on-task-plan.md#mbd-task-ids)；未立项项需另行设计和批准，不能从本节补充实施要求。
+
 ### 36.1 机械单体验证矩阵
 
 | 层级/案例 | 验证对象 | 必须输出的证据 |
@@ -4192,6 +4242,8 @@ ADR-016 至 ADR-021 对应第 34.5 节文件：固定运动/惯性归属、空�
 <a id="sec-37"></a>
 ## 37. NVIDIA 生态与外部集成的总体设计
 
+> **已归档 · Superseded**。本节保留历史集成方案；外部能力的现行范围与前置见 [I0–I7 重映射](../architecture/migration-roadmap.md#legacy-integrations)。
+
 ### 37.1 三个产品、三种接入责任
 
 本次“Newton”指 **Newton Physics 物理引擎**，不是第 8 章非线性方程求解的 Newton 迭代；“Omniverse”使用其正式拼写。以下是平台设计选择，第三方已核实机制用参考编号标出。
@@ -4280,6 +4332,8 @@ ADR-016 至 ADR-021 对应第 34.5 节文件：固定运动/惯性归属、空�
 
 <a id="sec-38"></a>
 ## 38. 对外数据契约、所有权与版本
+
+> **已归档 · Superseded**。本节保留历史集成方案；外部能力的现行范围与前置见 [I0–I7 重映射](../architecture/migration-roadmap.md#legacy-integrations)。
 
 ### 38.1 不建立第二个通用 StateStore
 
@@ -4402,6 +4456,8 @@ EntityBinding {
 <a id="sec-39"></a>
 ## 39. NVIDIA Warp 计算与数组互操作设计
 
+> **已归档 · Superseded**。旧 Warp 算子 provider、运行时桥接与 AOT 方案已取消。仅允许经批准的完整外部引擎保有 Warp 内部依赖，不能通过应用、服务或进程包装重建通用 provider 或第二套计算基础设施。现行任务边界见 [INT 逐项处置](../architecture/follow-on-task-plan.md#integration-task-ids)。
+
 ### 39.1 首批接入算子
 
 | 算子 | 接入价值 | 正确性基准 | 暂不做的替换 |
@@ -4473,6 +4529,8 @@ Python 回调仅在指定的 compute-host 线程粗粒度进入；进入 Python 
 
 <a id="sec-40"></a>
 ## 40. Newton Physics 引擎与多物理场参与者接口
+
+> **已归档 · Superseded**。本节保留历史集成方案；外部能力的现行范围与前置见 [I0–I7 重映射](../architecture/migration-roadmap.md#legacy-integrations)。
 
 ### 40.1 接入范围与引擎选择
 
@@ -4811,6 +4869,8 @@ Kit 自带/要求的 Python、USD 和其他运行库不能与计算环境随意�
 <a id="sec-43"></a>
 ## 43. 通信协议、吞吐、同步与失败恢复
 
+> **已归档 · Superseded**。本节保留历史集成方案；外部能力的现行范围与前置见 [I0–I7 重映射](../architecture/migration-roadmap.md#legacy-integrations)。
+
 ### 43.1 按拓扑选择传输，不提供假通用“零拷贝网络”
 
 | 场景 | 首选路径 | 能保证的边界 | 不保证的内容 |
@@ -4943,6 +5003,8 @@ EvaluateResidual / Balance
 ---
 <a id="sec-44"></a>
 ## 44. 外部集成的仓库结构、Target 与部署边界
+
+> **已归档 · Superseded**。本节保留历史集成方案；外部能力的现行范围与前置见 [I0–I7 重映射](../architecture/migration-roadmap.md#legacy-integrations)。
 
 ### 44.1 目录增量：契约、适配器、应用分开
 
@@ -5224,6 +5286,8 @@ Warp 1.17 文档用于本次核实原生部署路径，不代表自动选定它�
 <a id="sec-45"></a>
 ## 45. 外部集成配置、接口协议与典型运行闭环
 
+> **已归档 · Superseded**。本节保留历史集成方案；外部能力的现行范围与前置见 [I0–I7 重映射](../architecture/migration-roadmap.md#legacy-integrations)。
+
 ### 45.1 配置层次与示例边界
 
 沿用 `case.yaml` 的物理含义，`execution.yaml` 选择计算引擎/provider，新增 `integration.yaml` 选择外部通信和场景行为。模型单位、力的物理定义仍由原物理/端口契约约束，不由网络序列化决定。
@@ -5435,6 +5499,8 @@ AssetService:
 <a id="sec-46"></a>
 ## 46. 集成专项验证、交付阶段与开发任务
 
+> **已归档 · Superseded**。本节保留历史集成方案。阶段范围见 [I0–I7 重映射](../architecture/migration-roadmap.md#legacy-integrations)，§46.5–46.7 全部任务见 [INT-001–030 逐项处置](../architecture/follow-on-task-plan.md#integration-task-ids)；未立项项需另行设计和批准，不能从本节补充实施要求。
+
 ### 46.1 验证矩阵
 
 | 验证域 | 必测用例 | 通过证据 |
@@ -5566,6 +5632,8 @@ I1、I2、I3 可以并行，但不要求同一团队同时铺满。首个展示�
 
 <a id="appendix-a"></a>
 ## 附录 A：关键接口骨架
+
+> **已归档 · Superseded**。本节的历史执行、存储或同步契约已被 [Kokkos 设计](../architecture/kokkos-design.md) 替代。
 
 ### A.1 设计原则
 
@@ -5778,6 +5846,8 @@ WcsphSolver
 <a id="appendix-b"></a>
 ## 附录 B：完整时间窗口执行示例
 
+> **已归档 · Superseded**。本节的历史执行、存储或同步契约已被 [Kokkos 设计](../architecture/kokkos-design.md) 替代。
+
 下面是算法级伪代码，表达事务、通信和时间逻辑，不是可直接执行的 Python 程序。
 
 ```text
@@ -5894,6 +5964,8 @@ finalize_participants_and_runtime()
 <a id="appendix-c"></a>
 ## 附录 C：架构评审检查表
 
+> **已归档 · Superseded**。本节保留历史验收要求；现行首期任务见 [Phase 1 设计](../architecture/phase-1-design-review.md)。
+
 ### C.1 数据与执行
 
 - [ ] 每份主状态只有一个明确 owner，View 的生命周期可证明。
@@ -5938,6 +6010,8 @@ finalize_participants_and_runtime()
 
 <a id="appendix-d"></a>
 ## 附录 D：MBD 中性接口声明与设计评审清单
+
+> **已归档 · Superseded**。本节保留历史机械设计；计算边界与前置见 [M0–M7 重映射](../architecture/migration-roadmap.md#legacy-mbd)。
 
 ### D.1 自包含 C++17 声明示例
 
@@ -6099,6 +6173,8 @@ public:
 
 <a id="appendix-e"></a>
 ## 附录 E：外部接口声明、生命周期与集成评审清单
+
+> **已归档 · Superseded**。本节保留历史集成方案；外部能力的现行范围与前置见 [I0–I7 重映射](../architecture/migration-roadmap.md#legacy-integrations)。
 
 ### E.1 本地 C ABI 声明示例
 
@@ -6395,6 +6471,8 @@ DLPack 的一次性 capsule/托管释放与 CFDX 的异步 lease 要由 adapter 
 ---
 
 ## 最终建议
+
+> **已归档 · Superseded**。本节的历史基线及边界已被 [架构总览](../architecture/overview.md) 替代。
 
 以首个 CUDA SPH/DEM 算例为第一条落地路径，用 CPU 参考实现和契约测试验证结果。先统一数据所有权、时间语义和耦合守恒，随即接入 MBD 的单一运动/惯性/接触责任链，优先验证 SPH–MBD、DEM–MBD 与三方耦合，再扩展 FVM、FEM、LBM 及高级刚柔。以原生 provider 为生产主线，按算子接入 Warp、按 MBD 引擎接入 Newton，并以中性 snapshot/端口连接 OpenUSD、Omniverse 与外部服务。core-hpc、Python compute-host、viewer 分别部署。先验证文件交换与同进程桥接，再按证据增加 RPC/IPC 与高吞吐显示。各方法保留适合自身的数据结构与性能实现。
 
