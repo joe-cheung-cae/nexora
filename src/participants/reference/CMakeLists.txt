@@ -1,0 +1,3 @@
+add_library(nexora_participants_reference STATIC Participant.cpp)
+target_include_directories(nexora_participants_reference PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>)
+target_link_libraries(nexora_participants_reference PUBLIC nexora::participant_api nexora_methods_reference)

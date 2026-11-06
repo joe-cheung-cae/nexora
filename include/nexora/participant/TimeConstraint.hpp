@@ -1,6 +1,7 @@
 #pragma once
 
 #include <nexora/core/Status.hpp>
+#include <nexora/core/Time.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -8,18 +9,6 @@
 #include <optional>
 
 namespace nexora {
-
-struct TimeInterval {
-    double begin = 0.0;
-    double end = 0.0;
-    // Authoritative integration duration. Do not recover it by subtracting the
-    // rounded absolute endpoints, which can magnify error at large times.
-    double requested_step = 0.0;
-
-    double duration() const noexcept {
-        return requested_step;
-    }
-};
 
 // This first synchronous path accepts a single legal requested step, without
 // subcycling. Floating-point interval endpoints are rounded by normal addition;

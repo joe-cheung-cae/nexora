@@ -20,12 +20,21 @@ ALLOWED_LINKS = {
     "nexora_data": {"nexora_core", "nexora_exec_api", "Kokkos::kokkos"},
     "nexora_participant_api": {"nexora_core", "nexora_exec_api", "nexora_data"},
     "nexora_simulation": {"nexora_core", "nexora_participant_api"},
+    "nexora_methods_reference": {"nexora_data", "Kokkos::kokkos"},
+    "nexora_participants_reference": {"nexora_participant_api", "nexora_methods_reference"},
     "nexora": {"nexora_core", "Kokkos::kokkos", "MPI::MPI_C"},
 }
 TEST_LINKS = set(ALLOWED_LINKS) - {"nexora", "nexora_build_options"}
 REQUIRED_LINKS = {
     "nexora_data": {"Kokkos::kokkos"},
+    "nexora_methods_reference": {"nexora_data", "Kokkos::kokkos"},
+    "nexora_participants_reference": {"nexora_participant_api", "nexora_methods_reference"},
     "nexora": {"Kokkos::kokkos"},
+}
+
+SPECIAL_TEST_LINKS = {
+    "nexora_kokkos_tests": {"nexora_data"},
+    "nexora_reference_tests": {"nexora_participants_reference", "nexora_simulation"},
 }
 
 ALLOWED_INCLUDES = {
@@ -34,6 +43,11 @@ ALLOWED_INCLUDES = {
     "data": {"core", "exec", "data"},
     "participant": {"core", "exec", "data", "participant"},
     "simulation": {"core", "exec", "data", "participant", "simulation"},
+}
+SOURCE_MODULE_INCLUDES = {
+    **ALLOWED_INCLUDES,
+    "methods": {"core", "data"},
+    "participants": {"core", "data", "participant"},
 }
 SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".cu", ".cuh"}
 INCLUDE = re.compile(r'^\s*#\s*include\s*[<"]([^>"]+)[>"]', re.MULTILINE)
@@ -47,8 +61,8 @@ def check_link_policy(name: str, links: list[str]) -> list[str]:
     """Check a target's direct dependencies against the narrow target policy."""
     if name in ALLOWED_LINKS:
         allowed = ALLOWED_LINKS[name]
-    elif name == "nexora_kokkos_tests":
-        allowed = {"nexora_data"}
+    elif name in SPECIAL_TEST_LINKS:
+        allowed = SPECIAL_TEST_LINKS[name]
     else:
         allowed = TEST_LINKS
     errors = [f"{name}: forbidden direct dependency on {link}" for link in links
@@ -59,15 +73,36 @@ def check_link_policy(name: str, links: list[str]) -> list[str]:
 
 
 def check_kokkos_header(relative: Path, scope: str, module: str, header: str) -> list[str]:
-    """Keep Kokkos headers at the approved data, Kokkos-test, and CLI boundaries."""
+    """Keep Kokkos headers at approved data, method, test, and CLI boundaries."""
     header_name = header.replace("\\", "/").split("/")[-1]
     if not KOKKOS_HEADER.fullmatch(header_name):
         return []
     if ((scope == "include/nexora" and module == "data")
-            or (scope == "tests" and relative.parts[:2] == ("tests", "kokkos"))
+            or (scope == "src" and relative.parts[:3] == ("src", "methods", "reference"))
+            or (scope == "tests" and relative.parts[:2] in {
+                ("tests", "kokkos"), ("tests", "reference")})
             or (scope == "apps" and module == "nexora")):
         return []
-    return [f"{relative}: Kokkos header {header} is limited to data, tests/kokkos, and the CLI"]
+    return [f"{relative}: Kokkos header {header} is outside an approved data/method/test/CLI boundary"]
+
+
+def check_internal_include(relative: Path, scope: str, header: str) -> list[str]:
+    """Enforce downward use of implementation-only reference headers."""
+    parts = header.replace("\\", "/").split("/")
+    if not parts or parts[0] not in {"methods", "participants"}:
+        return []
+    if len(parts) < 3 or parts[1] != "reference":
+        return [f"{relative}: internal reference include {header} is not a known module path"]
+
+    location = relative.parts
+    in_method = scope == "src" and location[:3] == ("src", "methods", "reference")
+    in_participant = scope == "src" and location[:3] == ("src", "participants", "reference")
+    in_reference_test = scope == "tests" and location[:2] == ("tests", "reference")
+    if parts[0] == "methods" and (in_method or in_participant or in_reference_test):
+        return []
+    if parts[0] == "participants" and (in_participant or in_reference_test):
+        return []
+    return [f"{relative}: forbidden internal include {header} from this module"]
 
 
 def policy_self_test() -> list[str]:
@@ -79,6 +114,14 @@ def policy_self_test() -> list[str]:
         failures.append("checker self-test failed to require Kokkos on nexora_data")
     if not check_link_policy("nexora_core", ["Kokkos::kokkos"]):
         failures.append("checker self-test failed to reject Kokkos from nexora_core")
+    if check_link_policy("nexora_methods_reference", ["nexora_data", "Kokkos::kokkos"]):
+        failures.append("checker self-test failed to allow reference-method dependencies")
+    if not check_link_policy("nexora_methods_reference", ["nexora_data", "Kokkos::kokkos", "nexora_participant_api"]):
+        failures.append("checker self-test failed to reject an upward method dependency")
+    if check_link_policy("nexora_participants_reference", ["nexora_participant_api", "nexora_methods_reference"]):
+        failures.append("checker self-test failed to allow reference-participant dependencies")
+    if not check_link_policy("nexora_participants_reference", ["nexora_participant_api", "nexora_methods_reference", "Kokkos::kokkos"]):
+        failures.append("checker self-test failed to reject a direct participant Kokkos dependency")
     if check_link_policy("nexora_kokkos_tests", ["nexora_data"]):
         failures.append("checker self-test failed to allow the dedicated test's data dependency")
     if not check_link_policy("nexora_kokkos_tests", ["nexora_data", "nexora_core"]):
@@ -89,6 +132,21 @@ def policy_self_test() -> list[str]:
     if not check_kokkos_header(Path("include/nexora/core/Status.hpp"),
                                "include/nexora", "core", "Kokkos_Core.hpp"):
         failures.append("checker self-test failed to reject Kokkos in core headers")
+    if check_kokkos_header(Path("src/methods/reference/State.hpp"),
+                           "src", "methods", "Kokkos_Core.hpp"):
+        failures.append("checker self-test failed to allow Kokkos in reference methods")
+    if check_internal_include(Path("src/participants/reference/Participant.hpp"),
+                              "src", "methods/reference/State.hpp"):
+        failures.append("checker self-test failed to allow participant use of method internals")
+    if not check_internal_include(Path("src/methods/reference/State.hpp"),
+                                  "src", "participants/reference/Participant.hpp"):
+        failures.append("checker self-test failed to reject method use of participant internals")
+    if not check_internal_include(Path("src/core/Time.hpp"),
+                                  "src", "methods/reference/State.hpp"):
+        failures.append("checker self-test failed to reject core use of method internals")
+    if check_internal_include(Path("tests/reference/reference_tests.cpp"),
+                              "tests", "methods/reference/State.hpp"):
+        failures.append("checker self-test failed to allow reference tests to include internals")
     return failures
 
 
@@ -134,8 +192,8 @@ def check_includes() -> list[str]:
             module = below_scope.parts[0]
             if scope in {"apps", "tests"}:
                 allowed = ALLOWED_INCLUDES.keys()
-            elif module in ALLOWED_INCLUDES:
-                allowed = ALLOWED_INCLUDES[module]
+            elif module in SOURCE_MODULE_INCLUDES:
+                allowed = SOURCE_MODULE_INCLUDES[module]
             else:
                 errors.append(f"{relative}: unclassified source module '{module}'")
                 continue
@@ -146,6 +204,7 @@ def check_includes() -> list[str]:
 
             for header in INCLUDE.findall(path.read_text(encoding="utf-8")):
                 errors.extend(check_kokkos_header(relative, scope, module, header))
+                errors.extend(check_internal_include(relative, scope, header))
                 header_parts = header.replace("\\", "/").split("/")
                 if ".." in header_parts:
                     errors.append(f"{relative}: relative traversal include is forbidden")

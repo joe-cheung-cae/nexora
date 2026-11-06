@@ -42,6 +42,8 @@ add_subdirectory(src/core)
 add_subdirectory(src/exec)
 add_subdirectory(src/data)
 add_subdirectory(src/simulation)
+add_subdirectory(src/methods/reference)
+add_subdirectory(src/participants/reference)
 add_subdirectory(apps/nexora)
 
 if(BUILD_TESTING)
