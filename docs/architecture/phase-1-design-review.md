@@ -1,12 +1,12 @@
 # Nexora Phase 1：Kokkos 基础与代表性切片评审
 
-修订时间：`2026-11-06T15:58:40+08:00`。**本稿取代原 Phase 1 多 backend 方案。Kokkos 单一路线已确定；首个受限 Serial CPU 切片已获授权并实现；完整 Phase 1 及其余源码、CMake、CI、测试和功能迁移仍须另获明确批准。**
+修订时间：`2026-11-06T17:32:29+08:00`。**本稿取代原 Phase 1 多 backend 方案。Kokkos 单一路线已确定；Serial CPU 基础及最小参考状态生命周期两个有限切片已获授权并实现；完整 Phase 1 及其余迁移仍须另获明确批准。**
 
 唯一架构入口：[overview](overview.md)。关键类型和生命周期：[kokkos-design](kokkos-design.md)。当前源码、旧类型/target 处置及归档逐项映射：[migration-roadmap](migration-roadmap.md)。依赖版本和离线过程：[build-and-validation](build-and-validation.md)。
 
 ## 1. 当前基础与 Phase 1 出口
 
-当前切片引入 exact Kokkos Serial 包、typed View 执行测试和经 `nexora::data` 的安装消费；旧 host Buffer、同步 ExecContext、字段元数据及单参与者控制仍暂留。没有真实方法求解器、通用 GPU executor、分布式 halo 或持久 checkpoint。实际证据见 [CPU 切片验证](kokkos-cpu-slice-validation.md)。已有 dummy 参与者测试不证明实际数组的恢复；原评审稿中的历史 CPU/设备测试描述不能作为本轮目标证据。
+当前实现包含 exact Kokkos Serial 包、typed View 执行测试、经 `nexora::data` 的安装消费，以及使用真实 Kokkos 数组的 reference 状态/参与者。后者复用现有 Simulation，覆盖独立试算、提交、主动恢复、数值失败、重试和重放。旧 host Buffer、同步 ExecContext、字段元数据及单参与者控制仍暂留。没有真实方法求解器、分布式 halo 或持久 checkpoint。实际证据见 [CPU 切片验证](kokkos-cpu-slice-validation.md)和[参考生命周期验证](reference-lifecycle-validation.md)；dummy 测试和历史 CPU/设备描述不替代新路径的执行证据。
 
 P1 直接交付 Kokkos 默认 CPU 和可选 CUDA 的**同一算子源码**、typed 字段、权限/外部 owner、accepted/trial 与恢复，以及 SPH 非规则邻域、FVM 面通量/单元累积两个代表性结构切片。简单标量 reference 保留用于基础生命周期测试。P1 不关闭完整 SPH/DEM 或 FVM solver 的物理验证，不提前宣称 FEM/LBM/MBD 已可用。
 
@@ -14,7 +14,7 @@ P1 直接交付 Kokkos 默认 CPU 和可选 CUDA 的**同一算子源码**、typ
 
 ## 2. 实施任务与依赖
 
-下表定义**完整任务的实施落点与验收**，不能视为全部获批或完成。当前仅落实 P1-01a/02 的有限 CPU 构建、依赖和计算冒烟子集，详见 [CPU 切片验证](kokkos-cpu-slice-validation.md)。内部 target 使用 `nexora_*`，导出 target 使用 `nexora::*`。
+下表定义**完整任务的实施落点与验收**，不能视为全部获批或完成。当前落实 P1-01a/02 的有限 CPU 构建子集，以及步骤 2 的 P1-03/04/05/06 reference 子集：稳定 ID 与 x/q 语义、const typed 快照、独立 accepted/trial、Serial 算子、单参与者恢复与重试。`TimeInterval` 已下移 core。通用 schema/lease、外部 owner、异步交接、快照预算和 CPU/CUDA 同源实例化仍未实现，这些任务不能整体标为完成。详见[步骤 2 记录](reference-lifecycle-validation.md)。内部 target 使用 `nexora_*`，导出 target 使用 `nexora::*`。
 
 | 任务 | 文件/目录及 target | 接口与前置依赖 | 通过条件 |
 |---|---|---|---|
@@ -38,7 +38,7 @@ P1 直接交付 Kokkos 默认 CPU 和可选 CUDA 的**同一算子源码**、typ
 
 ### 3.1 保留的 reference 夹具
 
-保留原稿的无量纲 `x,q`、`Association::node`、`entity_set=reference_samples` 与单位 `1`，公式为 `d=dt×λ×x`、`trial_x=x−d`、`trial_q=q+d`。有限输入、正步长及 `0<dt×λ≤1`；积分使用现有 `TimeInterval::duration()`，不得用舍入绝对时间端点相减替代。该模型仍是待实施的基础 fixture，不是现有产品 solver。
+保留原稿的无量纲 `x,q`、`Association::node`、`entity_set=reference_samples` 与单位 `1`，公式为 `d=dt×λ×x`、`trial_x=x−d`、`trial_q=q+d`。有限输入、正步长及 `0<dt×λ≤1`；积分使用现有 `TimeInterval::duration()`，不得用舍入绝对时间端点相减替代。该模型已作为内部 Serial 基础 fixture 实现并执行，不是产品 solver，也不提供 GPU 证据。
 
 原稿数值门槛不变：`λ=1 s⁻¹, x₀=1, q₀=0, T=1 s`，16/32/64 步；对照 `exp(−t)` 与独立显式 Euler 离散值，两次观测阶 `0.9–1.1`，`abs(x+q−1)≤1e−12`；每分量 CPU/CUDA `abs(diff)≤1e−12+1e−10×abs(ref)`。这些容差只对 reference 生效，不能套到 SPH、FVM 或真实耦合。
 
@@ -60,7 +60,7 @@ P1-01 必须从有来源和复用权利的参考公式/数据冻结核函数、�
 <a id="acceptance"></a>
 ## 4. 构建、数值、生命周期与性能验收矩阵
 
-**以下是完整 Phase 1 的通过条件；有限 CPU 切片的单独证据见 [验证记录](kokkos-cpu-slice-validation.md)，不代表这些完整门槛通过。** 每个报告记录 ISO 8601 秒级时间及 timezone；CPU 型号/线程/NUMA、GPU 型号/内存/架构、OS、compiler/stdlib、Kokkos commit/digest/options、toolkit/driver、MPI 版本（适用时）、命令、输入/参考 hash 与 passed/failed/skipped。时序/生命周期测试要证明实际发生预期先后关系，不能仅凭偶然结果正确。
+**以下是完整 Phase 1 的通过条件；有限 CPU 切片的单独证据见[基础切片记录](kokkos-cpu-slice-validation.md)和[参考生命周期记录](reference-lifecycle-validation.md)，不代表这些完整门槛通过。** 每个报告记录 ISO 8601 秒级时间及 timezone；CPU 型号/线程/NUMA、GPU 型号/内存/架构、OS、compiler/stdlib、Kokkos commit/digest/options、toolkit/driver、MPI 版本（适用时）、命令、输入/参考 hash 与 passed/failed/skipped。时序/生命周期测试要证明实际发生预期先后关系，不能仅凭偶然结果正确。
 
 | ID / 任务 | 工作负载与正反例 | 通过条件与证据 |
 |---|---|---|

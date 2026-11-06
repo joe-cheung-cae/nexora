@@ -1,6 +1,6 @@
 # Nexora 当前架构入口
 
-修订时间：`2026-11-06T15:58:40+08:00`。**这是唯一有效的架构入口。首个受限 Kokkos Serial CPU 切片已获授权并实现；完整 Phase 1 及后续迁移仍须另获批准。**
+修订时间：`2026-11-06T17:32:29+08:00`。**这是唯一有效的架构入口。Kokkos Serial CPU 基础切片及步骤 2 的最小参考状态生命周期已获授权并实现；完整 Phase 1 及其余迁移仍须另获批准。**
 
 ## 1. 决策与文档效力
 
@@ -18,7 +18,7 @@ Nexora 自有数值计算和存储统一使用 Kokkos，包括默认 CPU、可�
 | [Checkpoint 与重启](checkpoint-restart.md) | R0 的同配置范围、兼容检查/拒绝/验收；R1–R3 延期边界 |
 | [构建与依赖政策](build-and-validation.md) | 版本锁定、工具链、离线供给、安装消费与配置能力 |
 
-先前设计文档的文件清单与一致性检查见[文档审查记录](documentation-audit.md)，该记录不新增架构规范；当前 CPU 实施与验证见 [CPU 切片验证](kokkos-cpu-slice-validation.md)。
+先前设计文档的文件清单与一致性检查见[文档审查记录](documentation-audit.md)，该记录不新增架构规范；实际实施与验证见 [CPU 基础切片](kokkos-cpu-slice-validation.md)和[参考状态生命周期](reference-lifecycle-validation.md)。
 
 [ADR-001](../adr/ADR-001-module-boundaries.md)、[ADR-002](../adr/ADR-002-language-and-backend-baseline.md) 已被替代，只解释 bootstrap 源码。[归档 v1.2](../archive/CFDX_Multimethod_HPC_Architecture_Plan_v1.2_NVIDIA_Integration.md) 全篇为历史材料，其中的目录树、配置、代码、阶段和验收不是当前要求。历史中的物理问题可作为调研线索，须经现行计划重新采纳。[ADR-014](../adr/ADR-014-license-and-provenance.md) 的项目许可证待定与来源审查继续有效。
 
@@ -26,9 +26,11 @@ Nexora 自有数值计算和存储统一使用 Kokkos，包括默认 CPU、可�
 
 首个切片要求本地 exact Kokkos 5.2.2 Serial-only、C++20 与 CMake 3.25.2+。`data → Kokkos::kokkos` 公开传递依赖；typed View 测试和只链接 `nexora::data` 的独立安装消费者执行 Kokkos 路径。CLI 报告 Kokkos 构建元数据。实际检查见 [CPU 切片验证](kokkos-cpu-slice-validation.md)。旧 `Buffer`、`ExecContext`、`FieldView`、control 和 exec 导出暂时保留，旧消费测试独立保留；这不是最终目标图。
 
+步骤 2 新增内部 `nexora_methods_reference` 和 `nexora_participants_reference`。方法持有稳定 ID、typed `x/q` Views、accepted 时间与版本；每次试算新分配独立数组，成功提交才发布，只读 managed 快照持续保活旧版本。参考参与者复用现有 `ParticipantIF` 和 `Simulation`，已验证主动恢复、数值失败、合法重试及重放。共享 `TimeInterval` 原样移至 `core/Time.hpp`，旧 participant 头仍兼容包含。该闭环不引入通用 Field/lease 框架；内部 reference 不安装、不加入 CLI。实际数值与生命周期结果见[验证记录](reference-lifecycle-validation.md)。
+
 任何 `NEXORA_GPU_BACKEND` 值均被拒绝；旧 native CUDA 源文件休眠。OpenMP、CUDA/HIP 尚未实现；可选 MPI smoke 保留但本切片未验证。没有真实 SPH/FVM/FEM/LBM/DEM/MBD solver、MPI halo 或持久 checkpoint。现有 CI 未配置 Kokkos 依赖，不能作为本切片证据。
 
-下图为原 bootstrap 图，现行 transitional 图还包括 `data → Kokkos::kokkos` 和 CLI 的 Kokkos 边：
+下图为原 bootstrap 图，现行 transitional 图还包括 `data → Kokkos::kokkos`、CLI 的 Kokkos 边，以及 `participants_reference → participant_api / methods_reference`、`methods_reference → data / Kokkos::kokkos`：
 
 ```mermaid
 flowchart TD
@@ -47,7 +49,7 @@ flowchart TD
 
 ## 3. 批准后模块图
 
-箭头从使用者指向依赖。所有新边和新模块都是设计目标；后续模块按实际使用者引入，避免预建空框架。
+箭头从使用者指向依赖。除上一节列明的实现外，新边和新模块仍是设计目标；后续模块按实际使用者引入，避免预建空框架。
 
 ```mermaid
 flowchart TD

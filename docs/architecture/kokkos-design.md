@@ -1,6 +1,8 @@
 # Kokkos 单一路线：数据、执行与生命周期设计
 
-修订时间：`2026-11-06T14:54:00+08:00`。**批准后目标，尚未实现。** 权威入口是 [overview](overview.md)，源码现状见[迁移表](migration-roadmap.md#source-inventory)。本文声明面向 **C++20 / Kokkos 5.2.2**，版本和工具链依据见[构建政策](build-and-validation.md)。代码是可评审的接口草图，非已编译的公共头；未列出的验证实现必须随实现任务交付。
+修订时间：`2026-11-06T17:32:29+08:00`。**本文定义完整迁移目标；只有下列有限切片已实现。** 权威入口是 [overview](overview.md)，源码现状见[迁移表](migration-roadmap.md#source-inventory)。本文声明面向 **C++20 / Kokkos 5.2.2**，版本和工具链依据见[构建政策](build-and-validation.md)。后文通用类型仍是可评审的接口草图，非已编译的公共头；不能把局部实现视为全部契约通过。
+
+当前已有 Serial CPU 基础构建与整数计算，以及内部 reference `State`/`Participant`：稳定 ID、语义绑定的 `x/q` typed Views、accepted 时间/版本、独立 trial 分配、const managed 结果快照、同步 Serial 算子及现有 Simulation 下的提交/恢复/重试。旧快照持续保活且不再写入，所有快照必须先于应用的 Kokkos finalize 销毁；没有按引用计数判定写权限或复用数组。记录见[参考生命周期验证](reference-lifecycle-validation.md)。通用 ReadField/WriteField、lease 仲裁、外部 owner、TransportView、快照预算和异步关闭等仍未实现；现有 FieldDescriptor 只复用语义子集，尚未完成 schema 拆分。
 
 ## 1. 职责收敛
 
@@ -481,7 +483,7 @@ public:
 } // namespace nexora
 ```
 
-这些 host 契约不暴露 engine SDK 或 GPU 类型。批准后将共享值类型 `TimeInterval` 从当前 `participant/TimeConstraint.hpp` 移至 `core/Time.hpp`，原类型和 `requested_step/duration()` 语义不变；TimeConstraint 仍属于 participant。MbdAdvanceReport 由 participant 转成 TrialReport，engine API 无须依赖 participant。snapshot 的具体机械数据接口明确 units/frame、取矩点、姿态约定、wrench/impulse 和时间区间；FP64、重力、压力等已有约定继续保留。每个 PhysicalObjectId 的运动/惯性 owner 唯一，每个接触 pair 的 contact owner 唯一：DEM 积分自由颗粒，MBD 积分机构，流体边界只采样运动并返还载荷，避免重复重力、惯性与接触力。
+这些 host 契约不暴露 engine SDK 或 GPU 类型。共享值类型 `TimeInterval` 已在参考状态切片中从 `participant/TimeConstraint.hpp` 原样移至 `core/Time.hpp`，原头兼容包含，`requested_step/duration()` 语义不变；TimeConstraint 仍属于 participant。MbdAdvanceReport 仍是拟议类型，由 participant 转成 TrialReport，engine API 无须依赖 participant。snapshot 的具体机械数据接口明确 units/frame、取矩点、姿态约定、wrench/impulse 和时间区间；FP64、重力、压力等已有约定继续保留。每个 PhysicalObjectId 的运动/惯性 owner 唯一，每个接触 pair 的 contact owner 唯一：DEM 积分自由颗粒，MBD 积分机构，流体边界只采样运动并返还载荷，避免重复重力、惯性与接触力。
 
 Nexora 自有 MBD 数值数组与批量算子同样采用 Kokkos。经批准的完整外部引擎（Chrono/Newton 等候选）可以保有内部数据和运行时；只交换必要领域端口快照，必要时显式复制。它不能接管 SPH/FVM 的通用 kernel 执行。引擎替换涉及 formulation/精度/恢复/许可证的独立评审，不能因 API 适配成功自动获准。**Warp 仅允许作为经批准的完整外部引擎的内部依赖**；不得通过外部应用、服务、worker 或进程包装，重新建立 Nexora 通用算子 provider 或第二套计算基础设施。进程隔离不改变此职责边界。
 
@@ -505,4 +507,4 @@ Nexora 自有 MBD 数值数组与批量算子同样采用 Kokkos。经批准的�
 
 Context7 使用 `/kokkos/kokkos` 检索构建、View 和执行实例；返回的构建示例跟随 develop，View 查询未命中。因此固定版本要求按[官方 tag 源码与 release](build-and-validation.md)核对，具体 View/copy/fence/mirror/interop 规则以上文官方页面为依据。滚动文档出现 5.3 的未来说明时，不据此使用 5.2.2 不存在的 API。
 
-本轮只完成设计，未编译上述声明、未安装 Kokkos、未运行 GPU 数值或性能。P1 必须在锁定包上编译声明与实例化、验证实际 stream API，并执行[验收矩阵](phase-1-design-review.md#acceptance)。这不是以文档核验替代运行证据。
+Serial 基础切片和内部 reference 已在锁定 5.2.2 包上编译执行，实测范围见[CPU 记录](kokkos-cpu-slice-validation.md)和[参考生命周期记录](reference-lifecycle-validation.md)。这不验证本文未实现的通用声明、GPU 数值或性能。完整 P1 仍须编译对应声明与实例化、验证实际 stream API，并执行[验收矩阵](phase-1-design-review.md#acceptance)。

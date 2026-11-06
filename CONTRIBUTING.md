@@ -2,7 +2,7 @@
 
 ## Read the design boundary first
 
-The [architecture overview](docs/architecture/overview.md) is the authoritative entry point. The first limited Serial CPU slice is implemented; the remaining [Phase 1 review](docs/architecture/phase-1-design-review.md) is unapproved. C++20, CMake 3.25.2+, Ninja and a locally provisioned exact Kokkos 5.2.2 Serial-only package are required. See [build and validation](docs/architecture/build-and-validation.md) for acquisition and package requirements and the [CPU slice validation record](docs/architecture/kokkos-cpu-slice-validation.md) for actual results.
+The [architecture overview](docs/architecture/overview.md) is the authoritative entry point. The Serial CPU foundation and minimal reference state lifecycle are implemented; the remaining [Phase 1 review](docs/architecture/phase-1-design-review.md) is unapproved. C++20, CMake 3.25.2+, Ninja and a locally provisioned exact Kokkos 5.2.2 Serial-only package are required. See [build and validation](docs/architecture/build-and-validation.md) for acquisition and package requirements, and the [CPU foundation](docs/architecture/kokkos-cpu-slice-validation.md) and [reference lifecycle](docs/architecture/reference-lifecycle-validation.md) records for actual results.
 
 ## Current CPU checks
 
@@ -16,6 +16,8 @@ cmake --fresh --preset cpu-release -DKokkos_DIR="<kokkos-prefix>/lib/cmake/Kokko
 cmake --build --preset cpu-release
 ctest --preset cpu-release
 ```
+
+The same CTest suite includes `nexora_reference_tests`: real Kokkos accepted/trial arrays, commit/restore/failure/retry/replay, retained const snapshots, requested-duration rounding and the existing Euler convergence criteria. Its method and participant targets are internal; they are not installed or exposed by the CLI. Installed-package tests cover `core/Time.hpp`, compatibility through `participant/TimeConstraint.hpp`, and the existing transitive Kokkos computation. Keep every participant and retained snapshot inside the application's Kokkos runtime lifetime.
 
 The package is required offline; configuration does not download it. `nexora::data` propagates Kokkos; the new installed consumer uses only that exported Nexora target. Legacy exec exports and a separate bootstrap consumer are retained temporarily. `NEXORA_GPU_BACKEND` is rejected for every value; the old native CUDA source is dormant. OpenMP and GPU profiles are future work. The `mpi-debug` preset retains an optional MPI C API smoke probe, unvalidated for this slice and not distributed physics. Existing CI has not been updated to provision Kokkos and is not evidence of this slice.
 
