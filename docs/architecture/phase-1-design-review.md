@@ -1,6 +1,6 @@
 # Nexora Phase 1：Kokkos 基础与代表性切片评审
 
-修订时间：`2026-11-09T20:24:13+08:00`。**本稿取代原 Phase 1 多 backend 方案。Kokkos 单一路线已确定；Serial CPU 基础、最小参考状态生命周期及 P1-04 的 CPU 字段访问、外部 owner、本地传输快照和接收解包已获授权并实现；本次已授权提前清理旧 core 数值容器和 exec 层；完整 Phase 1 仍开放。**
+修订时间：`2026-11-11T13:29:35+08:00`。**本稿取代原 Phase 1 多 backend 方案。当前已实现 Serial CPU 基础、Reference 同步窗口、P1-04 的 CPU 字段权限与本地传输，以及 Reference 的最小历史恢复和预算。完整 Phase 1 仍开放。**
 
 唯一架构入口：[overview](overview.md)。关键类型和生命周期：[kokkos-design](kokkos-design.md)。当前源码、旧类型/target 处置及归档逐项映射：[migration-roadmap](migration-roadmap.md)。依赖版本和离线过程：[build-and-validation](build-and-validation.md)。
 
@@ -14,7 +14,7 @@ P1 直接交付 Kokkos 默认 CPU 和可选 CUDA 的**同一算子源码**、typ
 
 ## 2. 实施任务与依赖
 
-下表定义**完整任务的实施落点与验收**，不能视为全部获批或完成。当前落实 P1-01a/02 的有限 CPU 构建子集，以及步骤 2 的 P1-03/04/05/06 reference 子集：稳定 ID 与 x/q 语义、const typed 快照、独立 accepted/trial、Serial 算子、单参与者恢复与重试。`TimeInterval` 已下移 core。P1-03/04 的 Serial 子集覆盖纯 `data_schema`、typed 字段绑定、整分配读写 lease、外部 HostSpace owner、本地 `TransportView` 和按稳定 ID 校验解包。P1-06 的 Serial 参考窗口已接入 lease 和本地收发，两个 reference 实例验证了接收失败回滚、重试与旧发送快照保活。通用 ID/permutation、设备异步交接、快照预算和 CPU/CUDA 同源实例化仍待完成。见[步骤 2 记录](reference-lifecycle-validation.md)、[CPU 字段绑定](field-binding-validation.md)、[外部内存与本地传输](external-transport-validation.md)、[CPU 本地接收](local-receive-validation.md)和[reference 窗口集成](reference-window-validation.md)。内部 target 使用 `nexora_*`，导出 target 使用 `nexora::*`。
+下表定义**完整任务的实施落点与验收**。当前落实 P1-01a/02 的 Serial 构建子集及 P1-03/04 的字段绑定、整组读写 lease、外部 HostSpace owner、稳定 ID、双向排列、CSR 与本地交换。P1-05/06 的 Reference Serial 子集使用显式执行实例，已验收独立 accepted/trial、最小 replay history 与控制恢复、失败重试和快照预算。`TimeInterval` 已下移 core。完整 P1 还需设备异步交接、CPU/CUDA 同源实例化与实机验证，以及 SPH/FVM 代表性方法的状态与恢复验收。内部 target 使用 `nexora_*`，导出 target 使用 `nexora::*`。 [实体与拓扑验证](entity-topology-validation.md) · [状态重排与整组授权](structure-execution-validation.md) · [Reference 进程内恢复与预算](reference-resource-validation.md)
 
 | 任务 | 文件/目录及 target | 接口与前置依赖 | 通过条件 |
 |---|---|---|---|

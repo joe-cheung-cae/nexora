@@ -1,0 +1,4 @@
+version=1
+fixture=reference
+end=Inf
+step=0.25

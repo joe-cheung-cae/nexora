@@ -1,4 +1,13 @@
 if(NOT CMAKE_CROSSCOMPILING)
+    add_test(NAME nexora_cli_case_suite COMMAND "${CMAKE_COMMAND}"
+        "-Dcli=$<TARGET_FILE:nexora>"
+        "-Doracle=$<TARGET_FILE:nexora_reference_cli_oracle>"
+        "-Dfixture_dir=${PROJECT_SOURCE_DIR}/cases/reference"
+        "-Dscratch=${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/cli-suite"
+        "-Dexpected_precision=$<IF:$<BOOL:${NEXORA_ENABLE_DOUBLE_PRECISION}>,double,float>"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/RunCliSuite.cmake")
+    set_tests_properties(nexora_cli_case_suite PROPERTIES LABELS "cli;reference" TIMEOUT 60)
+
     add_test(NAME nexora_install_consumer COMMAND "${CMAKE_COMMAND}"
         "-Dproject_source=${PROJECT_SOURCE_DIR}"
         "-Dproject_build=${PROJECT_BINARY_DIR}"
@@ -19,6 +28,13 @@ if(NOT CMAKE_CROSSCOMPILING)
         "-Dkokkos_dir=${Kokkos_DIR}"
         "-Dexpected_double_precision=${NEXORA_REAL_IS_DOUBLE}"
         "-Dpackage_dir=${CMAKE_INSTALL_LIBDIR}/cmake/Nexora"
+        "-Dcli_oracle=$<TARGET_FILE:nexora_reference_cli_oracle>"
+        "-Dfixture_dir=${PROJECT_SOURCE_DIR}/cases/reference"
+        "-Dcli_suite=${CMAKE_CURRENT_SOURCE_DIR}/RunCliSuite.cmake"
+        "-Dcli_executable_name=nexora${CMAKE_EXECUTABLE_SUFFIX}"
+        "-Dcli_executable_suffix=${CMAKE_EXECUTABLE_SUFFIX}"
+        "-Dcli_install_bindir=${CMAKE_INSTALL_BINDIR}"
+        "-Dexpected_precision=$<IF:$<BOOL:${NEXORA_ENABLE_DOUBLE_PRECISION}>,double,float>"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/VerifyInstall.cmake")
     set_tests_properties(nexora_install_consumer PROPERTIES LABELS package TIMEOUT 120)
 endif()

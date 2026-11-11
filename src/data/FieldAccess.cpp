@@ -5,7 +5,9 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <new>
 #include <set>
+#include <vector>
 
 namespace nexora::detail {
 namespace {
@@ -53,10 +55,58 @@ struct FieldAuthority {
     const std::size_t bytes;
     const bool writable;
     bool registered{};
+    std::uint64_t incarnation{};
     std::mutex mutex;
     std::size_t readers{};
     bool writing{};
     bool closed{};
+};
+
+// One record per allocation in a granted group. Every returned binding for
+// that allocation shares the record, so any binding can outlive its siblings.
+struct FieldGrant {
+    FieldGrant(std::shared_ptr<FieldAuthority> authority, FieldAccess access) noexcept
+        : authority(std::move(authority)), access(access) {}
+
+    ~FieldGrant() {
+        if (!active)
+            return;
+        const std::lock_guard lock(authority->mutex);
+        if (access == FieldAccess::read)
+            --authority->readers;
+        else
+            authority->writing = false;
+    }
+
+    // The caller holds this authority's mutex during both checks and updates.
+    Status validate() const {
+        if (authority->closed)
+            return {StatusCode::invalid_state, "field issuer is closed"};
+        if (access == FieldAccess::read) {
+            if (authority->writing)
+                return {StatusCode::invalid_state, "allocation has an active writer"};
+            if (authority->readers == std::numeric_limits<std::size_t>::max())
+                return {StatusCode::resource_exhausted, "field reader count exhausted"};
+        } else {
+            if (!authority->writable)
+                return {StatusCode::invalid_state, "field allocation is read-only"};
+            if (authority->writing || authority->readers != 0)
+                return {StatusCode::invalid_state, "allocation has active readers or a writer"};
+        }
+        return {};
+    }
+
+    void activate() noexcept {
+        if (access == FieldAccess::read)
+            ++authority->readers;
+        else
+            authority->writing = true;
+        active = true;
+    }
+
+    const std::shared_ptr<FieldAuthority> authority;
+    const FieldAccess access;
+    bool active{};
 };
 
 FieldIssuer::FieldIssuer(std::shared_ptr<FieldAuthority> authority, FieldStamp stamp) noexcept
@@ -116,7 +166,8 @@ Result<FieldIssuer> FieldIssuer::register_authority(std::shared_ptr<FieldAuthori
             throw;
         }
         authority->registered = true;
-        stamp.storage_incarnation = ++registry.last_incarnation;
+        authority->incarnation = ++registry.last_incarnation;
+        stamp.storage_incarnation = authority->incarnation;
     }
     return FieldIssuer(std::move(authority), stamp);
 }
@@ -132,24 +183,51 @@ void FieldIssuer::close() noexcept {
     }
 }
 
-Status FieldIssuer::acquire(FieldAccess access) const {
-    const std::lock_guard lock(authority_->mutex);
-    if (authority_->closed)
-        return {StatusCode::invalid_state, "field issuer is closed"};
-    if (access == FieldAccess::read) {
-        if (authority_->writing)
-            return {StatusCode::invalid_state, "allocation has an active writer"};
-        if (authority_->readers == std::numeric_limits<std::size_t>::max())
-            return {StatusCode::resource_exhausted, "field reader count exhausted"};
-        ++authority_->readers;
-    } else {
-        if (!authority_->writable)
-            return {StatusCode::invalid_state, "field allocation is read-only"};
-        if (authority_->writing || authority_->readers != 0)
-            return {StatusCode::invalid_state, "allocation has active readers or a writer"};
-        authority_->writing = true;
-    }
+Status FieldIssuer::check_runtime() {
+    if (!Kokkos::is_initialized() || Kokkos::is_finalized())
+        return {StatusCode::invalid_state, "field access requires an active Kokkos runtime"};
     return {};
+}
+
+Status FieldIssuer::acquire_group(std::span<GroupMember> members,
+                                  std::span<std::shared_ptr<FieldGrant>> grants) {
+    if (auto valid = check_runtime(); !valid.ok())
+        return valid;
+    for (std::size_t index = 0; index < members.size(); ++index)
+        members[index].index = index;
+    std::ranges::sort(members, {}, [](const GroupMember& member) {
+        return member.authority->incarnation;
+    });
+    for (std::size_t index = 1; index < members.size(); ++index) {
+        const auto& previous = members[index - 1];
+        const auto& current = members[index];
+        if (previous.authority == current.authority && previous.access != current.access)
+            return {StatusCode::invalid_argument, "one allocation has conflicting group access modes"};
+    }
+
+    try {
+        std::vector<std::shared_ptr<FieldGrant>> distinct;
+        distinct.reserve(members.size());
+        for (const auto& member : members) {
+            if (distinct.empty() || distinct.back()->authority != member.authority)
+                distinct.push_back(std::make_shared<FieldGrant>(member.authority, member.access));
+            grants[member.index] = distinct.back();
+        }
+
+        std::vector<std::unique_lock<std::mutex>> locks;
+        locks.reserve(distinct.size());
+        for (const auto& grant : distinct)
+            locks.emplace_back(grant->authority->mutex);
+        for (const auto& grant : distinct) {
+            if (auto valid = grant->validate(); !valid.ok())
+                return valid;
+        }
+        for (const auto& grant : distinct)
+            grant->activate();
+        return {};
+    } catch (const std::bad_alloc&) {
+        return {StatusCode::resource_exhausted, "cannot prepare field grants"};
+    }
 }
 
 Result<FieldIssuer::StorageRange> FieldIssuer::validate_stamp_and_storage(
@@ -228,47 +306,15 @@ Status FieldIssuer::validate_shape(std::span<const std::size_t> strides,
 } // namespace nexora::detail
 
 namespace nexora {
-ReadLease::ReadLease(std::shared_ptr<detail::FieldAuthority> authority) noexcept
-    : authority_(std::move(authority)) {}
+ReadLease::ReadLease(std::shared_ptr<detail::FieldGrant> grant) noexcept
+    : grant_(std::move(grant)) {}
 
-ReadLease& ReadLease::operator=(ReadLease&& other) noexcept {
-    if (this != &other) {
-        release();
-        authority_ = std::move(other.authority_);
-    }
-    return *this;
-}
+ReadLease& ReadLease::operator=(ReadLease&&) noexcept = default;
+ReadLease::~ReadLease() = default;
 
-ReadLease::~ReadLease() {
-    release();
-}
+WriteLease::WriteLease(std::shared_ptr<detail::FieldGrant> grant) noexcept
+    : grant_(std::move(grant)) {}
 
-void ReadLease::release() noexcept {
-    if (authority_) {
-        const std::lock_guard lock(authority_->mutex);
-        --authority_->readers;
-    }
-}
-
-WriteLease::WriteLease(std::shared_ptr<detail::FieldAuthority> authority) noexcept
-    : authority_(std::move(authority)) {}
-
-WriteLease& WriteLease::operator=(WriteLease&& other) noexcept {
-    if (this != &other) {
-        release();
-        authority_ = std::move(other.authority_);
-    }
-    return *this;
-}
-
-WriteLease::~WriteLease() {
-    release();
-}
-
-void WriteLease::release() noexcept {
-    if (authority_) {
-        const std::lock_guard lock(authority_->mutex);
-        authority_->writing = false;
-    }
-}
+WriteLease& WriteLease::operator=(WriteLease&&) noexcept = default;
+WriteLease::~WriteLease() = default;
 } // namespace nexora

@@ -2,8 +2,10 @@
 #include <Kokkos_Core.hpp>
 
 #include "BuildInfo.hpp"
+#include "ReferenceCommand.hpp"
 
 #include <iostream>
+#include <optional>
 #include <string_view>
 
 #if defined(_MSVC_LANG)
@@ -23,10 +25,16 @@ namespace {
 
 void usage(std::ostream& out) {
     out << "Usage: nexora <command>\n"
-        << "  --version      Print the project version\n"
-        << "  inspect-build  Print compiled capabilities\n"
-        << "  smoke-cuda     Run the optional CUDA diagnostic\n"
-        << "  smoke-mpi      Run the optional MPI diagnostic with two ranks\n";
+        << "  --version        Print the project version\n"
+        << "  inspect-build    Print compiled capabilities\n"
+        << "  validate <case>  Check a reference case\n"
+        << "  plan <case>      Describe a reference case execution\n"
+        << "  run <case>       Execute a reference case\n"
+        << "  smoke-cuda       Run the optional CUDA diagnostic\n"
+        << "  smoke-mpi        Run the optional MPI diagnostic with two ranks\n";
+#if NEXORA_REFERENCE_TEST_FIXTURE
+    out << "  run --fixture <case>  Execute a controlled reference fixture\n";
+#endif
 }
 
 void inspect_build() {
@@ -53,12 +61,38 @@ void inspect_build() {
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 2) {
+    if (argc < 2) {
         usage(std::cerr);
         return 2;
     }
 
     const std::string_view command{argv[1]};
+    using nexora::cli::ReferenceCommand;
+    std::optional<ReferenceCommand> reference;
+    if (command == "validate") {
+        reference = ReferenceCommand::validate;
+    } else if (command == "plan") {
+        reference = ReferenceCommand::plan;
+    } else if (command == "run") {
+        reference = ReferenceCommand::run;
+    }
+    if (reference) {
+        const bool fixture = *reference == ReferenceCommand::run && argc >= 3 &&
+                             std::string_view{argv[2]} == "--fixture";
+        if (fixture && argc == 4) {
+            return nexora::cli::reference_command(ReferenceCommand::run_fixture, argv[3]);
+        }
+        if (!fixture && argc == 3) {
+            return nexora::cli::reference_command(*reference, argv[2]);
+        }
+        usage(std::cerr);
+        return 2;
+    }
+    if (argc != 2) {
+        usage(std::cerr);
+        return 2;
+    }
+
     if (command == "--help") {
         usage(std::cout);
     } else if (command == "--version") {

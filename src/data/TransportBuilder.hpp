@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <exception>
 #include <limits>
+#include <memory>
 #include <new>
 #include <nexora/core/Result.hpp>
 #include <nexora/data/FieldBinding.hpp>
@@ -18,10 +19,24 @@ namespace nexora::detail {
 struct TransportBuilder {
     enum class SourceLifetime { until_complete, until_packed };
 
+    // Counts the requested packed array payload, excluding Kokkos allocation metadata.
+    template <class T>
+    static Result<std::size_t> packed_payload_bytes(std::size_t entities, std::size_t components) {
+        constexpr auto max_size = std::numeric_limits<std::size_t>::max();
+        constexpr auto id_bytes = sizeof(std::uint64_t);
+        if (components == 0 || components > (max_size - id_bytes) / sizeof(T))
+            return Status{StatusCode::invalid_argument, "transport component count exceeds size capacity"};
+        const auto bytes_per_entity = id_bytes + components * sizeof(T);
+        if (entities > max_size / bytes_per_entity)
+            return Status{StatusCode::invalid_argument, "transport payload exceeds size capacity"};
+        return entities * bytes_per_entity;
+    }
+
     template <class ValueView, class IdView>
     static auto prepare(const Kokkos::Serial& exec, TransportPurpose purpose,
                         ReadField<ValueView> values, ReadField<IdView> ids,
-                        SourceLifetime lifetime = SourceLifetime::until_complete)
+                        SourceLifetime lifetime = SourceLifetime::until_complete,
+                        std::shared_ptr<const void> retention = {})
         -> Result<TransportView<std::remove_const_t<typename ValueView::value_type>>> {
         if (!Kokkos::is_initialized() || Kokkos::is_finalized() || !values.lease_ || !ids.lease_)
             return Status{StatusCode::invalid_state, "transport requires active CPU read grants"};
@@ -39,14 +54,15 @@ struct TransportBuilder {
                              !Kokkos::SpaceAccessibility<Kokkos::Serial, IdMemory>::accessible) {
             return Status{StatusCode::unsupported, "transport storage is inaccessible to Serial"};
         } else {
-            return pack(exec, purpose, values, ids, lifetime);
+            return pack(exec, purpose, values, ids, lifetime, std::move(retention));
         }
     }
 
   private:
     template <class ValueView, class IdView>
     static auto pack(const Kokkos::Serial& exec, TransportPurpose purpose,
-                     ReadField<ValueView>& values, ReadField<IdView>& ids, SourceLifetime lifetime)
+                     ReadField<ValueView>& values, ReadField<IdView>& ids, SourceLifetime lifetime,
+                     std::shared_ptr<const void> retention)
         -> Result<TransportView<std::remove_const_t<typename ValueView::value_type>>> {
         using T = std::remove_const_t<typename ValueView::value_type>;
         using Snapshot = TransportView<T>;
@@ -82,12 +98,11 @@ struct TransportBuilder {
         const std::size_t components = value_descriptor.components;
         if (source_ids.extent(0) != entities)
             return Status{StatusCode::invalid_argument, "transport entity and ID counts differ"};
-        constexpr auto max_size = std::numeric_limits<std::size_t>::max();
-        if (entities > max_size / sizeof(std::uint64_t) ||
-            entities > max_size / sizeof(T) / components)
-            return Status{StatusCode::invalid_argument, "transport payload exceeds size capacity"};
+        if (auto bytes = packed_payload_bytes<T>(entities, components); !bytes.ok())
+            return bytes.status();
 
         try {
+            exec.fence("transport stable IDs ready for validation");
             std::unordered_set<std::uint64_t> unique_ids;
             for (std::size_t i = 0; i < entities; ++i) {
                 if (!unique_ids.insert(source_ids(i)).second)
@@ -117,7 +132,7 @@ struct TransportBuilder {
             if (lifetime == SourceLifetime::until_complete)
                 grants.emplace(std::move(values.lease_), std::move(ids.lease_));
             return Snapshot(std::move(values.descriptor_), values.stamp(), purpose,
-                            {std::move(grants), packed_ids, packed_values});
+                            {std::move(retention), std::move(grants), packed_ids, packed_values});
         } catch (const std::bad_alloc&) {
             return Status{StatusCode::resource_exhausted, "cannot allocate transport snapshot"};
         } catch (const std::exception&) {

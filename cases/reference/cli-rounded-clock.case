@@ -1,0 +1,8 @@
+version=1
+fixture=reference
+start=9007199254740992
+end=9007199254740996
+step=3
+lambda=0.125
+x=1
+q=0

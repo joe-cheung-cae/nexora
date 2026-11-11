@@ -5,8 +5,10 @@
 #include <nexora/data/FieldBinding.hpp>
 #include <span>
 #include <string_view>
+#include <tuple>
 
 namespace nexora::detail {
+struct FieldAuthority;
 template <class T> class ExternalField;
 
 struct FieldAxis {
@@ -24,6 +26,23 @@ struct FieldBindingSpec {
 // an allocation for one stamp. Close stops new grants. Existing grants keep the
 // claim and storage alive through their final use.
 class FieldIssuer {
+    template <class Binding> class PendingBinding {
+        friend class FieldIssuer;
+
+        PendingBinding(std::shared_ptr<FieldAuthority> authority, FieldAccess access, Binding binding)
+            : authority(std::move(authority)), access(access), binding(std::move(binding)) {}
+
+        std::shared_ptr<FieldAuthority> authority;
+        FieldAccess access;
+        Binding binding;
+    };
+
+    struct GroupMember {
+        std::shared_ptr<FieldAuthority> authority;
+        FieldAccess access;
+        std::size_t index{};
+    };
+
   public:
     template <class View>
     static Result<FieldIssuer> create(const View& allocation, FieldStamp stamp) {
@@ -46,13 +65,7 @@ class FieldIssuer {
     template <class View>
     Result<ReadField<View>> read(const View& view, FieldDescriptor descriptor,
                                  const FieldStamp& expected, const FieldBindingSpec& spec) const {
-        if (auto valid = validate_binding(view, descriptor, expected, spec); !valid.ok())
-            return valid;
-        if (auto granted = acquire(FieldAccess::read); !granted.ok())
-            return granted;
-        ReadLease lease(authority_);
-        return ReadField<View>{std::move(descriptor), stamp_, typename View::const_type(view),
-                               std::move(lease), component_axes<View>(spec)};
+        return grant_one(request_read(view, std::move(descriptor), expected, spec));
     }
 
     template <class View>
@@ -60,16 +73,64 @@ class FieldIssuer {
     Result<WriteField<View>> write(const View& view, FieldDescriptor descriptor,
                                    const FieldStamp& expected, const FieldBindingSpec& spec,
                                    FieldAccess access) const {
+        return grant_one(request_write(view, std::move(descriptor), expected, spec, access));
+    }
+
+    // Validate and capture each typed binding before arbitration. Only a
+    // successful grant can expose these Views to the stage chain.
+    template <class View>
+    Result<PendingBinding<ReadField<View>>> request_read(const View& view, FieldDescriptor descriptor,
+                                                        const FieldStamp& expected,
+                                                        const FieldBindingSpec& spec) const {
+        if (auto valid = validate_binding(view, descriptor, expected, spec); !valid.ok())
+            return valid;
+        return PendingBinding<ReadField<View>>{
+            authority_, FieldAccess::read,
+            ReadField<View>{std::move(descriptor), stamp_, typename View::const_type(view),
+                            ReadLease(nullptr), component_axes<View>(spec)}};
+    }
+
+    template <class View>
+        requires (!std::is_const_v<typename View::value_type>)
+    Result<PendingBinding<WriteField<View>>> request_write(const View& view, FieldDescriptor descriptor,
+                                                          const FieldStamp& expected,
+                                                          const FieldBindingSpec& spec,
+                                                          FieldAccess access) const {
         if ((access != FieldAccess::overwrite && access != FieldAccess::accumulate) ||
             descriptor.access != access)
             return Status{StatusCode::invalid_argument, "field does not declare requested write mode"};
         if (auto valid = validate_binding(view, descriptor, expected, spec); !valid.ok())
             return valid;
-        if (auto granted = acquire(access); !granted.ok())
-            return granted;
-        WriteLease lease(authority_);
-        return WriteField<View>{std::move(descriptor), stamp_, view, std::move(lease),
-                                component_axes<View>(spec)};
+        return PendingBinding<WriteField<View>>{
+            authority_, access,
+            WriteField<View>{std::move(descriptor), stamp_, view, WriteLease(nullptr),
+                             component_axes<View>(spec)}};
+    }
+
+    // Return bindings in request order. Aliases with the same mode share one
+    // allocation grant until the last binding is destroyed. Mixed modes for
+    // the same allocation are an invalid group.
+    template <class... Bindings>
+        requires (sizeof...(Bindings) > 0)
+    static Result<std::tuple<Bindings...>> grant(Result<PendingBinding<Bindings>>... requests) {
+        Status failure;
+        const auto valid_request = [&failure](const auto& request) {
+            if (!request.ok())
+                failure = request.status();
+            else if (!request.value().authority)
+                failure = {StatusCode::invalid_state, "field request has no allocation"};
+            return failure.ok();
+        };
+        if (!(valid_request(requests) && ...))
+            return failure;
+
+        std::array members{GroupMember{requests.value().authority, requests.value().access}...};
+        std::array<std::shared_ptr<FieldGrant>, sizeof...(Bindings)> grants;
+        if (auto valid = acquire_group(members, grants); !valid.ok())
+            return valid;
+
+        std::size_t index = 0;
+        return std::tuple<Bindings...>{attach(requests.value(), std::move(grants[index++]))...};
     }
 
   private:
@@ -94,14 +155,31 @@ class FieldIssuer {
                                               FieldStamp stamp, bool mutable_storage);
     static Result<FieldIssuer> register_authority(std::shared_ptr<FieldAuthority> authority,
                                                   FieldStamp stamp);
-    Status acquire(FieldAccess access) const;
+    static Status acquire_group(std::span<GroupMember> members,
+                                std::span<std::shared_ptr<FieldGrant>> grants);
+
+    template <class Binding>
+    static Binding attach(PendingBinding<Binding>& request, std::shared_ptr<FieldGrant> grant) noexcept {
+        using Lease = decltype(request.binding.lease_);
+        request.binding.lease_ = Lease(std::move(grant));
+        return std::move(request.binding);
+    }
+
+    template <class Binding>
+    static Result<Binding> grant_one(Result<PendingBinding<Binding>> request) {
+        auto granted = grant(std::move(request));
+        if (!granted.ok())
+            return granted.status();
+        return std::get<0>(std::move(granted).value());
+    }
 
     // This is the private 5.2.2 adapter for recognizing managed subview aliases.
     // Public fields use only the native View interface.
+    static Status check_runtime();
     template <class View> static Status check_accessibility() {
         static_assert(Kokkos::is_view<View>::value);
-        if (!Kokkos::is_initialized() || Kokkos::is_finalized())
-            return {StatusCode::invalid_state, "field access requires an active Kokkos runtime"};
+        if (auto valid = check_runtime(); !valid.ok())
+            return valid;
         if constexpr (!Kokkos::SpaceAccessibility<Kokkos::Serial,
                                                   typename View::memory_space>::accessible)
             return {StatusCode::unsupported, "field storage is inaccessible to Kokkos Serial"};

@@ -9,10 +9,11 @@ The [architecture overview](docs/architecture/overview.md) is the authoritative 
 Set `Kokkos_DIR` to the verified package's `lib/cmake/Kokkos` directory. Use `--fresh` when reusing a build directory created by the old bootstrap, so the removed GPU option is not retained in its cache.
 
 ```sh
-cmake --fresh --preset cpu-debug -DKokkos_DIR="<kokkos-prefix>/lib/cmake/Kokkos"
+cmake --fresh --preset cpu-debug -DKokkos_DIR="<kokkos-debug-prefix>/lib/cmake/Kokkos"
 cmake --build --preset cpu-debug
 ctest --preset cpu-debug
-cmake --fresh --preset cpu-release -DKokkos_DIR="<kokkos-prefix>/lib/cmake/Kokkos"
+cmake --fresh --preset cpu-release -DKokkos_DIR="<kokkos-release-prefix>/lib/cmake/Kokkos" \
+  -DNEXORA_ENABLE_DOUBLE_PRECISION=ON
 cmake --build --preset cpu-release
 ctest --preset cpu-release
 ```
@@ -21,7 +22,9 @@ The default `nexora::real` type is `float`; configure with `-DNEXORA_ENABLE_DOUB
 
 The same CTest suite includes `nexora_reference_tests`: real Kokkos accepted/trial arrays, commit/restore/failure/retry/replay, retained const snapshots, requested-duration rounding and the existing Euler convergence criteria. The `nexora_reference_transport_tests` run local receive in the actual reference window and cover rollback, retry, and retained accepted read leases. The reference method and participant targets are internal; they are not installed or exposed by the CLI. The `nexora_field_binding_tests` exercise native View binding, alias arbitration, and lease lifetime. The `nexora_transport_tests` exercise external ownership, explicit local packing, and per-consumer completion. The `nexora_transport_receive_tests` exercise stable-ID unpack into trial and ghost regions and verify that validation failures leave the target unchanged before retry. Installed-package tests cover schema-only consumption, typed data headers, transitive Kokkos computation, and both time include paths. Keep every participant and retained snapshot inside the application's Kokkos runtime lifetime.
 
-The package is required offline; configuration does not download it. `nexora::data` propagates Kokkos; the new installed consumer uses only that exported Nexora target. Legacy exec exports and their bootstrap consumer have been removed. Use a clean install prefix when verifying the package: installing over an existing prefix does not remove obsolete headers or libraries. `NEXORA_GPU_BACKEND` is rejected for every value; the old native CUDA source is dormant. OpenMP and GPU profiles are future work. The `mpi-debug` preset retains an optional MPI C API smoke probe, unvalidated for this slice and not distributed physics. Existing CI has not been updated to provision Kokkos and is not evidence of this slice.
+The package is required offline; configuration does not download it. `nexora::data` propagates Kokkos; the new installed consumer uses only that exported Nexora target. Legacy exec exports and their bootstrap consumer have been removed. Use a clean install prefix when verifying the package: installing over an existing prefix does not remove obsolete headers or libraries. `NEXORA_GPU_BACKEND` is rejected for every value; the old native CUDA source is dormant. OpenMP and GPU profiles are future work. The `mpi-debug` preset retains an optional MPI C API smoke probe.
+
+The [Serial validation runner](docs/architecture/serial-ci-validation.md) provisions the checksum-verified archive in a separate step, then uses the local Kokkos package for the dependency check, CTest, Decimal oracle and relocated package consumer. For routine validation use float Debug and double Release. For precision, packaging or merge acceptance run both precisions with each build type. Use matching Debug and Release Kokkos packages for MSVC. The CI matrix requests all four combinations on Linux GCC, Linux Clang and Windows MSVC, with the separate MPI smoke on Linux. See the runner record for the profiles actually executed.
 
 ## Change expectations after design approval
 

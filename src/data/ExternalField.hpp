@@ -61,6 +61,11 @@ template <class T> class ExternalField {
         return issuer_.read(view_, std::move(descriptor), expected, spec);
     }
 
+    auto request_read(FieldDescriptor descriptor, const FieldStamp& expected,
+                      const FieldBindingSpec& spec) const {
+        return issuer_.request_read(view_, std::move(descriptor), expected, spec);
+    }
+
     Result<WriteField<view_type>> write(FieldDescriptor descriptor, const FieldStamp& expected,
                                       const FieldBindingSpec& spec, FieldAccess access) const
         requires (!std::is_const_v<T>)

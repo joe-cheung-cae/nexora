@@ -16,7 +16,9 @@ The [architecture overview](docs/architecture/overview.md) is the authoritative 
 
 The managed Serial data layer exports `nexora::data_schema` for field semantics and `nexora::data` for native Kokkos View bindings with read/write leases. See the [field binding validation record](docs/architecture/field-binding-validation.md).
 
-Configure, build, test and install use locally provisioned dependencies without implicit downloads. See [CONTRIBUTING.md](CONTRIBUTING.md) for commands, [dependency provenance](third_party/README.md), and the [CPU slice validation record](docs/architecture/kokkos-cpu-slice-validation.md) for actual results. `NEXORA_GPU_BACKEND` is rejected with any value; the old native CUDA source is dormant. OpenMP and GPU profiles are not implemented. The optional existing MPI smoke probe is not distributed numerical support and remains unvalidated for this slice. Existing CI lacks Kokkos provisioning and is not evidence for it.
+The CLI supports `nexora validate <case>`, `nexora plan <case>`, and `nexora run <case>` for the Serial Reference fixture. See the [v1 case schema and example](docs/architecture/reference-case.md).
+
+Configure, build, test and install use locally provisioned dependencies. CI provisions the locked Kokkos source separately and checks both real precisions in Debug and Release. The optional MPI C API smoke has its own CI profile. See [CONTRIBUTING.md](CONTRIBUTING.md), the [dependency provenance](third_party/README.md) and the [Serial validation record](docs/architecture/serial-ci-validation.md) for commands and executed profiles. `NEXORA_GPU_BACKEND` is rejected with any value. The old native CUDA source is dormant. OpenMP and GPU profiles are planned.
 
 See [AGENTS.md](AGENTS.md) before changing the project. The [archived v1.2 plan](docs/archive/CFDX_Multimethod_HPC_Architecture_Plan_v1.2_NVIDIA_Integration.md) is historical context, not implementation guidance.
 

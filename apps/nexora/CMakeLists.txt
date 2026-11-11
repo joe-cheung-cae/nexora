@@ -1,5 +1,6 @@
-add_executable(nexora main.cpp)
-target_link_libraries(nexora PRIVATE nexora::core Kokkos::kokkos)
+add_executable(nexora main.cpp ReferenceCase.cpp ReferenceCommand.cpp)
+target_link_libraries(nexora PRIVATE
+    nexora::core nexora::simulation nexora_participants_reference Kokkos::kokkos)
 target_compile_definitions(nexora PRIVATE "NEXORA_CONFIGURATION=\"$<CONFIG>\"")
 target_include_directories(nexora PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 
@@ -11,6 +12,36 @@ if(NEXORA_ENABLE_MPI)
     target_sources(nexora PRIVATE MpiSmoke.cpp)
     target_link_libraries(nexora PRIVATE MPI::MPI_C)
     target_compile_definitions(nexora PRIVATE OMPI_SKIP_MPICXX=1 MPICH_SKIP_MPICXX=1)
+endif()
+
+# The Task 6 evidence covers native Darwin 27.2.0 arm64 Serial, both real precisions,
+# and the default Ninja Debug and Release profiles. Kokkos is verified by the
+# top-level build before this application is configured.
+set(NEXORA_REFERENCE_VALIDATION_EVIDENCE "none")
+set(NEXORA_REFERENCE_TEST_FIXTURE "${BUILD_TESTING}")
+string(TOUPPER "${CMAKE_BUILD_TYPE}" reference_config)
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin"
+   AND CMAKE_SYSTEM_VERSION STREQUAL "27.2.0"
+   AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64"
+   AND CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "arm64"
+   AND NOT CMAKE_CROSSCOMPILING
+   AND CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang"
+   AND CMAKE_CXX_COMPILER_VERSION STREQUAL "21.0.0.21000401"
+   AND CMAKE_GENERATOR STREQUAL "Ninja"
+   AND "${CMAKE_CXX_FLAGS}" STREQUAL ""
+   AND "${CMAKE_EXE_LINKER_FLAGS}" STREQUAL ""
+   AND "${CMAKE_EXE_LINKER_FLAGS_${reference_config}}" STREQUAL ""
+   AND "${CMAKE_OSX_ARCHITECTURES}" STREQUAL ""
+   AND "${CMAKE_OSX_DEPLOYMENT_TARGET}" STREQUAL ""
+   AND "${CMAKE_OSX_SYSROOT}" STREQUAL ""
+   AND NOT CMAKE_TOOLCHAIN_FILE
+   AND NOT CMAKE_CXX_COMPILER_LAUNCHER
+   AND NOT CMAKE_INTERPROCEDURAL_OPTIMIZATION
+   AND NOT CMAKE_INTERPROCEDURAL_OPTIMIZATION_${reference_config}
+   AND NOT NEXORA_ENABLE_MPI
+   AND ((CMAKE_BUILD_TYPE STREQUAL "Debug" AND CMAKE_CXX_FLAGS_DEBUG STREQUAL "-g")
+        OR (CMAKE_BUILD_TYPE STREQUAL "Release" AND CMAKE_CXX_FLAGS_RELEASE STREQUAL "-O3 -DNDEBUG")))
+    set(NEXORA_REFERENCE_VALIDATION_EVIDENCE "task6-local-serial")
 endif()
 configure_file(BuildInfo.hpp.in BuildInfo.hpp @ONLY)
 

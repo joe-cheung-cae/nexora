@@ -21,7 +21,7 @@
 | `FieldDescriptor` / `FieldRegistry` | 已拆分。描述符验证语义，Registry 按 `FieldId` 保存描述符并拒绝重复 ID。`FieldStamp` 保存动态版本和有效时间，布局及内存位置由 View 表达。 [描述符](../../include/nexora/data/FieldDescriptor.hpp) [注册表](../../include/nexora/data/FieldRegistry.hpp) | **保留语义元数据和注册表职责**。拆开物理语义、版本与实际 View 布局；不从字符串或旧枚举推断真实存储。字段及状态 owner 仍是方法或参与者。`P1-03` 移除 exec 依赖；跨端口物理兼容见 `CPL-001`。 |
 | `ArrayView<T>`、`Vec`、`Tensor` | 旧 core 容器已删除。 | 数值使用 Kokkos 原生 View/Array；ID/版本、`Status`/`Result`、checked cast 和时间值保留在 core。详见 [core 数据结构](core-data-structures.md)。 |
 | `ParticipantIF`、`PortDescriptor`、`TimeConstraint`、`Simulation` | 已实现同步、单参与者生命周期。调用方持有参与者；Simulation 持有接受时钟，校验端口与时间、调用试算和提交，按已有契约尝试恢复。旧 dummy 测试保留，步骤 2 新增真实 Kokkos reference 的提交/恢复/重试/重放测试。 [接口](../../include/nexora/participant/) [实现](../../src/simulation/Simulation.cpp) [参考测试](../../tests/reference/reference_tests.cpp) | **保留并扩展已验证参考子集**。当前仅同步 Serial accepted/trial 与只读输出；完整 `P1-06` 的历史、缓存和快照预算仍开放。多参与者协调、域分解与持久化重启各自留给后续任务。 |
-| typed operator set、`reference*`、provider 选择 | 已有内部 reference State/Participant，以 Kokkos Serial 运行原 x/q 公式；没有真实物理方法、provider 注册表或计算 DSL。CLI 尚未接入 reference，仍处理帮助、版本、Kokkos 构建信息及可选 MPI 诊断。 [方法](../../src/methods/reference/State.cpp) [入口](../../apps/nexora/main.cpp) | **保留类型化算子契约，取消 provider 设施**。`P1-05/06/07/08/09` 的其余工作包括同源可选设备实例、完整参考生命周期契约、代表性 SPH/FVM 阶段与 CLI 装配。 |
+| typed operator set、`reference*`、provider 选择 | 内部 Reference State/Participant 以 Kokkos Serial 运行 x/q 公式。CLI 装配版本化 Reference case，并提供帮助、版本、构建信息和可选 MPI 诊断。 [方法](../../src/methods/reference/State.cpp) · [case 格式与验证](reference-case.md) | **保留类型化算子契约**。后续实施同源可选设备实例及代表性 SPH/FVM 阶段。 |
 
 <a id="targets"></a>
 ## 模块、构建目标和检查器
@@ -34,11 +34,11 @@
 | `exec_api`、`exec_cpu` | 旧 target、源码、头和安装导出已移除。 | 本次提前完成 P1-11 的旧层清理；最终构建与消费验收仍须按实际执行记录。 |
 | `data_schema`、`data` | INTERFACE `data_schema → core`；STATIC `data → data_schema, Kokkos::kokkos`。 [data CMake](../../src/data/CMakeLists.txt) | 已移除 `data → exec_api`。CPU 外部借用、本地 pack 及按稳定 ID 接收解包已实现，设备异步交接仍待实施。 |
 | `participant_api`、`simulation` | INTERFACE `participant_api → data_schema`；STATIC `simulation → participant_api`。两者均已导出。 [simulation CMake](../../src/simulation/CMakeLists.txt) | 保留生命周期边界。Kokkos 状态及算子实例放进实际方法/参与者实现。 |
-| `methods_reference`、`participants_reference` | 步骤 2 新增内部 STATIC 目标。`methods_reference → data, Kokkos::kokkos`；`participants_reference → participant_api, methods_reference`。不导出、不安装。 [方法 CMake](../../src/methods/reference/CMakeLists.txt) [参与者 CMake](../../src/participants/reference/CMakeLists.txt) | 只实现本次 Serial 状态闭环；其他设备、公共安装 API 和完整数据契约分别验收。 |
-| `nexora` CLI | `nexora` 链接 core 和 Kokkos，可选私有 `MPI::MPI_C` 供保留探针。`NEXORA_GPU_BACKEND` 任意值均被拒绝；`NEXORA_ENABLE_MPI` 仍可选。MPI C API 从 C++ 链接的能力在配置期检查。 [CLI CMake](../../apps/nexora/CMakeLists.txt) [MPI 检查](../../cmake/NexoraMPI.cmake) | 保留 CLI 装配入口及诊断的可验证语义。CUDA 探针迁成 Kokkos 设备诊断，移除旧 `CudaSmoke.cu` 的 native kernel、分配、stream/event 和直接 runtime 链接。可选 MPI 探针仍是独立诊断，真实通信由后续专项验收。 |
+| `methods_reference`、`participants_reference` | 步骤 2 新增内部 STATIC 目标。`methods_reference → data, Kokkos::kokkos`；`participants_reference → participant_api, methods_reference, data`。不导出、不安装。 [方法 CMake](../../src/methods/reference/CMakeLists.txt) [参与者 CMake](../../src/participants/reference/CMakeLists.txt) | 只实现本次 Serial 状态闭环；其他设备、公共安装 API 和完整数据契约分别验收。 |
+| `nexora` CLI | `nexora` 直接链接 core、simulation、内部 `participants_reference` 和 Kokkos，以版本化 case 装配 Serial Reference。可选私有 `MPI::MPI_C` 用于独立探针。 [CLI CMake](../../apps/nexora/CMakeLists.txt) · [case 格式与验证](reference-case.md) | 后续设备组合按各自的实机验收与能力清单装配。 |
 | 原草案 `exec_cuda`、`reference_contract`、`reference_cpu`、`reference_cuda` | 均无 CMake 声明或实现。 | 取消 backend 专属执行目标。参考参与者与算子签名继续按职责组织，同一算子模板实例化所选 Kokkos execution space；内部目标只随实际使用者增加。 |
 | 测试和安装消费 | 旧 exec 测试与消费已删除；保留字段、生命周期、schema、simulation 与 Kokkos 安装消费测试。 | 干净安装与独立消费及现行正反例按实际执行结果记录；不以旧测试证明新路径。 |
-| CMake 目标图、依赖检查与 CI | 配置后生成直接边 JSON；checker 检查当前目标与包含边界。已有 CI 尚未提供 Kokkos，MPI smoke 未验证。 [目标图](../../cmake/NexoraTargetGraph.cmake) [检查器](../../tools/check_dependencies.py) [CI](../../.github/workflows/ci.yml) | 持续检查旧路径拒绝、Kokkos 消费边、可选目标及安装导出；编译、跳过和实机执行分开记录。 |
+| CMake 目标图、依赖检查与 CI | 配置后生成直接边 JSON，checker 检查目标与包含边界。CI 在配置前供应锁定的 Kokkos。 [目标图](../../cmake/NexoraTargetGraph.cmake) [检查器](../../tools/check_dependencies.py) [执行记录](serial-ci-validation.md) | 持续检查旧路径拒绝、Kokkos 消费边、可选目标及安装导出。 |
 
 <a id="cutover"></a>
 ## Phase 1 顺序与旧层删除条件

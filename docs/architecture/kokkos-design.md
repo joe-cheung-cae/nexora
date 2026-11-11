@@ -1,8 +1,10 @@
 # Kokkos 单一路线：数据、执行与生命周期设计
 
-修订时间：`2026-11-09T20:24:13+08:00`。**本文定义完整迁移目标；只有下列有限切片已实现。** 权威入口是 [overview](overview.md)，源码现状见[迁移表](migration-roadmap.md#source-inventory)。本文声明面向 **C++20 / Kokkos 5.2.2**，版本和工具链依据见[构建政策](build-and-validation.md)。后文通用类型仍是可评审的接口草图，非已编译的公共头；不能把局部实现视为全部契约通过。
+修订时间：`2026-11-11T13:29:35+08:00`。**本文定义完整迁移目标及当前有限实现。** 权威入口是 [overview](overview.md)，源码现状见[迁移表](migration-roadmap.md#source-inventory)。本文声明面向 **C++20 / Kokkos 5.2.2**，版本和工具链依据见[构建政策](build-and-validation.md)。后文通用类型仍是可评审的接口草图。
 
-当前已有 Serial CPU 基础构建与整数计算，以及内部 reference `State`/`Participant`：稳定 ID、语义绑定的 `x/q` typed Views、accepted 时间/版本、独立 trial 分配、const managed 结果快照、同步 Serial 算子及现有 Simulation 下的提交/恢复/重试。旧快照持续保活且不再写入，所有快照必须先于应用的 Kokkos finalize 销毁；没有按引用计数判定写权限或复用数组。记录见[参考生命周期验证](reference-lifecycle-validation.md)。通用 `data_schema`、`ReadField/WriteField` 和整分配读写 lease 已实现同步 managed Serial 子集。当前签发器仅供内部使用，绑定保留原生 View。私有导入入口支持具备真实 owner 的一维 HostSpace 数组，本地 `TransportView` 按消费者保存 lease 并在交接前完成显式 pack。快照预算与设备异步关闭仍待实施。详见 [CPU 字段绑定与 lease](field-binding-validation.md)和[外部内存与本地传输](external-transport-validation.md)。
+当前已有 Serial CPU 基础构建与整数计算，以及内部 reference `State`/`Participant` 的 typed `x/q`、独立 trial、同步提交、恢复与重试。Reference Serial 窗口已验收最小 replay history、控制序列、诊断缓存和快照预算。旧快照及 packed 消费者在显式关闭后可保留到各自完成，应用须先于 Kokkos finalize 释放所有记录。设备异步交接与关闭和其他方法的完整历史恢复仍待验收。 [Reference 进程内恢复与预算](reference-resource-validation.md)
+
+通用 `data_schema`、`ReadField/WriteField` 和整分配读写 lease 已实现同步 managed Serial 子集。当前签发器仅供内部使用，绑定保留原生 View。私有导入入口支持具备真实 owner 的一维 HostSpace 数组，本地 `TransportView` 按消费者保存 lease 并在交接前完成显式 pack。 [CPU 字段绑定与 lease](field-binding-validation.md) · [外部内存与本地传输](external-transport-validation.md)
 
 ## 1. 职责收敛
 
@@ -125,6 +127,8 @@ private:
 
 `FieldIssuer` 是 participant/data 内部授权入口，不是任意 caller 可创建的权限。签发前检查 dtype、association、units、components 与方法规定的各维含义、有效时间、所有版本、执行可达性和别名；算子知道分量轴/实体轴，不能假设每个 View 的 `extent(0)` 都是实体。对 runtime 外部数组同时检查对齐、元素生命周期、capacity、乘加溢出和 stride 重叠。空字段仍检查元数据。物理单位换算必须是显式耦合算子，绑定不偷偷换算。
 
+当前 Serial 整组授权先构造不可改写的 typed 请求，再预留记录并按 storage incarnation 锁定 allocation。同一组内相同模式的别名共享记录，混合模式拒绝。Reference 用这一入口取得试算、快照和收发的完整授权。 [操作与验证](structure-execution-validation.md#reference-执行与授权)
+
 - `const Kokkos::View<real*>` 并不表示元素只读；读取必须使用 `Kokkos::View<const real*, ...>` 或 `View::const_type`。[官方 View 类型规则](https://kokkos.org/kokkos-core-wiki/API/core/view/view.html)
 - 同一个物理分配及其所有 subview 必须指向同一权限记录。P1 保守地以整分配仲裁，多读共存，overwrite/accumulate 独占。一个已验证的 stage 链作为一个授权域，由 window-work 一次合并全部别名并原子取得 accepted-read/trial-write 授权，链内后续 stage 按 execution instance 顺序复用该授权，不重复竞争租约，不因此引入 host wait。链外操作/外部消费者仍须独立申请，冲突在提交前拒绝。不同字段共享 allocation 也不能绕过此规则。
 - accumulate 只授权该算子内部使用 Kokkos reduction/atomic，不允许两个未协调算子同时写。写权限属于 trial 或初始化期，accepted 快照只读。
@@ -134,6 +138,8 @@ private:
 ## 3. 稳定 ID、局部顺序与版本
 
 沿用 `GlobalEntityId`、`DomainId`、`LocalIndex=uint32_t`、`Offset=uint64_t`。稳定身份由 `(DomainId, Association, entity_set, GlobalEntityId)` 唯一确定。局部 index 只对某一排列有效，不是持久身份。超过 LocalIndex/Offset 容量必须预检拒绝，不能截断。
+
+当前 Serial 子集在 `data` 内部实现 `EntityOrder`、`Permutation` 和 `CsrAdjacency`。下面的声明描述面向各 memory space 的设计。现有实现使用 HostSpace const View，构造时取得独立快照，空实体顺序仍带命名空间和 layout 版本。命名空间内的 ID 在每个顺序中唯一，ID 分配与退役由状态所有者负责。
 
 ```cpp
 namespace nexora {
@@ -156,6 +162,10 @@ template<class Space> struct CsrAdjacency {
 };
 } // namespace nexora
 ```
+
+当前双向排列记录源和目标顺序。它要求同命名空间、等基数和相同稳定 ID 集合。外部给出的两张表必须逐项对应同一稳定 ID 且互为逆。本地接收复用按 ID 构造双射的检查，在各自 stamp 通过校验后允许源和目标 layout 不同。CSR 同时绑定 topology 版本及独立的行列顺序。校验关联时同时检查命名空间、layout 和有序 ID。空图 offsets 为 `[0]`。CSR 保留行内顺序，消费者负责重复边和自环的解释。
+
+当前私有 `StructureState` 是原子重排的首个消费者。它在只读 accepted bank 上构造并校验独立候选，再发布同一布局版本的实体顺序、字段、被动历史和 CSR。 [状态清单与验证](structure-execution-validation.md#结构状态与安全点)
 
 重排必须覆盖所有同域主状态、历史、ID、ghost owner map；邻接/contact/face 引用需重映射或重建。先验证 permutation 是双射，再在无在途写的安全点发布新布局。stable ID 不随排序改变，已删除 ID 不复用于新实体。试算中生成的临时 ID 不外发为 accepted；生成器状态属于恢复清单，诊断 operation incarnation 始终递增，避免旧句柄重新有效。
 
@@ -346,6 +356,8 @@ MPI 可选，初期明确 host staging；GPU-aware 需逐 MPI 实现/版本/devi
 ## 7. accepted/trial、缓存和恢复
 
 当前 reference 的同步窗口由参与者持有整分配 lease authority。算法读取 accepted 并写入独立 trial，接收仅在算法完成且尚未预提交时开放。预提交将 trial 的写授权切换为待发布的只读授权，提交后新快照才可见。旧快照共享其原有读 lease。见 [reference 窗口集成验证](reference-window-validation.md)。
+
+Reference 同时维护会影响重放诊断的 history 和控制序列。候选 history 在 begin 显式复制，试算诊断按实际 history binding stamp 校验。accepted bank、旧快照和 packed 记录按共享票据限制在用记录和载荷字节。 [状态与计量清单](reference-resource-validation.md)
 
 ```cpp
 namespace nexora {

@@ -18,8 +18,11 @@ execute_process(COMMAND "${CMAKE_COMMAND}" --install "${project_build}"
     ${config_args} --prefix "${scratch}/installed" COMMAND_ERROR_IS_FATAL ANY)
 file(RENAME "${scratch}/installed" "${scratch}/relocated")
 file(GLOB_RECURSE private_headers "${scratch}/relocated/*.hpp")
-list(FILTER private_headers INCLUDE REGEX
-    "/(FieldIssuer|ExternalField|TransportBuilder|TransportReceiver|(methods|participants)/reference/[^/]+)[.]hpp$")
+string(CONCAT private_header_pattern
+    "/(FieldIssuer|ExternalField|TransportBuilder|TransportReceiver|"
+    "EntityCapacity|EntityOrder|Permutation|CsrAdjacency|StructureState|ResourceBudget|"
+    "(methods|participants)/reference/[^/]+)[.]hpp$")
+list(FILTER private_headers INCLUDE REGEX "${private_header_pattern}")
 if(private_headers)
     message(FATAL_ERROR "Private implementation headers leaked into the installation: ${private_headers}")
 endif()
@@ -67,6 +70,34 @@ execute_process(COMMAND "${CMAKE_COMMAND}" --build "${scratch}/consumer" ${confi
     COMMAND_ERROR_IS_FATAL ANY)
 execute_process(COMMAND "${CMAKE_CTEST_COMMAND}" --test-dir "${scratch}/consumer"
     -C "${config}" --verbose COMMAND_ERROR_IS_FATAL ANY)
+
+# Exercise the relocated executable using only artifacts staged under scratch.
+set(cli_oracle_copy "${scratch}/cli oracle${cli_executable_suffix}")
+file(COPY_FILE "${cli_oracle}" "${cli_oracle_copy}" ONLY_IF_DIFFERENT)
+set(cli_fixture_copy "${scratch}/relocated cli fixtures")
+file(REMOVE_RECURSE "${cli_fixture_copy}")
+file(MAKE_DIRECTORY "${cli_fixture_copy}")
+foreach(fixture IN ITEMS cli-nonbinary-tail.case cli-invalid.case cli-underflow.case
+                         cli-invalid-sign.case cli-too-many-steps.case cli-duplicate.case
+                         cli-unknown-version.case cli-unsupported-execution.case
+                         cli-invalid-interval.case cli-quantum.case cli-nan.case cli-inf.case
+                         cli-rounded-stall.case cli-rounded-clock.case
+                         cli-max-window-boundary.case cli-over-window-boundary.case)
+    file(COPY_FILE "${fixture_dir}/${fixture}" "${cli_fixture_copy}/${fixture}")
+endforeach()
+file(COPY_FILE "${cli_suite}" "${scratch}/relocated-cli-suite.cmake")
+set(relocated_cli "${scratch}/relocated/${cli_install_bindir}/${cli_executable_name}")
+if(NOT EXISTS "${relocated_cli}")
+    message(FATAL_ERROR "Relocated Nexora CLI was not installed at ${relocated_cli}")
+endif()
+execute_process(COMMAND "${CMAKE_COMMAND}"
+    "-Dcli=${relocated_cli}"
+    "-Doracle=${cli_oracle_copy}"
+    "-Dfixture_dir=${cli_fixture_copy}"
+    "-Dscratch=${scratch}/relocated-cli-suite"
+    "-Dexpected_precision=${expected_precision}"
+    -P "${scratch}/relocated-cli-suite.cmake"
+    COMMAND_ERROR_IS_FATAL ANY)
 
 function(expect_configure_rejection case source expected_diagnostic)
     execute_process(COMMAND "${CMAKE_COMMAND}" -S "${source}" -B "${scratch}/negative/${case}"

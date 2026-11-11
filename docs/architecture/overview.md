@@ -18,6 +18,7 @@ Nexora 自有数值计算和存储统一使用 Kokkos，包括默认 CPU、可�
 | [后续机械与集成任务](follow-on-task-plan.md) | 历史 MBD/INT 每项处置及候选前置；未立项项需另行设计和批准 |
 | [Checkpoint 与重启](checkpoint-restart.md) | R0 的同配置范围、兼容检查/拒绝/验收；R1–R3 延期边界 |
 | [构建与依赖政策](build-and-validation.md) | 版本锁定、工具链、离线供给、安装消费与配置能力 |
+| [Serial CPU 基础设施验收](serial-foundation-acceptance.md) | 任务 1–7 的本地复跑、结构夹具计量、交付基线与能力边界 |
 
 先前设计文档的文件清单与一致性检查见[文档审查记录](documentation-audit.md)，该记录不新增架构规范；实际实施与验证见 [CPU 基础切片](kokkos-cpu-slice-validation.md)、[参考状态生命周期](reference-lifecycle-validation.md)、[CPU 字段绑定](field-binding-validation.md)和[外部内存与本地传输](external-transport-validation.md)。
 
@@ -33,7 +34,15 @@ Nexora 自有数值计算和存储统一使用 Kokkos，包括默认 CPU、可�
 
 `nexora::data_schema` 导出纯字段语义、registry 和 `FieldStamp`，`participant_api` 经由它依赖 core。`nexora::data` 提供 managed Kokkos View 的 typed 绑定与同步 Serial lease。私有签发器以整分配仲裁，检查字段形状与版本，允许多个读者或一个写者。可信适配器可导入持有真实 owner 的一维 HostSpace 外部数组；本地 `TransportView` 显式打包只读载荷，源 lease 可在打包完成后释放，也可保留至消费者完成。本地接收在写入前验证版本、字段形状和稳定 ID 集合，再按 ID 解包到持有写 lease 的 trial 或 ghost 区域。设备异步交接和通用实体重排仍是后续任务。见 [外部内存与本地传输](external-transport-validation.md)及 [CPU 本地接收验证](local-receive-validation.md)。
 
-任何 `NEXORA_GPU_BACKEND` 值均被拒绝；旧 native CUDA 源文件休眠。OpenMP、CUDA/HIP 尚未实现；可选 MPI smoke 保留但本切片未验证。没有真实 SPH/FVM/FEM/LBM/DEM/MBD solver、MPI halo 或持久 checkpoint。现有 CI 未配置 Kokkos 依赖，不能作为本切片证据。
+`data` 内部以只读 Kokkos Views 保存稳定实体顺序、双向排列与独立行列顺序的 CSR 邻接。本地接收复用实体 ID 双射检查。见 [实体与拓扑验证](entity-topology-validation.md)。
+
+私有 reference participant 目标包含专用 `StructureState`，以候选 bank 一次发布实体顺序、主字段、被动历史和 CSR。Reference 试算、快照和本地收发用整组 allocation 授权，数值工作由已选的 Serial 实例执行。见 [状态重排与整组授权](structure-execution-validation.md)。
+
+Reference 的同步窗口同时推进主状态、replay history 和控制序列，按试算 stamp 检查诊断缓存。旧快照与独立 packed 消费者保留各自的预算记录，最后一个持有者完成时回收额度。见 [进程内恢复与资源预算](reference-resource-validation.md)。
+
+CLI 的 `validate`、`plan` 和 `run` 共用版本化 Reference case 预检。`run` 装配现有 `Simulation` 与内部 Reference participant，并发布可核对的 accepted 数值摘要。 [case 格式与验证](reference-case.md)
+
+任何 `NEXORA_GPU_BACKEND` 值均被拒绝，旧 native CUDA 源文件休眠。OpenMP、CUDA/HIP 尚未实现。没有真实 SPH/FVM/FEM/LBM/DEM/MBD solver、MPI halo 或持久 checkpoint。CI 先供应锁定的 Kokkos，再用本地安装验证 Serial。可选 MPI smoke 有独立配置。已运行的平台、配置和禁网记录见 [Serial CI 验证](serial-ci-validation.md)。
 
 当前依赖图如下；本次删除旧层不代表完整 P1 已验收。
 
@@ -41,6 +50,8 @@ Nexora 自有数值计算和存储统一使用 Kokkos，包括默认 CPU、可�
 flowchart TD
   CLI["nexora CLI"] --> C["core"]
   CLI --> K["Kokkos::kokkos"]
+  CLI --> S
+  CLI --> R
   CLI -. optional smoke .-> MPI["MPI::MPI_C"]
   S["simulation"] --> P["participant_api"]
   P --> DS["data_schema"]
@@ -136,7 +147,7 @@ flowchart TD
 - P2 的 concrete participant 按用途链接 `parallel_api`、`io_checkpoint`；应用注入 `parallel_mpi`。外部 SDK 和 MPI 原生头保持私有；静态库的传递链接需求仍必须由安装配置解析，不能用 `PRIVATE` 掩盖真实依赖。
 - 图中 CLI 的 optional smoke 边是私有诊断边 `nexora → MPI::MPI_C`；该探针保留，但不是 parallel_mpi 数值支持证据。旧 CUDA native 探针改用 Kokkos，CLI 不保留直接 CUDA runtime 链接；原生 stream 测试放在私有 interop target。
 - Kokkos CUDA 构建自身的公开编译/链接要求可经 `Kokkos::kokkos` 传递。禁止的是 Nexora 公共契约暴露原生 `cudaStream_t`/`hipStream_t`/`MPI_Comm`，不是假装设备工具链没有依赖。
-- 完整迁移时同时核对 target 边、header 所属子集、可选节点、源文件归属和安装导出；反例必须失败。当前已更新 schema 与 typed data 的 CMake 直接边、头边界检查和安装包测试。CI 的 Kokkos 供给仍待实施。
+- 完整迁移时同时核对 target 边、header 所属子集、可选节点、源文件归属和安装导出；反例必须失败。当前已更新 schema 与 typed data 的 CMake 直接边、头边界检查和安装包测试。[Serial CI 验证](serial-ci-validation.md)涵盖本地 Kokkos 供应、依赖图及搬迁消费。
 
 ## 5. 交付与支持口径
 

@@ -1,7 +1,10 @@
 #pragma once
 
+#include <string_view>
+
 #define NEXORA_HAS_CUDA @NEXORA_HAS_CUDA@
 #define NEXORA_HAS_MPI @NEXORA_HAS_MPI@
+#cmakedefine01 NEXORA_REFERENCE_TEST_FIXTURE
 
 namespace nexora::build_info {
 
@@ -10,5 +13,7 @@ inline constexpr char architecture[] = "@CMAKE_SYSTEM_PROCESSOR@";
 inline constexpr char compiler[] = "@CMAKE_CXX_COMPILER_ID@ @CMAKE_CXX_COMPILER_VERSION@";
 inline constexpr char cmake_version[] = "@CMAKE_VERSION@";
 inline constexpr char cuda_architectures[] = "@CMAKE_CUDA_ARCHITECTURES@";
+inline constexpr std::string_view reference_validation_evidence = "@NEXORA_REFERENCE_VALIDATION_EVIDENCE@";
+inline constexpr bool reference_validated = reference_validation_evidence != "none";
 
 }  // namespace nexora::build_info

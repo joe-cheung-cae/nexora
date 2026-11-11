@@ -1,0 +1,10 @@
+version=1
+fixture=reference
+execution=serial
+start=0.1
+end=0.95
+step=0.3
+lambda=0.7
+ids=8,13
+x=1.25,-2
+q=-0.5,4

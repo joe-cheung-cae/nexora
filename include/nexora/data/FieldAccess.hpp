@@ -3,7 +3,7 @@
 
 namespace nexora {
 namespace detail {
-struct FieldAuthority;
+struct FieldGrant;
 class FieldIssuer;
 } // namespace detail
 
@@ -18,14 +18,13 @@ class ReadLease {
     ~ReadLease();
 
     explicit operator bool() const noexcept {
-        return static_cast<bool>(authority_);
+        return static_cast<bool>(grant_);
     }
 
   private:
     friend class detail::FieldIssuer;
-    explicit ReadLease(std::shared_ptr<detail::FieldAuthority> authority) noexcept;
-    void release() noexcept;
-    std::shared_ptr<detail::FieldAuthority> authority_;
+    explicit ReadLease(std::shared_ptr<detail::FieldGrant> grant) noexcept;
+    std::shared_ptr<detail::FieldGrant> grant_;
 };
 
 class WriteLease {
@@ -37,13 +36,12 @@ class WriteLease {
     ~WriteLease();
 
     explicit operator bool() const noexcept {
-        return static_cast<bool>(authority_);
+        return static_cast<bool>(grant_);
     }
 
   private:
     friend class detail::FieldIssuer;
-    explicit WriteLease(std::shared_ptr<detail::FieldAuthority> authority) noexcept;
-    void release() noexcept;
-    std::shared_ptr<detail::FieldAuthority> authority_;
+    explicit WriteLease(std::shared_ptr<detail::FieldGrant> grant) noexcept;
+    std::shared_ptr<detail::FieldGrant> grant_;
 };
 } // namespace nexora

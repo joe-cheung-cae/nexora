@@ -4,7 +4,7 @@
 
 ## 1. 内存回滚与持久重启分开
 
-- **P1 单参与者窗口回滚**：同一进程内保存 accepted 状态，试算失败后安全结束访问并丢弃 trial；当前已有的同步接口只是一项基础契约。Kokkos 数组实现及验证仍未完成。
+- **P1 单参与者窗口回滚**：同一进程内保存 accepted 状态，试算失败后安全结束访问并丢弃 trial。Serial Reference 已覆盖 Kokkos 主状态、最小 replay history 与控制序列。 [实现和后续捕获清单](reference-resource-validation.md#未来-checkpoint-清单)
 - **CKPT-001**：P2 多参与者完整内存恢复点；包括影响 replay 的主状态、历史、积分器、控制、耦合数据。它不意味着存在可跨进程读取的文件。
 - **IO-001 / R0**：把一个已一致接受的恢复点持久化，并在新进程中按下述相同配置加载、继续计算。仅保留 pose/velocity 或可视化字段不足以实现 R0。
 

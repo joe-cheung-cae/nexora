@@ -208,9 +208,11 @@ void test_consumer_completion(const Kokkos::Serial& exec) {
         assert(value_releases == 0 && id_releases == 0);
 
         auto start_consumer = [&](TransportPurpose purpose) {
-            return take(TransportBuilder::prepare(
-                exec, purpose, take(values.read(value_descriptor, values.stamp(), value_spec)),
-                take(ids.read(ids_descriptor, ids.stamp(), ids_spec))));
+            auto [value_read, ids_read] = take(FieldIssuer::grant(
+                values.request_read(value_descriptor, values.stamp(), value_spec),
+                ids.request_read(ids_descriptor, ids.stamp(), ids_spec)));
+            return take(TransportBuilder::prepare(exec, purpose, std::move(value_read),
+                                                   std::move(ids_read)));
         };
         fast.emplace(start_consumer(TransportPurpose::coupling));
         slow.emplace(start_consumer(TransportPurpose::visualization));

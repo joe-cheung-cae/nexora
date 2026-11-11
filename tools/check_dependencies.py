@@ -26,7 +26,8 @@ ALLOWED_LINKS = {
     "nexora_methods_reference": {"nexora_data", "Kokkos::kokkos"},
     "nexora_participants_reference": {
         "nexora_participant_api", "nexora_methods_reference", "nexora_data"},
-    "nexora": {"nexora_core", "Kokkos::kokkos", "MPI::MPI_C"},
+    "nexora": {"nexora_core", "nexora_simulation", "nexora_participants_reference",
+               "Kokkos::kokkos", "MPI::MPI_C"},
 }
 TEST_LINKS = set(ALLOWED_LINKS) - {"nexora", "nexora_build_options"}
 REQUIRED_LINKS = {
@@ -36,17 +37,29 @@ REQUIRED_LINKS = {
     "nexora_methods_reference": {"nexora_data", "Kokkos::kokkos"},
     "nexora_participants_reference": {
         "nexora_participant_api", "nexora_methods_reference", "nexora_data"},
-    "nexora": {"Kokkos::kokkos"},
+    "nexora": {"nexora_core", "nexora_simulation", "nexora_participants_reference", "Kokkos::kokkos"},
+    "nexora_entity_topology_tests": {"nexora_data"},
+    "nexora_structure_reorder_tests": {"nexora_participants_reference", "nexora_data"},
+    "nexora_serial_irregular_measurement": {"nexora_participants_reference", "nexora_data"},
+    "nexora_field_group_tests": {"nexora_data", "Threads::Threads"},
     "nexora_transport_tests": {"nexora_data"},
     "nexora_transport_receive_tests": {"nexora_data"},
     "nexora_reference_transport_tests": {"nexora_participants_reference", "nexora_simulation"},
+    "nexora_reference_resource_tests": {"nexora_participants_reference", "nexora_simulation"},
+    "nexora_reference_cli_oracle": {"nexora_participants_reference", "nexora_simulation"},
 }
 
 SPECIAL_TEST_LINKS = {
+    "nexora_entity_topology_tests": {"nexora_data"},
+    "nexora_structure_reorder_tests": {"nexora_participants_reference", "nexora_data"},
+    "nexora_serial_irregular_measurement": {"nexora_participants_reference", "nexora_data"},
+    "nexora_field_group_tests": {"nexora_data", "Threads::Threads"},
     "nexora_field_binding_tests": {"nexora_data"},
     "nexora_kokkos_tests": {"nexora_data"},
     "nexora_reference_tests": {"nexora_participants_reference", "nexora_simulation"},
     "nexora_reference_transport_tests": {"nexora_participants_reference", "nexora_simulation"},
+    "nexora_reference_resource_tests": {"nexora_participants_reference", "nexora_simulation"},
+    "nexora_reference_cli_oracle": {"nexora_participants_reference", "nexora_simulation"},
     "nexora_transport_tests": {"nexora_data"},
     "nexora_transport_receive_tests": {"nexora_data"},
 }
@@ -64,16 +77,31 @@ SOURCE_MODULE_INCLUDES = {
     "participants": {"core", "data_schema", "data", "participant"},
 }
 SCHEMA_HEADERS = {"FieldDescriptor.hpp", "FieldRegistry.hpp", "FieldStamp.hpp"}
+ENTITY_TOPOLOGY_TEST = Path("tests/data/entity_topology_tests.cpp")
+STRUCTURE_REORDER_TEST = Path("tests/data/structure_reorder_tests.cpp")
+STRUCTURE_FIXTURE = Path("tests/data/structure_fixture.hpp")
+SERIAL_IRREGULAR_MEASUREMENT = Path("tests/data/serial_irregular_measurement.cpp")
+STRUCTURE_FIXTURE_CONSUMERS = {STRUCTURE_REORDER_TEST, SERIAL_IRREGULAR_MEASUREMENT}
+STRUCTURE_STATE = Path("src/participants/reference/StructureState.hpp")
+STRUCTURE_STATE_SOURCES = {STRUCTURE_STATE, STRUCTURE_STATE.with_suffix(".cpp")}
+FIELD_GROUP_TEST = Path("tests/data/field_group_tests.cpp")
 BINDING_TEST = Path("tests/data/field_binding_tests.cpp")
 TRANSPORT_TEST = Path("tests/data/transport_tests.cpp")
 RECEIVE_TEST = Path("tests/data/transport_receive_tests.cpp")
 REFERENCE_TRANSPORT_TEST = Path("tests/reference/reference_transport_tests.cpp")
+REFERENCE_CASE_HEADER = Path("apps/nexora/ReferenceCase.hpp")
+REFERENCE_COMMAND_SOURCE = Path("apps/nexora/ReferenceCommand.cpp")
+REFERENCE_ASSEMBLY_SOURCES = {REFERENCE_CASE_HEADER, REFERENCE_CASE_HEADER.with_suffix(".cpp"),
+                              REFERENCE_COMMAND_SOURCE}
 PRIVATE_DATA_HEADERS = {
-    "FieldIssuer.hpp": {BINDING_TEST, TRANSPORT_TEST, RECEIVE_TEST, REFERENCE_TRANSPORT_TEST},
+    "FieldIssuer.hpp": {STRUCTURE_FIXTURE, BINDING_TEST, FIELD_GROUP_TEST,
+                        TRANSPORT_TEST, RECEIVE_TEST, REFERENCE_TRANSPORT_TEST},
     "ExternalField.hpp": {TRANSPORT_TEST},
-    "TransportBuilder.hpp": {TRANSPORT_TEST, RECEIVE_TEST, REFERENCE_TRANSPORT_TEST},
-    "TransportReceiver.hpp": {RECEIVE_TEST},
+    "TransportBuilder.hpp": {STRUCTURE_FIXTURE, TRANSPORT_TEST, RECEIVE_TEST,
+                             REFERENCE_TRANSPORT_TEST},
+    "TransportReceiver.hpp": {STRUCTURE_FIXTURE, RECEIVE_TEST},
 }
+PRIVATE_ENTITY_HEADERS = {"EntityCapacity.hpp", "EntityOrder.hpp", "Permutation.hpp", "CsrAdjacency.hpp"}
 SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".cu", ".cuh"}
 INCLUDE = re.compile(r'^\s*#\s*include\s*[<"]([^>"]+)[>"]', re.MULTILINE)
 PLATFORM_HEADER = re.compile(
@@ -107,9 +135,12 @@ def check_kokkos_header(relative: Path, scope: str, module: str, header: str) ->
     if ((scope == "include/nexora" and module == "data")
             or (scope == "src" and module == "data")
             or (scope == "src" and relative.parts[:3] == ("src", "methods", "reference"))
+            or relative in STRUCTURE_STATE_SOURCES
             or (scope == "tests" and relative.parts[:2] in {
                 ("tests", "kokkos"), ("tests", "reference")})
-            or relative in {BINDING_TEST, TRANSPORT_TEST, RECEIVE_TEST}
+            or relative in {STRUCTURE_FIXTURE, *STRUCTURE_FIXTURE_CONSUMERS,
+                            ENTITY_TOPOLOGY_TEST, FIELD_GROUP_TEST,
+                            BINDING_TEST, TRANSPORT_TEST, RECEIVE_TEST}
             or (scope == "apps" and module == "nexora")):
         return []
     return [f"{relative}: Kokkos header {header} is outside an approved data/method/test/CLI boundary"]
@@ -119,6 +150,15 @@ def check_internal_include(relative: Path, scope: str, header: str) -> list[str]
     """Enforce downward use of implementation-only headers."""
     parts = header.replace("\\", "/").split("/")
     location = relative.parts
+    if parts[-1] == STRUCTURE_FIXTURE.name:
+        if relative in STRUCTURE_FIXTURE_CONSUMERS:
+            return []
+        return [f"{relative}: {header} is private to the structure test and measurement"]
+    if parts[-1] in PRIVATE_ENTITY_HEADERS:
+        if (location[:2] == ("src", "data") or relative in STRUCTURE_STATE_SOURCES
+                or relative in {STRUCTURE_FIXTURE, ENTITY_TOPOLOGY_TEST}):
+            return []
+        return [f"{relative}: {header} is private to data and the approved structure boundaries"]
     if parts[-1] in PRIVATE_DATA_HEADERS:
         if (location[:2] in {("src", "data"), ("src", "participants")}
                 or relative in PRIVATE_DATA_HEADERS[parts[-1]]):
@@ -133,6 +173,12 @@ def check_internal_include(relative: Path, scope: str, header: str) -> list[str]
     in_method = scope == "src" and location[:3] == ("src", "methods", "reference")
     in_participant = scope == "src" and location[:3] == ("src", "participants", "reference")
     in_reference_test = scope == "tests" and location[:2] == ("tests", "reference")
+    if (relative in REFERENCE_ASSEMBLY_SOURCES
+            and parts == ["participants", "reference", "Participant.hpp"]):
+        return []
+    if (relative == STRUCTURE_FIXTURE
+            and parts == ["participants", "reference", "StructureState.hpp"]):
+        return []
     if parts[0] == "methods" and (in_method or in_participant or in_reference_test):
         return []
     if parts[0] == "participants" and (in_participant or in_reference_test):
@@ -203,9 +249,16 @@ def policy_self_test() -> list[str]:
         ("nexora_participant_api", ["nexora_data_schema"]),
         ("nexora_participants_reference",
          ["nexora_participant_api", "nexora_methods_reference", "nexora_data"]),
+        ("nexora", ["nexora_core", "nexora_simulation", "nexora_participants_reference", "Kokkos::kokkos"]),
+        ("nexora_entity_topology_tests", ["nexora_data"]),
+        ("nexora_structure_reorder_tests", ["nexora_participants_reference", "nexora_data"]),
+        ("nexora_serial_irregular_measurement", ["nexora_participants_reference", "nexora_data"]),
+        ("nexora_field_group_tests", ["nexora_data", "Threads::Threads"]),
         ("nexora_transport_tests", ["nexora_data"]),
         ("nexora_transport_receive_tests", ["nexora_data"]),
         ("nexora_reference_transport_tests", ["nexora_participants_reference", "nexora_simulation"]),
+        ("nexora_reference_resource_tests", ["nexora_participants_reference", "nexora_simulation"]),
+        ("nexora_reference_cli_oracle", ["nexora_participants_reference", "nexora_simulation"]),
     ):
         if check_link_policy(target, links) or any(
             not check_link_policy(target, [link for link in links if link != removed])
@@ -218,6 +271,11 @@ def policy_self_test() -> list[str]:
         failures.append("checker self-test failed to reject typed data from participant API")
     if not check_link_policy("nexora_core", ["Kokkos::kokkos"]):
         failures.append("checker self-test failed to reject Kokkos from nexora_core")
+    cli_links = ["nexora_core", "nexora_simulation", "nexora_participants_reference", "Kokkos::kokkos"]
+    if check_link_policy("nexora", cli_links + ["MPI::MPI_C"]):
+        failures.append("checker self-test failed to allow the CLI's optional MPI diagnostic")
+    if not check_link_policy("nexora", cli_links + ["nexora_methods_reference"]):
+        failures.append("checker self-test failed to reject a direct CLI method target dependency")
     if check_link_policy("nexora_methods_reference", ["nexora_data", "Kokkos::kokkos"]):
         failures.append("checker self-test failed to allow reference-method dependencies")
     if not check_link_policy("nexora_methods_reference", ["nexora_data", "Kokkos::kokkos", "nexora_participant_api"]):
@@ -228,12 +286,23 @@ def policy_self_test() -> list[str]:
     if not check_link_policy("nexora_reference_transport_tests", [
             "nexora_participants_reference", "nexora_simulation", "nexora_data"]):
         failures.append("checker self-test failed to reject extra reference transport test dependencies")
+    if not check_link_policy("nexora_reference_resource_tests", [
+            "nexora_participants_reference", "nexora_simulation", "nexora_data"]):
+        failures.append("checker self-test failed to reject extra reference resource test dependencies")
+    if not check_link_policy("nexora_reference_cli_oracle", [
+            "nexora_participants_reference", "nexora_simulation", "nexora_data"]):
+        failures.append("checker self-test failed to reject extra direct-library oracle dependencies")
     if check_link_policy("nexora_kokkos_tests", ["nexora_data"]):
         failures.append("checker self-test failed to allow the dedicated test's data dependency")
     if not check_link_policy("nexora_kokkos_tests", ["nexora_data", "nexora_core"]):
         failures.append("checker self-test failed to reject extra dependencies from the dedicated test")
-    for target in ("nexora_transport_tests", "nexora_transport_receive_tests"):
+    for target in ("nexora_entity_topology_tests", "nexora_transport_tests", "nexora_transport_receive_tests"):
         if not check_link_policy(target, ["nexora_data", "nexora_core"]):
+            failures.append(f"checker self-test failed to reject extra dependencies for {target}")
+    if not check_link_policy("nexora_field_group_tests", ["nexora_data", "Threads::Threads", "nexora_core"]):
+        failures.append("checker self-test failed to reject extra group test dependencies")
+    for target in ("nexora_structure_reorder_tests", "nexora_serial_irregular_measurement"):
+        if not check_link_policy(target, ["nexora_participants_reference", "nexora_data", "nexora_core"]):
             failures.append(f"checker self-test failed to reject extra dependencies for {target}")
     if check_kokkos_header(Path("include/nexora/data/FieldBinding.hpp"),
                            "include/nexora", "data", "Kokkos_Core.hpp"):
@@ -256,6 +325,10 @@ def policy_self_test() -> list[str]:
                 failures.append(f"checker self-test failed to reject {header} in {control}")
     if check_kokkos_header(RECEIVE_TEST, "tests", "data", "Kokkos_Core.hpp"):
         failures.append("checker self-test failed to allow Kokkos in receive tests")
+    for test_path in sorted({STRUCTURE_FIXTURE, *STRUCTURE_FIXTURE_CONSUMERS,
+                             ENTITY_TOPOLOGY_TEST, FIELD_GROUP_TEST}):
+        if check_kokkos_header(test_path, "tests", "data", "Kokkos_Core.hpp"):
+            failures.append(f"checker self-test failed to allow Kokkos in {test_path}")
     if not check_internal_include(TRANSPORT_TEST, "tests", "data/TransportReceiver.hpp"):
         failures.append("checker self-test failed to reject receiver outside dedicated receive tests")
     for header in ("ExternalField.hpp", "TransportReceiver.hpp"):
@@ -278,18 +351,61 @@ def policy_self_test() -> list[str]:
         if not check_internal_include(Path("src/methods/reference/State.hpp"),
                                       "src", f"data/{header}"):
             failures.append(f"checker self-test failed to reject {header} in methods")
+    for header in PRIVATE_ENTITY_HEADERS:
+        for path, scope in ((Path("src/data/TransportReceiver.hpp"), "src"),
+                            (STRUCTURE_STATE, "src"),
+                            (ENTITY_TOPOLOGY_TEST, "tests"), (STRUCTURE_FIXTURE, "tests")):
+            if check_internal_include(path, scope, f"data/{header}"):
+                failures.append(f"checker self-test failed to allow {header} in {path}")
+        for path, scope in ((Path("include/nexora/data/FieldBinding.hpp"), "include/nexora"),
+                            (Path("src/methods/reference/State.hpp"), "src"),
+                            (Path("src/participants/reference/Participant.cpp"), "src"),
+                            (RECEIVE_TEST, "tests")):
+            if not check_internal_include(path, scope, f"data/{header}"):
+                failures.append(f"checker self-test failed to reject {header} in {path}")
+    if check_internal_include(STRUCTURE_STATE, "src", "data/FieldIssuer.hpp"):
+        failures.append("checker self-test failed to allow the structure state to own field grants")
+    if check_internal_include(STRUCTURE_FIXTURE, "tests", "participants/reference/StructureState.hpp"):
+        failures.append("checker self-test failed to allow the structure fixture's private state")
+    for path in sorted(STRUCTURE_FIXTURE_CONSUMERS):
+        if check_internal_include(path, "tests", STRUCTURE_FIXTURE.name):
+            failures.append(f"checker self-test failed to allow the structure fixture in {path}")
+    if not check_internal_include(REFERENCE_COMMAND_SOURCE, "apps", STRUCTURE_FIXTURE.name):
+        failures.append("checker self-test failed to reject the structure fixture in the CLI")
+    for path in sorted({STRUCTURE_FIXTURE, *STRUCTURE_FIXTURE_CONSUMERS}):
+        if not check_internal_include(path, "tests", "methods/reference/State.hpp"):
+            failures.append(f"checker self-test failed to keep method state out of {path}")
+    budget_header = "participants/reference/ResourceBudget.hpp"
+    if check_internal_include(Path("src/participants/reference/Participant.hpp"), "src", budget_header):
+        failures.append("checker self-test failed to allow the reference participant's budget")
+    if not check_internal_include(Path("include/nexora/data/TransportView.hpp"), "include/nexora",
+                                  budget_header):
+        failures.append("checker self-test failed to reject the reference budget in public data headers")
     if not check_kokkos_header(Path("include/nexora/core/Status.hpp"),
                                "include/nexora", "core", "Kokkos_Core.hpp"):
         failures.append("checker self-test failed to reject Kokkos in core headers")
     if check_kokkos_header(Path("src/methods/reference/State.hpp"),
                            "src", "methods", "Kokkos_Core.hpp"):
         failures.append("checker self-test failed to allow Kokkos in reference methods")
+    if check_kokkos_header(STRUCTURE_STATE, "src", "participants", "Kokkos_Core.hpp"):
+        failures.append("checker self-test failed to allow Kokkos in structure state")
     if check_internal_include(Path("src/participants/reference/Participant.hpp"),
                               "src", "methods/reference/State.hpp"):
         failures.append("checker self-test failed to allow participant use of method internals")
     if not check_internal_include(Path("src/methods/reference/State.hpp"),
                                   "src", "participants/reference/Participant.hpp"):
         failures.append("checker self-test failed to reject method use of participant internals")
+    header = "participants/reference/Participant.hpp"
+    for path in sorted(REFERENCE_ASSEMBLY_SOURCES):
+        if check_internal_include(path, "apps", header):
+            failures.append(f"checker self-test failed to allow the Reference case boundary in {path}")
+        if not check_internal_include(path, "apps", "methods/reference/State.hpp"):
+            failures.append(f"checker self-test failed to keep method state out of {path}")
+    if not check_internal_include(Path("apps/nexora/main.cpp"), "apps", header):
+        failures.append("checker self-test failed to restrict the CLI entry point from Participant.hpp")
+    if not check_internal_include(REFERENCE_COMMAND_SOURCE, "apps",
+                                  "participants/reference/ResourceBudget.hpp"):
+        failures.append("checker self-test failed to keep direct budget access out of the CLI")
     if not check_internal_include(Path("src/core/Time.hpp"),
                                   "src", "methods/reference/State.hpp"):
         failures.append("checker self-test failed to reject core use of method internals")

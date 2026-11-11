@@ -1,6 +1,7 @@
 #pragma once
 #include <Kokkos_Core.hpp>
 #include <cstdint>
+#include <memory>
 #include <nexora/data/FieldAccess.hpp>
 #include <nexora/data/FieldDescriptor.hpp>
 #include <nexora/data/FieldStamp.hpp>
@@ -17,7 +18,8 @@ enum class TransportPurpose { halo, coupling, checkpoint, visualization };
 
 // A local snapshot for one consumer. Move it into that consumer's operation
 // record before handoff, and keep the record until its last use has completed.
-// Native View copies do not retain any source grants held by the record.
+// Native View copies are valid for use while the record is active. The record
+// holds any source grants and the reservation for the packed payload.
 template <class T, class Space = Kokkos::HostSpace> class TransportView {
   public:
     using id_view_type = Kokkos::View<const std::uint64_t*, Space>;
@@ -32,6 +34,7 @@ template <class T, class Space = Kokkos::HostSpace> class TransportView {
             descriptor_ = std::move(other.descriptor_);
             stamp_ = other.stamp_;
             purpose_ = other.purpose_;
+            payload_.reset();
             payload_ = std::exchange(other.payload_, std::nullopt);
         }
         return *this;
@@ -78,6 +81,8 @@ template <class T, class Space = Kokkos::HostSpace> class TransportView {
     };
 
     struct Payload {
+        // Release the reservation after the payload Views and source grants.
+        std::shared_ptr<const void> retention;
         std::optional<SourceGrants> source;
         id_view_type ids;
         value_view_type values;

@@ -1,4 +1,5 @@
 #pragma once
+#include "Permutation.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -6,7 +7,6 @@
 #include <nexora/data/FieldBinding.hpp>
 #include <nexora/data/TransportView.hpp>
 #include <type_traits>
-#include <unordered_map>
 
 namespace nexora::detail {
 // Local overwrite into the exact region named by target_ids. The caller owns
@@ -107,31 +107,22 @@ struct TransportReceiver {
         if (payload.extent(0) != entities || source_ids.extent(0) != entities ||
             destination_ids.extent(0) != entities || payload.extent(1) != components)
             return {StatusCode::invalid_argument, "receive field or ID shape mismatch"};
-        if (entities == 0)
-            return {};
-
         try {
-            std::unordered_map<std::uint64_t, LocalIndex> offsets;
-            offsets.reserve(entities);
-            for (std::size_t i = 0; i < entities; ++i) {
-                if (!offsets.emplace(destination_ids(i), static_cast<LocalIndex>(i)).second)
-                    return {StatusCode::invalid_argument, "receive destination IDs must be unique"};
-            }
-
-            Kokkos::View<LocalIndex*, Kokkos::HostSpace> mapping(
-                Kokkos::view_alloc(exec, Kokkos::WithoutInitializing, "transport.receive_mapping"),
-                entities);
-            for (std::size_t i = 0; i < entities; ++i) {
-                const auto found = offsets.find(source_ids(i));
-                if (found == offsets.end())
-                    return {StatusCode::invalid_argument, "receive IDs are missing or repeated"};
-                mapping(i) = found->second;
-                offsets.erase(found);
-            }
+            const EntityNamespace source_namespace{source.descriptor().domain_id,
+                                                   source.descriptor().association,
+                                                   source.descriptor().entity_set};
+            const EntityNamespace destination_namespace{descriptor.domain_id, descriptor.association,
+                                                        descriptor.entity_set};
+            auto mapping = match_entity_ids(exec, source_namespace, source_ids,
+                                            destination_namespace, destination_ids);
+            if (!mapping.ok())
+                return mapping.status();
+            if (entities == 0)
+                return {};
 
             // The mapping is now a bijection onto the leased destination region.
             // All metadata and ID checks finish before the first destination write.
-            const auto destination_index = typename decltype(mapping)::const_type(mapping);
+            const auto destination_index = mapping.value().old_to_new;
             using Policy = Kokkos::RangePolicy<Kokkos::Serial, Kokkos::IndexType<std::size_t>>;
             Kokkos::parallel_for(
                 "transport.unpack", Policy(exec, 0, entities), KOKKOS_LAMBDA(const std::size_t i) {

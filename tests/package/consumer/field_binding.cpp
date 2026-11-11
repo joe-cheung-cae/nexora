@@ -24,6 +24,12 @@ static_assert(std::is_move_constructible_v<ReadField> && !std::is_copy_construct
 static_assert(std::is_move_constructible_v<WriteField> && !std::is_copy_constructible_v<WriteField>);
 static_assert(!std::is_default_constructible_v<nexora::ReadLease>);
 static_assert(!std::is_default_constructible_v<nexora::WriteLease>);
+static_assert(std::is_nothrow_move_constructible_v<nexora::ReadLease> &&
+              std::is_nothrow_move_assignable_v<nexora::ReadLease> &&
+              !std::is_copy_constructible_v<nexora::ReadLease>);
+static_assert(std::is_nothrow_move_constructible_v<nexora::WriteLease> &&
+              std::is_nothrow_move_assignable_v<nexora::WriteLease> &&
+              !std::is_copy_constructible_v<nexora::WriteLease>);
 
 using Transport = nexora::TransportView<nexora::real>;
 using Values = std::remove_cvref_t<decltype(std::declval<const Transport&>().values())>;

@@ -5,7 +5,7 @@
 - Official-source verification: `2026-11-06T15:45:05+08:00` (CUDA compilation/package contract; no build or dependency acquisition)
 - Entry point: [architecture overview](overview.md); foundation contracts: [Kokkos design](kokkos-design.md)
 
-The current CPU slice and local provisioning are described below. Later CUDA and complete Phase 1 sections remain proposed targets. Legacy exec exports and their bootstrap consumer have been removed; core, schema, data and control exports remain. CI has not been updated to provision Kokkos; no CI execution is claimed. Actual slice results are recorded in [CPU slice validation](kokkos-cpu-slice-validation.md).
+The current CPU slice and local provisioning are described below. Later CUDA and complete Phase 1 sections remain proposed targets. Legacy exec exports and their bootstrap consumer have been removed; core, schema, data and control exports remain. The CI workflow provisions Kokkos before configuring Nexora. See [Serial CI validation](serial-ci-validation.md) for the workflow, local replay and actual runner results, and [CPU slice validation](kokkos-cpu-slice-validation.md) for the original slice.
 
 ## Real precision configuration
 
@@ -56,6 +56,8 @@ Choose exact compiler, standard library, toolkit, driver and OS patch versions w
 “Offline” means all inputs are already provisioned. It does not mean dependency-free. Reproducibility means the source/toolchain/options/hardware profile is recorded and repeatable; it does not promise bitwise-identical numerical results across execution spaces or compilers. Never change numerical tolerances merely to make a new backend pass.
 
 ## Current Serial provisioning and proposed package examples
+
+Use `tools/validate_serial.py` for the CI-equivalent Serial checks. Its provisioning phase checks the exact source SHA-256, installs a compiler- and configuration-specific static package, and records file digests and provenance. Its validation phase uses that local `Kokkos_DIR` to configure, build, check the dependency graph, run CTest and the Decimal oracle, then install, relocate and exercise the package in a separate consumer. Linux CI runs this phase in a fresh network namespace. See the [Serial CI validation record](serial-ci-validation.md) for reproducible commands and platform status.
 
 The following is the separately networked acquisition and offline local provisioning used for the current Serial slice. Choose paths appropriate to the machine. Confirm the manifest line matches before extraction and retain license notices as described in [third-party provenance](../../third_party/README.md).
 
