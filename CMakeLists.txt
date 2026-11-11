@@ -25,9 +25,25 @@ if(DEFINED CMAKE_CUDA_ARCHITECTURES)
     message(FATAL_ERROR "This CPU slice does not accept CMAKE_CUDA_ARCHITECTURES; GPU profiles require separate implementation and validation.")
 endif()
 
-# Dependency acquisition is a separate preparation step. Never download or fall back.
+# Search the checkout's pre-provisioned cache after CMake's standard package paths.
+set(nexora_kokkos_version 5.2.2)
+set(nexora_kokkos_local_paths)
+get_property(nexora_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(NOT CMAKE_CROSSCOMPILING AND NOT nexora_multi_config)
+    set(nexora_kokkos_cache "${PROJECT_SOURCE_DIR}/.cache/dependencies/kokkos-${nexora_kokkos_version}")
+    string(TOLOWER "${CMAKE_BUILD_TYPE}" nexora_kokkos_config)
+    if(nexora_kokkos_config)
+        list(APPEND nexora_kokkos_local_paths "${nexora_kokkos_cache}/install-${nexora_kokkos_config}")
+    endif()
+    # MSVC requires a configuration-matched runtime library.
+    if(NOT MSVC AND NOT nexora_kokkos_config STREQUAL "release")
+        list(APPEND nexora_kokkos_local_paths "${nexora_kokkos_cache}/install-release")
+    endif()
+endif()
+
 set(Kokkos_LAUNCH_COMPILER OFF)
-find_package(Kokkos 5.2.2 EXACT CONFIG REQUIRED)
+find_package(Kokkos ${nexora_kokkos_version} EXACT CONFIG REQUIRED
+    PATHS ${nexora_kokkos_local_paths})
 include(cmake/NexoraKokkos.cmake)
 nexora_validate_kokkos()
 

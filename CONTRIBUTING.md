@@ -6,7 +6,7 @@ The [architecture overview](docs/architecture/overview.md) is the authoritative 
 
 ## Current CPU checks
 
-Set `Kokkos_DIR` to the verified package's `lib/cmake/Kokkos` directory. Use `--fresh` when reusing a build directory created by the old bootstrap, so the removed GPU option is not retained in its cache.
+For a native single-config build, CMake also searches a provisioned `.cache/dependencies/kokkos-5.2.2/install-<lowercase-build-type>` prefix in the checkout. Non-MSVC builds also search `install-release`. The normal CMake package paths take precedence. To select another verified installation, set `Kokkos_DIR` to its `lib/cmake/Kokkos` directory. CMake caches the resolved package. When switching between Debug and Release on MSVC, use separate build directories or `--fresh` so CMake searches for the matching installation. Use `--fresh` when reusing a build directory created by the old bootstrap, so the removed GPU option is not retained in its cache.
 
 ```sh
 cmake --fresh --preset cpu-debug -DKokkos_DIR="<kokkos-debug-prefix>/lib/cmake/Kokkos"
