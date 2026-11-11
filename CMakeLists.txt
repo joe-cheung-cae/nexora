@@ -45,7 +45,6 @@ set_target_properties(nexora_build_options PROPERTIES EXPORT_NAME build_options)
 target_compile_features(nexora_build_options INTERFACE cxx_std_20)
 
 add_subdirectory(src/core)
-add_subdirectory(src/exec)
 add_subdirectory(src/data)
 add_subdirectory(src/simulation)
 add_subdirectory(src/methods/reference)
@@ -61,7 +60,6 @@ if(BUILD_TESTING)
     endfunction()
 
     add_subdirectory(tests/core)
-    add_subdirectory(tests/exec)
     add_subdirectory(tests/data)
     add_subdirectory(tests/simulation)
     add_subdirectory(tests/kokkos)
@@ -79,8 +77,7 @@ write_basic_package_version_file("${PROJECT_BINARY_DIR}/NexoraConfigVersion.cmak
 install(TARGETS
     nexora_build_options
     nexora_core
-    nexora_exec_api
-    nexora_exec_cpu
+    nexora_data_schema
     nexora_data
     nexora_participant_api
     nexora_simulation

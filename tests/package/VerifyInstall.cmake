@@ -2,6 +2,11 @@ cmake_minimum_required(VERSION 3.25.2)
 
 include(CMakePackageConfigHelpers)
 
+if(NOT "${expected_double_precision}" MATCHES "^[01]$")
+    message(FATAL_ERROR "expected_double_precision must be independently supplied as 0 or 1")
+endif()
+math(EXPR conflicting_double_precision "1 - ${expected_double_precision}")
+
 set(config_args)
 if(config)
     set(config_args --config "${config}")
@@ -12,10 +17,23 @@ file(REMOVE_RECURSE "${scratch}/installed" "${scratch}/relocated" "${scratch}/co
 execute_process(COMMAND "${CMAKE_COMMAND}" --install "${project_build}"
     ${config_args} --prefix "${scratch}/installed" COMMAND_ERROR_IS_FATAL ANY)
 file(RENAME "${scratch}/installed" "${scratch}/relocated")
+file(GLOB_RECURSE private_headers "${scratch}/relocated/*.hpp")
+list(FILTER private_headers INCLUDE REGEX
+    "/(FieldIssuer|ExternalField|TransportBuilder|TransportReceiver|(methods|participants)/reference/[^/]+)[.]hpp$")
+if(private_headers)
+    message(FATAL_ERROR "Private implementation headers leaked into the installation: ${private_headers}")
+endif()
+file(GLOB_RECURSE retired_headers "${scratch}/relocated/*.hpp")
+list(FILTER retired_headers INCLUDE REGEX
+    "/nexora/(exec/.*|core/ArrayView|core/math/(Vec|Tensor)|data/FieldView)[.]hpp$")
+if(retired_headers)
+    message(FATAL_ERROR "Retired public headers are still installed: ${retired_headers}")
+endif()
 
 set(consumer_copy "${scratch}/consumer-source")
 file(COPY "${consumer_source}/CMakeLists.txt" "${consumer_source}/main.cpp"
-    "${consumer_source}/time.cpp" "${kokkos_test_source}"
+    "${consumer_source}/time.cpp" "${consumer_source}/schema.cpp"
+    "${consumer_source}/field_binding.cpp" "${kokkos_test_source}"
     DESTINATION "${consumer_copy}")
 
 set(generator_args -G "${generator}")
@@ -41,8 +59,10 @@ endif()
 
 set(nexora_arg "-DNexora_DIR=${scratch}/relocated/${package_dir}")
 set(source_arg "-DCMAKE_C_COMPILER=${c_compiler}")
+set(precision_expectation_arg "-DNEXORA_TEST_EXPECT_DOUBLE_PRECISION=${expected_double_precision}")
 execute_process(COMMAND "${CMAKE_COMMAND}" -S "${consumer_copy}" -B "${scratch}/consumer"
-    ${configure_args} "${nexora_arg}" "-DKokkos_DIR=${kokkos_dir}" COMMAND_ERROR_IS_FATAL ANY)
+    ${configure_args} "${nexora_arg}" "-DKokkos_DIR=${kokkos_dir}"
+    "${precision_expectation_arg}" COMMAND_ERROR_IS_FATAL ANY)
 execute_process(COMMAND "${CMAKE_COMMAND}" --build "${scratch}/consumer" ${config_args}
     COMMAND_ERROR_IS_FATAL ANY)
 execute_process(COMMAND "${CMAKE_CTEST_COMMAND}" --test-dir "${scratch}/consumer"
@@ -65,6 +85,10 @@ function(expect_source_and_consumer_rejection case expected_diagnostic)
     expect_configure_rejection("consumer-${case}" "${consumer_copy}" "${expected_diagnostic}"
         "${nexora_arg}" ${ARGN})
 endfunction()
+
+expect_configure_rejection(consumer-precision-mismatch "${consumer_copy}" "Nexora precision mismatch"
+    "${nexora_arg}" "-DKokkos_DIR=${kokkos_dir}" "${precision_expectation_arg}"
+    "-DNEXORA_ENABLE_DOUBLE_PRECISION=${conflicting_double_precision}")
 
 # Restrict package discovery to this scratch root so a system Kokkos cannot mask a failure.
 set(fixture_root "${scratch}/negative/packages")

@@ -25,9 +25,19 @@ using reference::Config;
 using reference::Participant;
 using reference::Snapshot;
 
+static_assert(std::is_same_v<reference::Values::value_type, real>);
+static_assert(std::is_same_v<decltype(Config::lambda), real>);
+static_assert(std::is_same_v<decltype(Snapshot::time), double>);
 static_assert(!std::is_assignable_v<decltype(std::declval<Snapshot&>().ids(0)), std::uint64_t>);
-static_assert(!std::is_assignable_v<decltype(std::declval<Snapshot&>().x(0)), double>);
-static_assert(!std::is_assignable_v<decltype(std::declval<Snapshot&>().q(0)), double>);
+static_assert(!std::is_assignable_v<decltype(std::declval<Snapshot&>().x(0)), real>);
+static_assert(!std::is_assignable_v<decltype(std::declval<Snapshot&>().q(0)), real>);
+static_assert(std::is_same_v<decltype(TimeConstraint::minimum_step), double>);
+static_assert(std::is_same_v<decltype(TimeConstraint::maximum_step), double>);
+static_assert(std::is_same_v<decltype(TimeConstraint::fixed_quantum), std::optional<double>>);
+static_assert(std::is_same_v<decltype(TrialReport::reached_time), double>);
+static_assert(std::is_same_v<decltype(FieldStamp::valid_from), double>);
+static_assert(std::is_same_v<decltype(FieldStamp::valid_until), double>);
+static_assert(std::is_same_v<decltype(TimeState::accepted_time), double>);
 
 void check(bool condition, const char* expression, int line) {
     if (!condition) {
@@ -73,21 +83,20 @@ void check_view(const View& view, const std::vector<Value>& expected) {
     }
 }
 
-void check_descriptor(const FieldDescriptor& field, const char* name, const Snapshot& state) {
+void check_descriptor(const FieldDescriptor& field, const char* name) {
     CHECK(field.validate().ok());
     CHECK(field.name == name);
     CHECK(field.association == Association::node);
     CHECK(field.entity_set == "reference_samples");
     CHECK(field.units == "1");
-    CHECK(field.scalar_type == ScalarType::float64);
+    CHECK(field.scalar_type == real_scalar_type);
     CHECK(field.components == 1);
     CHECK(field.access == FieldAccess::read);
-    CHECK(field.state_version == state.version);
-    CHECK(field.valid_from == state.time && field.valid_until == state.time);
+    CHECK(field.time_level == "accepted");
 }
 
 void check_snapshot(const Snapshot& state, const std::vector<std::uint64_t>& ids,
-                    const std::vector<double>& x, const std::vector<double>& q, double time,
+                    const std::vector<real>& x, const std::vector<real>& q, double time,
                     std::uint64_t version, std::uint64_t attempt) {
     check_view(state.ids, ids);
     check_view(state.x, x);
@@ -95,9 +104,15 @@ void check_snapshot(const Snapshot& state, const std::vector<std::uint64_t>& ids
     CHECK(state.time == time);
     CHECK(state.version == StateVersion{version});
     CHECK(state.attempt == attempt);
-    check_descriptor(state.x_descriptor(), "x", state);
-    check_descriptor(state.q_descriptor(), "q", state);
+    check_descriptor(state.x_descriptor(), "x");
+    check_descriptor(state.q_descriptor(), "q");
     CHECK(state.x_descriptor().id != state.q_descriptor().id);
+    const auto stamp = state.stamp();
+    CHECK(stamp.validate().ok());
+    CHECK(stamp.accepted);
+    CHECK(stamp.accepted_version == state.version);
+    CHECK(stamp.time.physical_time == state.time);
+    CHECK(stamp.valid_from == state.time && stamp.valid_until == state.time);
 }
 
 void check_same_accepted_storage(const Snapshot& before, const Snapshot& after) {
@@ -112,8 +127,8 @@ void lifecycle_and_replay() {
     constexpr double start = 2.0;
     constexpr double first_time = start + step;
     constexpr double second_time = first_time + step;
-    const std::vector<double> first_x{0.75, 1.5, -3.0}, first_q{0.25, 1.5, 4.0};
-    const std::vector<double> second_x{0.5625, 1.125, -2.25}, second_q{0.4375, 1.875, 3.25};
+    const std::vector<real> first_x{0.75, 1.5, -3.0}, first_q{0.25, 1.5, 4.0};
+    const std::vector<real> second_x{0.5625, 1.125, -2.25}, second_q{0.4375, 1.875, 3.25};
     std::optional<Snapshot> initial, first, second;
     {
         Participant participant(config);
@@ -176,8 +191,8 @@ void lifecycle_and_replay() {
 }
 
 void numerical_failure_and_retry() {
-    const double large = std::numeric_limits<double>::max();
-    const Config config{{12}, {large}, {large / 2.0}, 1.0};
+    const real large = std::numeric_limits<real>::max();
+    const Config config{{12}, {large}, {large / real{2}}, 1.0};
     Participant participant(config);
     Simulation simulation(participant);
     prepare(simulation);
@@ -196,9 +211,9 @@ void numerical_failure_and_retry() {
     CHECK(simulation.time().accepted_time == 0.25);
     CHECK(simulation.time().accepted_steps == 1);
     CHECK(simulation.time().trial_attempts == 2);
-    const double transfer = large * 0.25;
-    const std::vector<double> expected_x{large - transfer};
-    const std::vector<double> expected_q{large / 2.0 + transfer};
+    const real transfer = large * real{0.25};
+    const std::vector<real> expected_x{large - transfer};
+    const std::vector<real> expected_q{large / real{2} + transfer};
     const auto retried = snapshot(participant);
     check_snapshot(retried, config.ids, expected_x, expected_q, 0.25, 1, 2);
     check_snapshot(initial, config.ids, config.x, config.q, 0.0, 0, 0);
@@ -217,8 +232,10 @@ void numerical_failure_and_retry() {
 }
 
 void reject_invalid_inputs() {
-    const double nan = std::numeric_limits<double>::quiet_NaN();
-    const double infinity = std::numeric_limits<double>::infinity();
+    const real nan = std::numeric_limits<real>::quiet_NaN();
+    const real infinity = std::numeric_limits<real>::infinity();
+    const double time_nan = std::numeric_limits<double>::quiet_NaN();
+    const double time_infinity = std::numeric_limits<double>::infinity();
     for (const auto& config : {Config{{}, {}, {}, 1.0}, Config{{1, 1}, {1, 2}, {0, 0}, 1.0},
                                Config{{1, 2}, {1}, {0}, 1.0}, Config{{1}, {nan}, {0}, 1.0},
                                Config{{1}, {1}, {infinity}, 1.0}, Config{{1}, {1}, {0}, nan},
@@ -230,7 +247,7 @@ void reject_invalid_inputs() {
         CHECK(participant.finalize().ok());
     }
     Participant invalid_time;
-    CHECK(invalid_time.initialize(nan).code() == StatusCode::invalid_argument);
+    CHECK(invalid_time.initialize(time_nan).code() == StatusCode::invalid_argument);
     CHECK(invalid_time.finalize().ok());
 
     Participant participant;
@@ -243,7 +260,7 @@ void reject_invalid_inputs() {
     CHECK(participant.prepare().ok());
     CHECK(participant.advance_trial(interval).status().code() == StatusCode::invalid_state);
     for (const auto& invalid : {TimeInterval{-1.0, -0.75, 0.25}, wrong_duration,
-                                TimeInterval{0.0, 0.25, 0.0}, TimeInterval{0.0, infinity, 0.25},
+                                TimeInterval{0.0, 0.25, 0.0}, TimeInterval{0.0, time_infinity, 0.25},
                                 TimeInterval{0.0, 1.25, 1.25}}) {
         CHECK(participant.begin_window(invalid).code() == StatusCode::invalid_argument);
     }
@@ -269,6 +286,55 @@ void reject_invalid_inputs() {
     CHECK(participant.finalize().ok());
 }
 
+void reject_unrepresentable_real_steps() {
+    if constexpr (std::is_same_v<real, float>) {
+        const double float_denorm = static_cast<double>(std::numeric_limits<real>::denorm_min());
+        const double float_max = static_cast<double>(std::numeric_limits<real>::max());
+        auto reject = [](real lambda, double dt) {
+            Participant participant(Config{{0}, {1}, {0}, lambda});
+            CHECK(participant.initialize(0.0).ok());
+            CHECK(participant.prepare().ok());
+            const TimeInterval interval{0.0, dt, dt};
+            CHECK(participant.begin_window(interval).code() == StatusCode::invalid_argument);
+            check_snapshot(snapshot(participant), {0}, {1}, {0}, 0.0, 0, 0);
+            CHECK(participant.finalize().ok());
+        };
+        reject(real{1}, float_denorm / 4.0);  // conversion to real becomes zero
+        reject(std::numeric_limits<real>::denorm_min(), float_max * 2.0); // exceeds real max
+        reject(std::numeric_limits<real>::denorm_min(), 0.25); // real dt*lambda underflows
+    }
+}
+
+void advertised_time_constraint_endpoints_are_usable() {
+    const std::array lambdas{real{1}, std::numeric_limits<real>::denorm_min(),
+                             std::numeric_limits<real>::max(), real{0x1.34p126},
+                             real{0x1.06ee48p126}};
+    for (const real lambda : lambdas) {
+        Participant probe(Config{{0}, {1}, {0}, lambda});
+        const TimeConstraint constraint = probe.time_constraint(0.0);
+        CHECK(std::isfinite(constraint.minimum_step) && constraint.minimum_step > 0.0);
+        CHECK(std::isfinite(constraint.maximum_step) && constraint.maximum_step > 0.0);
+        CHECK(constraint.minimum_step <= constraint.maximum_step);
+        CHECK(validate_time_constraint(constraint).ok());
+        for (const double step : {constraint.minimum_step, constraint.maximum_step}) {
+            CHECK(validate_time_step(constraint, step).ok());
+            Participant participant(Config{{0}, {1}, {0}, lambda});
+            Simulation simulation(participant);
+            prepare(simulation);
+            CHECK(simulation.begin_window(step).ok());
+            CHECK(simulation.advance_trial().ok());
+            // Simulation::commit_window invokes prepare_commit before commit.
+            CHECK(simulation.commit_window().ok());
+            CHECK(simulation.time().accepted_time == step);
+            const auto accepted = snapshot(participant);
+            CHECK(accepted.time == step);
+            CHECK(accepted.stamp().time.physical_time == step);
+            CHECK(accepted.stamp().valid_from == step && accepted.stamp().valid_until == step);
+            CHECK(simulation.finalize().ok());
+        }
+    }
+}
+
 void requested_duration_survives_endpoint_rounding() {
     Participant participant;
     constexpr double initial_time = 0x1p52;
@@ -280,20 +346,38 @@ void requested_duration_survives_endpoint_rounding() {
     CHECK(simulation.finalize().ok());
 }
 
+// For this unit-amplitude, lambda=1 decay, x and q stay in [0,1]. Each
+// step rounds dt*lambda, the transfer multiply, and two updates: at most
+// four operations at unit scale. Eight epsilons per step conservatively
+// cover these errors and their accumulation for n*epsilon << 1. The
+// separate term covers converting the double time step to real.
+long double real_roundoff_bound(int steps, double dt) {
+    const long double eps = std::numeric_limits<real>::epsilon();
+    const long double conversion = std::abs(static_cast<long double>(static_cast<real>(dt)) -
+                                            static_cast<long double>(dt));
+    return 8.0L * steps * eps + steps * conversion;
+}
+
 void euler_convergence() {
     constexpr std::array steps_by_level{16, 32, 64};
-    std::array<double, steps_by_level.size()> errors{};
-    const double exact = std::exp(-1.0);
-    std::cout << std::setprecision(17);
+    std::array<long double, steps_by_level.size()> errors{};
+    const long double exact = std::exp(-1.0L);
+    std::cout << std::setprecision(17)
+              << "Reference precision=" << (std::is_same_v<real, float> ? "float" : "double")
+              << " epsilon=" << std::numeric_limits<real>::epsilon()
+              << " long_double_digits=" << std::numeric_limits<long double>::digits << '\n';
     for (std::size_t level = 0; level < errors.size(); ++level) {
         const int steps = steps_by_level[level];
         const double dt = 1.0 / steps;
         Participant participant;
         Simulation simulation(participant);
         prepare(simulation);
-        double x = 1.0;
-        double q = 0.0;
-        double max_conservation_error = 0.0;
+        real x = 1;
+        real q = 0;
+        long double max_conservation_error = 0;
+        const long double roundoff = real_roundoff_bound(steps, dt);
+        const long double conservation_tolerance =
+            std::is_same_v<real, double> ? 1e-12L : roundoff;
         for (int step = 0; step < steps; ++step) {
             CHECK(simulation.advance(dt).ok());
             const auto committed = snapshot(participant);
@@ -301,29 +385,71 @@ void euler_convergence() {
             const auto host_q = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, committed.q);
             x = host_x(0);
             q = host_q(0);
-            const double conservation_error = std::abs(x + q - 1.0);
-            CHECK(conservation_error <= 1e-12);
+            const long double conservation_error =
+                std::abs(static_cast<long double>(x) + static_cast<long double>(q) - 1.0L);
+            CHECK(conservation_error <= conservation_tolerance);
             max_conservation_error = std::max(max_conservation_error, conservation_error);
         }
         const auto committed = snapshot(participant);
         CHECK(committed.time == 1.0);
         CHECK(committed.version == StateVersion{static_cast<std::uint64_t>(steps)});
         CHECK(simulation.time().accepted_time == 1.0);
-        const double euler_x = std::pow(1.0 - dt, steps);
-        const double euler_q = 1.0 - euler_x;
-        CHECK(std::abs(x - euler_x) <= 1e-12 + 1e-10 * std::abs(euler_x));
-        CHECK(std::abs(q - euler_q) <= 1e-12 + 1e-10 * std::abs(euler_q));
-        errors[level] = std::abs(x - exact);
+        // Closed form is independent of the implementation's per-step loop.
+        const long double euler_x = std::pow(1.0L - static_cast<long double>(dt), steps);
+        const long double euler_q = 1.0L - euler_x;
+        const long double x_tolerance = std::is_same_v<real, double>
+                                            ? 1e-12L + 1e-10L * std::abs(euler_x)
+                                            : roundoff;
+        const long double q_tolerance = std::is_same_v<real, double>
+                                            ? 1e-12L + 1e-10L * std::abs(euler_q)
+                                            : roundoff;
+        const long double x_euler_error = std::abs(static_cast<long double>(x) - euler_x);
+        const long double q_euler_error = std::abs(static_cast<long double>(q) - euler_q);
+        CHECK(x_euler_error <= x_tolerance);
+        CHECK(q_euler_error <= q_tolerance);
+        errors[level] = std::abs(static_cast<long double>(x) - exact);
         std::cout << "Reference Euler " << steps << " steps, x=" << x << ", q=" << q
-                  << ", x_error=" << errors[level] << ", max_conservation_error="
-                  << max_conservation_error << '\n';
+                  << ", analytic_error=" << errors[level] << ", x_euler_error=" << x_euler_error
+                  << ", q_euler_error=" << q_euler_error << ", x_tolerance=" << x_tolerance
+                  << ", q_tolerance=" << q_tolerance << ", max_conservation_error="
+                  << max_conservation_error << ", conservation_tolerance="
+                  << conservation_tolerance << '\n';
         CHECK(simulation.finalize().ok());
     }
     for (std::size_t level = 1; level < errors.size(); ++level) {
-        const double order = std::log2(errors[level - 1] / errors[level]);
-        CHECK(order >= 0.9 && order <= 1.1);
-        std::cout << "Reference Euler observed order " << order << '\n';
+        const long double order = std::log2(errors[level - 1] / errors[level]);
+        std::cout << "Reference Euler observed order " << order << " (allowed 0.9..1.1)\n";
+        CHECK(order >= 0.9L && order <= 1.1L);
     }
+
+    // 0.1 is not exactly representable as float; compare against the requested
+    // double duration, explicitly accounting for its conversion to real.
+    constexpr int steps = 10;
+    constexpr double dt = 0.1;
+    Participant participant;
+    Simulation simulation(participant);
+    prepare(simulation);
+    for (int i = 0; i < steps; ++i) {
+        CHECK(simulation.advance(dt).ok());
+    }
+    const auto result = snapshot(participant);
+    const auto host_x = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, result.x);
+    const auto host_q = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, result.q);
+    const long double oracle = std::pow(1.0L - static_cast<long double>(dt), steps);
+    const long double error_x = std::abs(static_cast<long double>(host_x(0)) - oracle);
+    const long double error_q = std::abs(static_cast<long double>(host_q(0)) - (1.0L - oracle));
+    const long double x_tolerance = std::is_same_v<real, double>
+                                        ? 1e-12L + 1e-10L * std::abs(oracle)
+                                        : real_roundoff_bound(steps, dt);
+    const long double q_tolerance = std::is_same_v<real, double>
+                                        ? 1e-12L + 1e-10L * std::abs(1.0L - oracle)
+                                        : real_roundoff_bound(steps, dt);
+    std::cout << "Reference non-dyadic dt=" << dt << ", x=" << host_x(0)
+              << ", q=" << host_q(0) << ", x_euler_error=" << error_x
+              << ", q_euler_error=" << error_q << ", x_tolerance=" << x_tolerance
+              << ", q_tolerance=" << q_tolerance << '\n';
+    CHECK(error_x <= x_tolerance && error_q <= q_tolerance);
+    CHECK(simulation.finalize().ok());
 }
 
 } // namespace
@@ -335,6 +461,8 @@ int main(int argc, char* argv[]) {
         lifecycle_and_replay();
         numerical_failure_and_retry();
         reject_invalid_inputs();
+        reject_unrepresentable_real_steps();
+        advertised_time_constraint_endpoints_are_usable();
         requested_duration_survives_endpoint_rounding();
         euler_convergence();
     } catch (const std::exception& error) {

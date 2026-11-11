@@ -1,8 +1,0 @@
-add_library(nexora_exec_api INTERFACE)
-add_library(nexora::exec_api ALIAS nexora_exec_api)
-set_target_properties(nexora_exec_api PROPERTIES EXPORT_NAME exec_api)
-target_link_libraries(nexora_exec_api INTERFACE nexora_core)
-add_library(nexora_exec_cpu STATIC cpu/CpuExecutor.cpp)
-add_library(nexora::exec_cpu ALIAS nexora_exec_cpu)
-set_target_properties(nexora_exec_cpu PROPERTIES EXPORT_NAME exec_cpu)
-target_link_libraries(nexora_exec_cpu PUBLIC nexora_exec_api)

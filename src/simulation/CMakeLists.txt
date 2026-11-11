@@ -4,7 +4,7 @@ set_target_properties(nexora_participant_api PROPERTIES EXPORT_NAME participant_
 target_include_directories(nexora_participant_api INTERFACE
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
-target_link_libraries(nexora_participant_api INTERFACE nexora::data)
+target_link_libraries(nexora_participant_api INTERFACE nexora::data_schema)
 
 add_library(nexora_simulation STATIC Simulation.cpp)
 add_library(nexora::simulation ALIAS nexora_simulation)

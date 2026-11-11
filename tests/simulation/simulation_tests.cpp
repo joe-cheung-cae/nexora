@@ -38,7 +38,7 @@ enum class Failure {
 class DummyParticipant final : public ParticipantIF {
   public:
     struct State {
-        double value = 0.0;
+        real value = real{0};
         double time = 0.0;
         std::uint64_t history = 0;
         std::uint64_t sequence = 10;
@@ -84,7 +84,7 @@ class DummyParticipant final : public ParticipantIF {
     Result<TrialReport> advance_trial(const TimeInterval& interval) override {
         calls.push_back("trial");
         CHECK(checkpoint.has_value());
-        state.value += interval.duration() * static_cast<double>(state.history + 1);
+        state.value += static_cast<real>(interval.duration()) * static_cast<real>(state.history + 1);
         ++state.history;
         ++state.sequence;
         state.time = interval.end;

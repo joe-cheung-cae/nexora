@@ -1,10 +1,9 @@
 #pragma once
-#include <cmath>
 #include <cstddef>
 #include <nexora/core/Status.hpp>
 #include <nexora/core/Types.hpp>
-#include <nexora/exec/MemorySpace.hpp>
 #include <string>
+#include <type_traits>
 namespace nexora {
 enum class Association {
     cell,
@@ -24,6 +23,8 @@ enum class Association {
     modal_coordinate
 };
 enum class ScalarType { float32, float64, int32, int64, uint32, uint64 };
+inline constexpr ScalarType real_scalar_type =
+    std::is_same_v<real, float> ? ScalarType::float32 : ScalarType::float64;
 enum class FieldOwnership { owned, ghost, replicated, external };
 enum class FieldAccess { read, overwrite, accumulate };
 enum class MeasureSemantics { point_value, density, integrated_load, flux_integral };
@@ -33,7 +34,7 @@ struct FieldDescriptor {
     DomainId domain_id{};
     Association association{Association::cell};
     std::string entity_set;
-    ScalarType scalar_type{ScalarType::float64};
+    ScalarType scalar_type{real_scalar_type};
     std::size_t components{1};
     std::string tensor_interpretation;
     std::string units;
@@ -41,19 +42,8 @@ struct FieldDescriptor {
     std::string pressure_convention;
     std::string time_level;
     std::string stage;
-    double valid_from{};
-    double valid_until{};
-    std::string layout;
-    std::size_t entity_stride{};
-    std::size_t component_stride{};
-    MemorySpace memory_space{MemorySpace::host};
-    int device_id{};
     FieldOwnership ownership{FieldOwnership::owned};
-    TopologyVersion topology_version{};
-    GeometryVersion geometry_version{};
-    LayoutVersion layout_version{};
-    StateVersion state_version{};
-    FieldAccess access{FieldAccess::read};
+    FieldAccess access{FieldAccess::read}; // Maximum declared access, not a lease.
     MeasureSemantics measure{MeasureSemantics::point_value};
     Status validate() const {
         if (name.empty())
@@ -62,11 +52,17 @@ struct FieldDescriptor {
             return {StatusCode::invalid_argument, "field units are empty"};
         if (!components)
             return {StatusCode::invalid_argument, "field component count is zero"};
-        if (!std::isfinite(valid_from) || !std::isfinite(valid_until) || valid_until < valid_from)
-            return {StatusCode::invalid_argument, "invalid validity interval"};
         if (static_cast<unsigned>(association) >
             static_cast<unsigned>(Association::modal_coordinate))
             return {StatusCode::invalid_argument, "invalid field association"};
+        if (static_cast<unsigned>(scalar_type) > static_cast<unsigned>(ScalarType::uint64))
+            return {StatusCode::invalid_argument, "invalid field scalar type"};
+        if (static_cast<unsigned>(ownership) > static_cast<unsigned>(FieldOwnership::external))
+            return {StatusCode::invalid_argument, "invalid field ownership"};
+        if (static_cast<unsigned>(access) > static_cast<unsigned>(FieldAccess::accumulate))
+            return {StatusCode::invalid_argument, "invalid field access"};
+        if (static_cast<unsigned>(measure) > static_cast<unsigned>(MeasureSemantics::flux_integral))
+            return {StatusCode::invalid_argument, "invalid field measure"};
         return {};
     }
 };
