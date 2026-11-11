@@ -16,6 +16,11 @@ struct Derived : Base {
 };
 int main() {
     using namespace nexora;
+#if NEXORA_ENABLE_DOUBLE_PRECISION
+    static_assert(std::is_same_v<real, double>);
+#else
+    static_assert(std::is_same_v<real, float>);
+#endif
     static_assert(!std::is_convertible<FieldId, DomainId>::value, "IDs must not mix");
     static_assert(!std::is_constructible<ArrayView<Base>, std::vector<Derived>&>::value,
                   "array covariance changes stride");

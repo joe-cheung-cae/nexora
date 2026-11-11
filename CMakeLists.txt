@@ -12,6 +12,11 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 option(NEXORA_ENABLE_MPI "Build the MPI C API smoke probe" OFF)
+option(NEXORA_ENABLE_DOUBLE_PRECISION "Use double instead of float for nexora::real" OFF)
+set(NEXORA_REAL_IS_DOUBLE 0)
+if(NEXORA_ENABLE_DOUBLE_PRECISION)
+    set(NEXORA_REAL_IS_DOUBLE 1)
+endif()
 
 if(DEFINED NEXORA_GPU_BACKEND)
     message(FATAL_ERROR "NEXORA_GPU_BACKEND was removed; select a verified local Kokkos package with Kokkos_DIR. This slice supports Serial only.")
@@ -31,6 +36,7 @@ if(NEXORA_ENABLE_MPI)
 endif()
 
 set(NEXORA_GENERATED_INCLUDE_DIR "${PROJECT_BINARY_DIR}/generated/include")
+configure_file(cmake/Config.hpp.in "${NEXORA_GENERATED_INCLUDE_DIR}/nexora/core/Config.hpp" @ONLY)
 configure_file(cmake/Version.hpp.in "${NEXORA_GENERATED_INCLUDE_DIR}/nexora/core/Version.hpp" @ONLY)
 
 add_library(nexora_build_options INTERFACE)

@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <functional>
+#include <nexora/core/Real.hpp>
 namespace nexora {
 template <class Tag, class T = std::uint64_t> class StrongValue {
   public:
@@ -49,10 +50,12 @@ using GeometryVersion = StrongValue<GeometryVersionTag>;
 using StateVersion = StrongValue<StateVersionTag>;
 struct TrialEpoch {
     std::uint64_t window{}, attempt{}, iteration{}, stage{};
+    friend constexpr bool operator==(const TrialEpoch&, const TrialEpoch&) = default;
 };
 struct TimeStamp {
     double physical_time{};
     std::uint64_t window{}, substep{}, stage{};
+    friend constexpr bool operator==(const TimeStamp&, const TimeStamp&) = default;
 };
 } // namespace nexora
 namespace std {
