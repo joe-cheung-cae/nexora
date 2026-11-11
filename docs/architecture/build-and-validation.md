@@ -22,7 +22,7 @@ Existing reference numerical state, parameters, operators and local transport us
 | CMake | **3.25.2+** for every Nexora target configuration | Kokkos's [top-level minimum is 3.22](https://github.com/kokkos/kokkos/blob/8e15454876298832f013ebcaf08d53825b5bda40/CMakeLists.txt), but [CUDA as a CMake language requires 3.25.2](https://github.com/kokkos/kokkos/blob/8e15454876298832f013ebcaf08d53825b5bda40/cmake/kokkos_enable_options.cmake); use one stricter project floor |
 | Generator / architecture | Ninja; 64-bit target; record exact Ninja version | Reproducible runner profile; Kokkos's pinned top-level source treats 32-bit as experimental |
 | Default CPU execution | Kokkos Serial, with GPU and MPI disabled | Current limited slice; not a general upstream support claim |
-| License | `Apache-2.0 WITH LLVM-exception` | [Pinned upstream LICENSE](https://github.com/kokkos/kokkos/blob/8e15454876298832f013ebcaf08d53825b5bda40/LICENSE); Nexora's own license remains pending |
+| Kokkos license | `Apache-2.0 WITH LLVM-exception` | [Pinned upstream LICENSE](https://github.com/kokkos/kokkos/blob/8e15454876298832f013ebcaf08d53825b5bda40/LICENSE) |
 
 The official release archive SHA-256 is `d6557aaef39302282a15f9c770433d1fcdf4e961dfd6d9ed726b9d0d0f546b9f`, verified against its official manifest; the annotated tag resolves to the locked commit. See [provenance](../../third_party/README.md). `latest`, `develop`, a moving branch, and a version range are not acceptable dependency locks.
 

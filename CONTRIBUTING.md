@@ -39,4 +39,4 @@ The [Serial validation runner](docs/architecture/serial-ci-validation.md) provis
 
 ## License and provenance
 
-The Nexora license is pending maintainer decision. Confirm provenance and reuse rights before importing legacy or third-party material. The dependency policy in [third_party/README.md](third_party/README.md) records Kokkos's upstream license separately from Nexora, required attribution, local provisioning, and the lock upgrade process.
+Submit original contributions that you are authorized to license under Nexora's [BSD 3-Clause License](LICENSE). Confirm provenance and reuse rights before importing legacy or third-party material. The [dependency policy](third_party/README.md) records Kokkos's license, required notices, local provisioning, and the lock upgrade process.

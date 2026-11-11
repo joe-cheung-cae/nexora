@@ -28,7 +28,7 @@ Record origin, revision/version, artifact digest, retrieval/verification method,
 
 An upgrade changes the lock only through a reviewed dependency update with source/license review, applicable compiler/CMake changes, offline installation and downstream consumption checks, and the required numerical/backend acceptance. Do not track moving branches, use version ranges as locks, silently download missing packages, or replace missing Kokkos with native execution. Additional libraries remain separate opt-in decisions; Kokkos Kernels and external solver packages are not implicitly required by selecting Kokkos Core.
 
-Nexora's project license and legacy reuse rights remain pending under [ADR-014](../docs/adr/ADR-014-license-and-provenance.md). Kokkos's license does not resolve either question.
+Nexora's original code and documentation use the [BSD 3-Clause License](../LICENSE). Dependencies retain their own licenses. Confirm reuse rights before importing legacy material, as described in [ADR-014](../docs/adr/ADR-014-license-and-provenance.md).
 
 ## Current local provisioning
 

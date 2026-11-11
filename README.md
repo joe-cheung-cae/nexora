@@ -22,6 +22,6 @@ Configure, build, test and install use locally provisioned dependencies. CI prov
 
 See [AGENTS.md](AGENTS.md) before changing the project. The [archived v1.2 plan](docs/archive/CFDX_Multimethod_HPC_Architecture_Plan_v1.2_NVIDIA_Integration.md) is historical context, not implementation guidance.
 
-## License status
+## License
 
-No Nexora project license has been selected. [LICENSE](LICENSE) and [ADR-014](docs/adr/ADR-014-license-and-provenance.md) record this unresolved decision. Kokkos has its own license; selecting it does not license Nexora or grant rights to legacy material.
+Nexora's original code and documentation are available under the [BSD 3-Clause License](LICENSE), which permits commercial use, modification, and redistribution subject to its notice and endorsement terms. Dependencies such as Kokkos are governed by their own licenses. See [third-party provenance](third_party/README.md) and [ADR-014](docs/adr/ADR-014-license-and-provenance.md).

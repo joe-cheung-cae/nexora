@@ -24,7 +24,7 @@ Nexora 自有数值计算和存储统一使用 Kokkos，包括默认 CPU、可�
 
 本次提交前的审阅、本地依赖重建及 float/double Debug/Release 复验见[字段迁移复查](field-migration-review.md)。
 
-[ADR-001](../adr/ADR-001-module-boundaries.md)、[ADR-002](../adr/ADR-002-language-and-backend-baseline.md) 已被替代，只解释 bootstrap 源码。[归档 v1.2](../archive/CFDX_Multimethod_HPC_Architecture_Plan_v1.2_NVIDIA_Integration.md) 全篇为历史材料，其中的目录树、配置、代码、阶段和验收不是当前要求。历史中的物理问题可作为调研线索，须经现行计划重新采纳。[ADR-014](../adr/ADR-014-license-and-provenance.md) 的项目许可证待定与来源审查继续有效。
+[ADR-001](../adr/ADR-001-module-boundaries.md)、[ADR-002](../adr/ADR-002-language-and-backend-baseline.md) 已被替代，只解释 bootstrap 源码。[归档 v1.2](../archive/CFDX_Multimethod_HPC_Architecture_Plan_v1.2_NVIDIA_Integration.md) 全篇为历史材料，其中的目录树、配置、代码、阶段和验收不是当前要求。历史中的物理问题可作为调研线索，须经现行计划重新采纳。Nexora 自有代码与文档采用 [BSD 3-Clause License](../../LICENSE)。复用第三方或 legacy 材料前，按 [ADR-014](../adr/ADR-014-license-and-provenance.md) 审查来源及授权。
 
 ## 2. 当前实现（源码事实）
 
