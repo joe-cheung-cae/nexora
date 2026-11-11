@@ -1,12 +1,12 @@
 # Nexora Phase 1：Kokkos 基础与代表性切片评审
 
-修订时间：`2026-11-06T17:32:29+08:00`。**本稿取代原 Phase 1 多 backend 方案。Kokkos 单一路线已确定；Serial CPU 基础及最小参考状态生命周期两个有限切片已获授权并实现；完整 Phase 1 及其余迁移仍须另获明确批准。**
+修订时间：`2026-11-09T20:24:13+08:00`。**本稿取代原 Phase 1 多 backend 方案。Kokkos 单一路线已确定；Serial CPU 基础、最小参考状态生命周期及 P1-04 的 CPU 字段访问、外部 owner、本地传输快照和接收解包已获授权并实现；本次已授权提前清理旧 core 数值容器和 exec 层；完整 Phase 1 仍开放。**
 
 唯一架构入口：[overview](overview.md)。关键类型和生命周期：[kokkos-design](kokkos-design.md)。当前源码、旧类型/target 处置及归档逐项映射：[migration-roadmap](migration-roadmap.md)。依赖版本和离线过程：[build-and-validation](build-and-validation.md)。
 
 ## 1. 当前基础与 Phase 1 出口
 
-当前实现包含 exact Kokkos Serial 包、typed View 执行测试、经 `nexora::data` 的安装消费，以及使用真实 Kokkos 数组的 reference 状态/参与者。后者复用现有 Simulation，覆盖独立试算、提交、主动恢复、数值失败、重试和重放。旧 host Buffer、同步 ExecContext、字段元数据及单参与者控制仍暂留。没有真实方法求解器、分布式 halo 或持久 checkpoint。实际证据见 [CPU 切片验证](kokkos-cpu-slice-validation.md)和[参考生命周期验证](reference-lifecycle-validation.md)；dummy 测试和历史 CPU/设备描述不替代新路径的执行证据。
+当前实现包含 exact Kokkos Serial 包、typed View 执行测试、经 `nexora::data` 的安装消费，以及使用真实 Kokkos 数组的 reference 状态/参与者。后者复用现有 Simulation，覆盖独立试算、提交、主动恢复、数值失败、重试和重放。旧 host Buffer、同步 ExecContext、旧字段 View 与其导出已删除；字段元数据及单参与者控制保留。没有真实方法求解器、分布式 halo 或持久 checkpoint。实际证据见 [CPU 切片验证](kokkos-cpu-slice-validation.md)和[参考生命周期验证](reference-lifecycle-validation.md)；dummy 测试和历史 CPU/设备描述不替代新路径的执行证据。
 
 P1 直接交付 Kokkos 默认 CPU 和可选 CUDA 的**同一算子源码**、typed 字段、权限/外部 owner、accepted/trial 与恢复，以及 SPH 非规则邻域、FVM 面通量/单元累积两个代表性结构切片。简单标量 reference 保留用于基础生命周期测试。P1 不关闭完整 SPH/DEM 或 FVM solver 的物理验证，不提前宣称 FEM/LBM/MBD 已可用。
 
@@ -14,7 +14,7 @@ P1 直接交付 Kokkos 默认 CPU 和可选 CUDA 的**同一算子源码**、typ
 
 ## 2. 实施任务与依赖
 
-下表定义**完整任务的实施落点与验收**，不能视为全部获批或完成。当前落实 P1-01a/02 的有限 CPU 构建子集，以及步骤 2 的 P1-03/04/05/06 reference 子集：稳定 ID 与 x/q 语义、const typed 快照、独立 accepted/trial、Serial 算子、单参与者恢复与重试。`TimeInterval` 已下移 core。通用 schema/lease、外部 owner、异步交接、快照预算和 CPU/CUDA 同源实例化仍未实现，这些任务不能整体标为完成。详见[步骤 2 记录](reference-lifecycle-validation.md)。内部 target 使用 `nexora_*`，导出 target 使用 `nexora::*`。
+下表定义**完整任务的实施落点与验收**，不能视为全部获批或完成。当前落实 P1-01a/02 的有限 CPU 构建子集，以及步骤 2 的 P1-03/04/05/06 reference 子集：稳定 ID 与 x/q 语义、const typed 快照、独立 accepted/trial、Serial 算子、单参与者恢复与重试。`TimeInterval` 已下移 core。P1-03/04 的 Serial 子集覆盖纯 `data_schema`、typed 字段绑定、整分配读写 lease、外部 HostSpace owner、本地 `TransportView` 和按稳定 ID 校验解包。P1-06 的 Serial 参考窗口已接入 lease 和本地收发，两个 reference 实例验证了接收失败回滚、重试与旧发送快照保活。通用 ID/permutation、设备异步交接、快照预算和 CPU/CUDA 同源实例化仍待完成。见[步骤 2 记录](reference-lifecycle-validation.md)、[CPU 字段绑定](field-binding-validation.md)、[外部内存与本地传输](external-transport-validation.md)、[CPU 本地接收](local-receive-validation.md)和[reference 窗口集成](reference-window-validation.md)。内部 target 使用 `nexora_*`，导出 target 使用 `nexora::*`。
 
 | 任务 | 文件/目录及 target | 接口与前置依赖 | 通过条件 |
 |---|---|---|---|
@@ -28,9 +28,9 @@ P1 直接交付 Kokkos 默认 CPU 和可选 CUDA 的**同一算子源码**、typ
 | **P1-08 FVM 代表性切片** | `src/methods/fvm/` 的 FaceFlux/CellAccumulation/Topology；`tests/methods/fvm/`、`validation/fvm/`、`benchmarks/fvm/`；`nexora_methods_fvm` | 前置 P1-01b 对应数学基准、P1-03、P1-04、P1-05、P1-06。cell/face 分域、owner/neighbour/patch/CSR；独立 face 输出→cell 累积，保留原守恒方向约定。 | V6-FVM/V8；内部面唯一逻辑通量、边界面、非均匀连接；CPU/CUDA 和全局通量预算通过；完整压力校正在 P3。 |
 | **P1-09 case 与装配能力** | `apps/nexora/`、拟 `schemas/reference/`、`cases/reference/`、CLI tests；`nexora` | 前置 P1-02/06；schema 可在契约冻结后准备。versioned key=value reference fixture、validate/plan/run 共用校验；built/available/validated 分开；取消 provider 选择键。 | V9；非法/重复键、时间/量子/NaN/Inf、未支持组合明确失败；plan 列复制、布局转换与同步边界；run 不隐式选另一设备。 |
 | **P1-10 验收与端到端性能** | `tests/`、`validation/`、`benchmarks/`、`.github/workflows/ci.yml` 与受控 GPU runner 文档；测试叶 target | 前置 P1-02、P1-03、P1-04、P1-05、P1-06、P1-07、P1-08、P1-09；各 profile 的预检可随对应任务开展，汇总关闭须全部满足。固定独立 oracle、重复策略、manifest 和时序统计。受控致命错误只在隔离测试进程，不在正常进程强行恢复设备。 | V1–V9 的候选行为与 V10 预检，全部结果按实际 profile 记录；V1 最终包消费和 V10 最终删除检查由 P1-11 完成。硬件/驱动/编译器/架构/输入/hash/时间/skip 俱全，无设备不算通过。 |
-| **P1-11 一次切换并删除旧层** | 删除 `include/nexora/exec/`、`src/exec/`；迁移 `FieldView.hpp`、`tests/exec/`、`tests/package/consumer/`；更新 `tools/check_dependencies.py`、所有 CMake exports/CLI metadata | 前置：CPU P1-02–10 通过及所有现有 consumer 迁移；GPU 开启路径已走同一 Kokkos 实现。移除 `exec_api/exec_cpu` 与兼容别名，不引入 exec_cuda/exec_hip；删除旧 `NEXORA_GPU_BACKEND` 及 preset/消费示例用法，任何旧值均显式报迁移错误。旧 CUDA smoke 改成 Kokkos 诊断；MPI smoke 留作独立可选诊断。 | V1/V10；源码与安装面无旧路径调用，干净构建和消费实际执行；新依赖图正反例通过；目标缺 Kokkos 时明确失败。完整 P1 仍受 CUDA 实机总门槛约束。 |
+| **P1-11 旧层切换与最终验收** | 已提前移除 `include/nexora/exec/`、`src/exec/`、`FieldView.hpp`、旧 core 数值容器及旧 exec targets/tests；更新 checker、CMake exports 和安装消费者。 | 本次明确授权源码及导出清理，独立于其余 P1 验收的顺序；不存在旧兼容别名或替代 facade。最终交付仍须完成全部相关 consumer、目标图与已启用设备路径验收。 | V1/V10 最终干净构建、安装消费、依赖正反例及完整配置证据仍待汇总；本次删除不关闭 P1-11 全部验收或完整 P1。 |
 
-依赖主线为 `01a → 02 → 03 → (04,05) → 06 → (07,08,09) → 10 → 11`，01b 的各数学基准分别约束对应数值任务。04/05 的低层 CPU 子项可分别完成后进入 06，CUDA 联调证据在 10 汇总；07/08 可并行。同一开发分支内联调允许短暂旧调用点，但不发布双基础设施、长期兼容 facade 或 native fallback。P1-02 只要求早期包冒烟，P1-11 完成最终包消费/V10 删除检查，避免循环依赖。
+验收依赖主线为 `01a → 02 → 03 → (04,05) → 06 → (07,08,09) → 10 → 11`，01b 的各数学基准分别约束对应数值任务。04/05 的低层 CPU 子项可分别完成后进入 06，CUDA 联调证据在 10 汇总；07/08 可并行。本次用户授权已提前实施旧 core 容器与 exec 删除，不等待全部验收前置；不发布双基础设施、长期兼容 facade 或 native fallback。P1-02 只要求早期包冒烟，P1-11 完成最终包消费/V10 删除检查，避免循环依赖。
 
 工程量在数学基准、runner 和外部消费面确认后重新估计；原 10–17 人日估计作废，不能用于新范围排期。
 
@@ -40,7 +40,7 @@ P1 直接交付 Kokkos 默认 CPU 和可选 CUDA 的**同一算子源码**、typ
 
 保留原稿的无量纲 `x,q`、`Association::node`、`entity_set=reference_samples` 与单位 `1`，公式为 `d=dt×λ×x`、`trial_x=x−d`、`trial_q=q+d`。有限输入、正步长及 `0<dt×λ≤1`；积分使用现有 `TimeInterval::duration()`，不得用舍入绝对时间端点相减替代。该模型已作为内部 Serial 基础 fixture 实现并执行，不是产品 solver，也不提供 GPU 证据。
 
-原稿数值门槛不变：`λ=1 s⁻¹, x₀=1, q₀=0, T=1 s`，16/32/64 步；对照 `exp(−t)` 与独立显式 Euler 离散值，两次观测阶 `0.9–1.1`，`abs(x+q−1)≤1e−12`；每分量 CPU/CUDA `abs(diff)≤1e−12+1e−10×abs(ref)`。这些容差只对 reference 生效，不能套到 SPH、FVM 或真实耦合。
+double 配置的原稿数值门槛不变：`λ=1 s⁻¹, x₀=1, q₀=0, T=1 s`，16/32/64 步；对照 `exp(−t)` 与独立显式 Euler 离散值，两次观测阶 `0.9–1.1`，`abs(x+q−1)≤1e−12`；每分量 CPU/CUDA `abs(diff)≤1e−12+1e−10×abs(ref)`。这些容差只对 reference 的 double 配置生效，不能套到 SPH、FVM 或真实耦合。现有 reference 字段和算子已迁 `real`，时间保留 double。float 对此单位幅值、λ=1 的夹具采用 `8Nε + N|real(dt)−dt|` 绝对舍入界，保持两次观测阶 `0.9–1.1`；double 不放宽旧门槛。两种配置另以 Python Decimal 80 位闭式 Euler/解析解核验，适用条件、界的依据与实际误差见[数值迁移验证](real-numerics-validation.md)。
 
 ### 3.2 SPH 非规则邻域切片
 
@@ -101,15 +101,15 @@ P1-01 必须从有来源和复用权利的参考公式/数据冻结核函数、�
 <a id="approval"></a>
 ## 6. 实现所需审批与未决事项
 
-Kokkos 单一路线已定，本表不要求再次确认选型。首个受限 CPU 切片之外的事项须在迁移前形成具体实施批准：
+Kokkos 单一路线已定，本表不要求再次确认选型。本次旧 core 容器及 exec 清理已有明确授权；其余尚未授权事项按实际范围形成具体实施批准：
 
 | 项目 | 本稿提出的具体决定 | 尚需维护者批准/提供 |
 |---|---|---|
-| A1 源码与构建实施包 | 按 P1-01–11 实施；Kokkos 5.2.2 exact commit、C++20、CMake 3.25.2+、Serial 默认；一次切换删除 exec API/导出 | 批准开工及公共 API/ABI 不兼容变更；若有仓库外 consumer，提供必须迁移的名单。无需保留永久旧 facade。 |
+| A1 源码与构建实施包 | 按 P1-01–11 实施；Kokkos 5.2.2 exact commit、C++20、CMake 3.25.2+、Serial 默认；一次切换删除 exec API/导出 | 本次旧容器与 exec 的不兼容删除已获授权；其余范围及仓库外 consumer 的迁移按实际需求确认。无需保留永久旧 facade。 |
 | A2 数值基准 | 保留 §3.1 原 reference 公式/容差；SPH/FVM 按 §3.2/3.3 固定具有权利和独立 oracle 的阶段公式、输入和现有容差 | 确定可使用的真实参考代码/数据及许可证；新公式或容差须独立数学审批。没有这些材料可以先完成通用字段/生命周期工作，但不能关闭 P1-07/08 或完整 P1。 |
 | A3 实机资源 | CPU Serial 为默认；另验 OpenMP profile；CUDA 需要 Linux/NVIDIA runner，显式架构与匹配 NVCC/host compiler；HIP 留 P6 | 提供可持续使用的 runner、OS、GPU/架构、driver、NVCC/toolkit、host compiler/stdlib 精确配置，按 [首个 CUDA 契约](build-and-validation.md#cuda-build-contract) 锁定并批准；目前均未知，不能用上游最低版本代替实际配置。CPU 可以先交付，完整 P1 CUDA 验收保持开放至取得证据。 |
 | A4 依赖制品与分发 | 独立获取并校验 Kokkos tag/commit/source digest，存入本地 artifact cache；configure 不联网；保留 Apache-2.0 WITH LLVM-exception notices | 确定离线制品保管位置/来源记录；项目自身许可证仍按 ADR-014 单独决策，不阻止本轮设计。 |
 | A5 外部 engine 与高级集成 | 本轮只确定边界，不选择 Chrono/Newton 的生产引擎，不建设 Warp provider | 未来立项时批准具体 engine/formulation/恢复级别及复用权利；不作为 P1 通用基础设施实施的前置。 |
 | A6 P2 持久重启实施包 | IO-001 仅 R0；按现行兼容、完整性和 CP-01–08 关闭，不扩展恢复等级 | P2 立项时批准实际无损 codec/容器、原子发布与受支持存储系统、同配置 profile 和完整状态清单；R1–R3 需另行设计和批准。不阻塞 P1。 |
 
-以上未决项不影响已确定的架构方向。首个受限 CPU 切片的单独授权及实际证据不批准或关闭本表其余工作；不得把局部计算冒烟等同于完整 P1。
+以上未决项不影响已确定的架构方向。受限 CPU 切片及本次清理的授权和证据不批准或关闭本表其余工作；不得把局部计算冒烟等同于完整 P1。

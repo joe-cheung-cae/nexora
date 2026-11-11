@@ -1,14 +1,14 @@
 # Kokkos 单一路线：数据、执行与生命周期设计
 
-修订时间：`2026-11-06T17:32:29+08:00`。**本文定义完整迁移目标；只有下列有限切片已实现。** 权威入口是 [overview](overview.md)，源码现状见[迁移表](migration-roadmap.md#source-inventory)。本文声明面向 **C++20 / Kokkos 5.2.2**，版本和工具链依据见[构建政策](build-and-validation.md)。后文通用类型仍是可评审的接口草图，非已编译的公共头；不能把局部实现视为全部契约通过。
+修订时间：`2026-11-09T20:24:13+08:00`。**本文定义完整迁移目标；只有下列有限切片已实现。** 权威入口是 [overview](overview.md)，源码现状见[迁移表](migration-roadmap.md#source-inventory)。本文声明面向 **C++20 / Kokkos 5.2.2**，版本和工具链依据见[构建政策](build-and-validation.md)。后文通用类型仍是可评审的接口草图，非已编译的公共头；不能把局部实现视为全部契约通过。
 
-当前已有 Serial CPU 基础构建与整数计算，以及内部 reference `State`/`Participant`：稳定 ID、语义绑定的 `x/q` typed Views、accepted 时间/版本、独立 trial 分配、const managed 结果快照、同步 Serial 算子及现有 Simulation 下的提交/恢复/重试。旧快照持续保活且不再写入，所有快照必须先于应用的 Kokkos finalize 销毁；没有按引用计数判定写权限或复用数组。记录见[参考生命周期验证](reference-lifecycle-validation.md)。通用 ReadField/WriteField、lease 仲裁、外部 owner、TransportView、快照预算和异步关闭等仍未实现；现有 FieldDescriptor 只复用语义子集，尚未完成 schema 拆分。
+当前已有 Serial CPU 基础构建与整数计算，以及内部 reference `State`/`Participant`：稳定 ID、语义绑定的 `x/q` typed Views、accepted 时间/版本、独立 trial 分配、const managed 结果快照、同步 Serial 算子及现有 Simulation 下的提交/恢复/重试。旧快照持续保活且不再写入，所有快照必须先于应用的 Kokkos finalize 销毁；没有按引用计数判定写权限或复用数组。记录见[参考生命周期验证](reference-lifecycle-validation.md)。通用 `data_schema`、`ReadField/WriteField` 和整分配读写 lease 已实现同步 managed Serial 子集。当前签发器仅供内部使用，绑定保留原生 View。私有导入入口支持具备真实 owner 的一维 HostSpace 数组，本地 `TransportView` 按消费者保存 lease 并在交接前完成显式 pack。快照预算与设备异步关闭仍待实施。详见 [CPU 字段绑定与 lease](field-binding-validation.md)和[外部内存与本地传输](external-transport-validation.md)。
 
 ## 1. 职责收敛
 
 | 层 | 保留职责 | 明确不承担 |
 |---|---|---|
-| core | 强类型稳定 ID、局部索引宽度、时间值、Status/Result、host 小型数学值 | 设备、allocator、队列、View、backend enum |
+| core | 强类型稳定 ID、局部索引宽度、real 标量、double 时间值、Status/Result、checked cast | 设备、allocator、队列、View、backend enum |
 | data_schema | 字段物理含义、单位、参考系、measure、实体 association、语义 registry | 分配或持有方法主状态；选择设备 |
 | data | descriptor 与原生 typed View 的校验绑定；外部 owner 保活；字段读写授权、版本快照 | 通用 allocation/copy/parallel API；另一份布局系统 |
 | methods | 各自 topology、State/history、离散算子；直接使用 Kokkos policies/Views | 控制全局时钟或其他方法的主状态 |
@@ -17,7 +17,7 @@
 | parallel / I/O | 明确 pack/unpack、halo/迁移协议、传输完成、逻辑 checkpoint | 再建 StateStore；将 Kokkos 对象序列化 |
 | 外部 engine adapter | 引擎模型/状态所有权、单位与机械端口转换、恢复认证 | Nexora 通用 kernel provider 或第二条 native 硬件路线 |
 
-`exec_api/exec_cpu` 及旧拟议 `exec_cuda/exec_hip` 全部取消。Kokkos 的 View、memory/execution spaces、layout、parallel dispatch、deep_copy、fence 直接用于合适的底层接口。Nexora 只增加以下领域语义：谁能写哪个版本、外部存储何时能释放、交换何时完成、哪个试算能提交。不会建立对 Kokkos API 的逐项 facade。
+`exec_api/exec_cpu` 已移除，旧拟议 `exec_cuda/exec_hip` 取消。core 数值容器的迁移和原生类型示例见 [core 数据结构](core-data-structures.md)。Kokkos 的 View、memory/execution spaces、layout、parallel dispatch、deep_copy、fence 直接用于合适的底层接口。Nexora 只增加以下领域语义：谁能写哪个版本、外部存储何时能释放、交换何时完成、哪个试算能提交。不会建立对 Kokkos API 的逐项 facade。
 
 ## 2. 字段语义和 typed View 绑定
 
@@ -33,7 +33,7 @@ struct FieldDescriptor {
     nexora::DomainId domain_id;
     Association association{Association::cell};
     std::string entity_set;
-    ScalarType scalar_type{ScalarType::float64};
+    ScalarType scalar_type{real_scalar_type};
     std::size_t components{1};
     std::string tensor_interpretation, units, reference_frame;
     std::string pressure_convention, time_level, stage;
@@ -125,7 +125,7 @@ private:
 
 `FieldIssuer` 是 participant/data 内部授权入口，不是任意 caller 可创建的权限。签发前检查 dtype、association、units、components 与方法规定的各维含义、有效时间、所有版本、执行可达性和别名；算子知道分量轴/实体轴，不能假设每个 View 的 `extent(0)` 都是实体。对 runtime 外部数组同时检查对齐、元素生命周期、capacity、乘加溢出和 stride 重叠。空字段仍检查元数据。物理单位换算必须是显式耦合算子，绑定不偷偷换算。
 
-- `const Kokkos::View<double*>` 并不表示元素只读；读取必须使用 `Kokkos::View<const double*, ...>` 或 `View::const_type`。[官方 View 类型规则](https://kokkos.org/kokkos-core-wiki/API/core/view/view.html)
+- `const Kokkos::View<real*>` 并不表示元素只读；读取必须使用 `Kokkos::View<const real*, ...>` 或 `View::const_type`。[官方 View 类型规则](https://kokkos.org/kokkos-core-wiki/API/core/view/view.html)
 - 同一个物理分配及其所有 subview 必须指向同一权限记录。P1 保守地以整分配仲裁，多读共存，overwrite/accumulate 独占。一个已验证的 stage 链作为一个授权域，由 window-work 一次合并全部别名并原子取得 accepted-read/trial-write 授权，链内后续 stage 按 execution instance 顺序复用该授权，不重复竞争租约，不因此引入 host wait。链外操作/外部消费者仍须独立申请，冲突在提交前拒绝。不同字段共享 allocation 也不能绕过此规则。
 - accumulate 只授权该算子内部使用 Kokkos reduction/atomic，不允许两个未协调算子同时写。写权限属于 trial 或初始化期，accepted 快照只读。
 - ReadField/WriteField 等 host wrapper、lease 和外部 shared_ptr owner 不能 capture 到 device lambda；native Kokkos View 可以按值捕获，标量和设备可调用的 args 同样可以。字段 record 可以撤销后续签发，已登记 stage 链保持旧版本存活至完成。
@@ -295,7 +295,7 @@ template<class T, class Space> struct ExternalArray1D {
 template<class Exec>
 auto allocate_trial(const Exec& exec, std::size_t n) {
     using Space = typename Exec::memory_space;
-    return Kokkos::View<double*, Space>(
+    return Kokkos::View<real*, Space>(
         Kokkos::view_alloc(exec, Kokkos::WithoutInitializing, "trial.x"), n);
 }
 // All elements must be initialized/overwritten before read.
@@ -310,6 +310,8 @@ auto allocate_trial(const Exec& exec, std::size_t n) {
 所有转换显式写入 execution plan，记录字节数、源/目标布局、精度、单位与 staging；不能隐式改变精度或物理量。公共交换格式选择 rank-2 `[entity, component]` 的 `LayoutRight`，只规范接口载荷；方法内部的 rank、索引、padding 和 SoA/AoSoA 不受此限制。
 
 ## 6. TransportView 与通信完成
+
+当前 Serial 子集用私有 `TransportBuilder` 从数值字段和稳定 ID 的两个 read grants 构建每个消费者的 `TransportView`。快照持有 packed Views，默认保留两个源读 lease 到消费者完成。reference 发送端在 fence 后释放源读 lease，让源参与者可在旧快照存续时提交和开始下一窗口。调用方在最后一次使用后 `complete()` 或销毁记录。私有 `TransportReceiver` 使用目标写 lease 和目标稳定 ID 的读取 lease，先验证 `TransportView` 元数据与稳定 ID 双射，再按目标排列同步解包。下列声明概括完整设计，通信接收 scratch、跨 rank 交接和异步完成仍属于后续实现。见 [CPU 本地接收验证](local-receive-validation.md)。
 
 ```cpp
 namespace nexora {
@@ -342,6 +344,8 @@ MPI 可选，初期明确 host staging；GPU-aware 需逐 MPI 实现/版本/devi
 持久 checkpoint 写逻辑 schema、稳定 ID、拓扑、主状态/历史、时间、owner/partition 元数据及模型/工具链版本；不写 View 对象内存、指针、引用计数、lease、stream 或 MPI request。读取时重新分配 Kokkos Views，重建索引/缓存。首期仅采纳 [R0 同配置重启](checkpoint-restart.md#restart-levels)：相同 binary、rank/分区、execution/device 与数值配置；兼容检查、拒绝条件、发布协议和 CP-01–08 验收以该现行规范为准。R1/R2/R3 均延期、需另行设计和批准；字段可打包不授权跨 rank、设备或版本恢复。
 
 ## 7. accepted/trial、缓存和恢复
+
+当前 reference 的同步窗口由参与者持有整分配 lease authority。算法读取 accepted 并写入独立 trial，接收仅在算法完成且尚未预提交时开放。预提交将 trial 的写授权切换为待发布的只读授权，提交后新快照才可见。旧快照共享其原有读 lease。见 [reference 窗口集成验证](reference-window-validation.md)。
 
 ```cpp
 namespace nexora {
@@ -398,16 +402,16 @@ flowchart LR
 template<class Exec>
 struct RelaxationArgs {
     using Space = typename Exec::memory_space;
-    Kokkos::View<const double*, Space> x, q;
-    Kokkos::View<double*, Space> trial_x, trial_q;
-    double lambda, dt;
+    Kokkos::View<const real*, Space> x, q;
+    Kokkos::View<real*, Space> trial_x, trial_q;
+    real lambda, dt;
 };
 template<class Exec>
 void relaxation_step(const Exec& exec, RelaxationArgs<Exec> a) {
     using Policy = Kokkos::RangePolicy<Exec, Kokkos::IndexType<std::uint64_t>>;
     Kokkos::parallel_for("reference.relaxation", Policy(exec, 0, a.x.extent(0)),
         KOKKOS_LAMBDA(const std::uint64_t i) {
-            const double d = a.dt * a.lambda * a.x(i);
+            const real d = a.dt * a.lambda * a.x(i);
             a.trial_x(i) = a.x(i) - d;
             a.trial_q(i) = a.q(i) + d;
         });

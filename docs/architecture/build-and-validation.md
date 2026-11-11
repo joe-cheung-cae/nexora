@@ -1,10 +1,17 @@
 # Build and validation specification
 
+- Revision: `2026-11-09T20:24:13+08:00`
 - Status: limited Serial CPU slice implemented; full [Phase 1](phase-1-design-review.md) and other profiles remain unapproved
 - Official-source verification: `2026-11-06T15:45:05+08:00` (CUDA compilation/package contract; no build or dependency acquisition)
 - Entry point: [architecture overview](overview.md); foundation contracts: [Kokkos design](kokkos-design.md)
 
-The current CPU slice and local provisioning are described below. Later CUDA and complete Phase 1 sections remain proposed targets. Legacy exec/data/control exports and their separate consumer remain temporarily. CI has not been updated to provision Kokkos; no CI execution is claimed. Actual slice results are recorded in [CPU slice validation](kokkos-cpu-slice-validation.md).
+The current CPU slice and local provisioning are described below. Later CUDA and complete Phase 1 sections remain proposed targets. Legacy exec exports and their bootstrap consumer have been removed; core, schema, data and control exports remain. CI has not been updated to provision Kokkos; no CI execution is claimed. Actual slice results are recorded in [CPU slice validation](kokkos-cpu-slice-validation.md).
+
+## Real precision configuration
+
+`nexora::real`, declared in `nexora/core/Real.hpp` and included by `Types.hpp`, defaults to `float`. Set `-DNEXORA_ENABLE_DOUBLE_PRECISION=ON` to select `double`. Generated and installed `nexora/core/Config.hpp` fixes the configuration as 0/1 for both the library and its consumers; conflicting compiler-macro overrides and explicitly conflicting downstream precision requests are rejected. Precision is a package configuration, so use separate clean build and install prefixes for the two choices and rebuild consumers; do not mix headers and libraries from different configurations. An overlaid install does not remove stale files.
+
+Existing reference numerical state, parameters, operators and local transport use `real`; time values retain `double`. `FieldDescriptor` defaults to `real_scalar_type` (float32/float64 for the configured alias); explicitly typed external/integer storage must declare its actual dtype. The double reference keeps its existing thresholds; float is checked against a documented roundoff bound, and both use an independent 80-digit Decimal oracle. Current migration results are recorded in [real numerical validation](real-numerics-validation.md); [alias configuration validation](real-precision-validation.md) is the earlier evidence before numerical migration.
 
 ## Dependency and language lock
 
@@ -71,7 +78,7 @@ cmake --build <kokkos-build>
 cmake --install <kokkos-build>
 ```
 
-The slice checks 64-bit target, exact version, Serial-only devices, C++20/CXX and matching compiler ID and exact version. Installed Nexora also compares Kokkos architecture, options and TPL metadata. Source revision, digest and custom standard-library or ABI settings require manifest verification; these checks do not prove arbitrary ABI compatibility. See [CONTRIBUTING](../../CONTRIBUTING.md) for current Nexora commands, including `--fresh` for old caches. The installed CPU consumer links only `nexora::data` and obtains Kokkos transitively. Legacy exports and their separate consumer remain temporarily.
+The slice checks 64-bit target, exact version, Serial-only devices, C++20/CXX and matching compiler ID and exact version. Installed Nexora also compares Kokkos architecture, options and TPL metadata. Source revision, digest and custom standard-library or ABI settings require manifest verification; these checks do not prove arbitrary ABI compatibility. See [CONTRIBUTING](../../CONTRIBUTING.md) for current Nexora commands, including `--fresh` for old caches. The installed CPU consumer links only `nexora::data` and obtains Kokkos transitively. The legacy exec export and consumer have been removed.
 
 **The following design examples are proposed targets beyond the current limited slice.** Placeholder paths must be replaced with verified local inputs. The example uses a Serial dependency with no Kokkos tests, examples or benchmarks; this avoids silently adding their dependencies. Nexora's own acceptance tests remain required.
 
@@ -95,7 +102,7 @@ ctest --test-dir <nexora-serial-build> --output-on-failure
 cmake --install <nexora-serial-build> --prefix <nexora-prefix>
 ```
 
-The current Nexora package propagates Kokkos through `nexora::data`, which publicly exposes the designated Kokkos numerical storage contract. The proposed schema-only `nexora::data_schema`, participant and orchestration boundaries remain future work. The old `nexora::exec_cpu` export remains temporarily and is retired at the eventual cutover.
+Use a clean install prefix when validating removal of old headers and libraries. Installing over an existing prefix does not remove obsolete files; clean or replace that prefix before relying on its contents. The current Nexora package propagates Kokkos through `nexora::data`, which publicly exposes the designated Kokkos numerical storage contract. The exported `nexora::data_schema` depends on core, and the participant and simulation targets receive schema without transitive Kokkos compile or link requirements. Package discovery still validates the exact Kokkos dependency. The old `nexora::exec_cpu` export has been removed.
 
 ```cmake
 # 批准后目标 / PROPOSED — pending approval and implementation, NexoraConfig.cmake dependency.
@@ -262,7 +269,7 @@ Use the downstream `LANGUAGES CXX` CMake example above; its `main.cpp` acceptanc
 | CPU + MPI | Above CPU inputs + MPI C API/runtime | Optional distributed profile | Not implemented or run |
 | CUDA or HIP + MPI | Matching GPU inputs + MPI runtime | Optional; host-staging baseline first | Not implemented or run |
 
-Except for the limited Serial CPU slice, these are future target combinations, not supported-runtime claims. Use one selected GPU backend per build; CUDA+HIP in one Nexora build is rejected by policy. Unsupported execution-space requests must fail explicitly. GPU-aware MPI/direct device buffers require separate capability and lifetime validation; ordinary MPI discovery does not establish that capability. The future Serial and OpenMP profiles use the same kernels. Legacy native CPU execution remains temporarily for existing bootstrap consumers and is not the new numerical path.
+Except for the limited Serial CPU slice, these are future target combinations, not supported-runtime claims. Use one selected GPU backend per build; CUDA+HIP in one Nexora build is rejected by policy. Unsupported execution-space requests must fail explicitly. GPU-aware MPI/direct device buffers require separate capability and lifetime validation; ordinary MPI discovery does not establish that capability. The future Serial and OpenMP profiles use the same kernels. The legacy native CPU execution layer and its bootstrap consumer have been removed.
 
 Execution-space selection belongs to the verified installed Kokkos configuration and approved Nexora instantiation policy. The [first CUDA contract](#cuda-build-contract) defines the replacement configuration interface: remove/reject `NEXORA_GPU_BACKEND`, derive the permitted profile from exported `Kokkos_DEVICES`, and validate compiler/architecture compatibility. HIP and GPU+MPI rows are later target configurations, not additional combinations accepted by the initial CUDA profile. Record enabled spaces, actual selected execution space and build/validation status separately.
 
