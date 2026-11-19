@@ -1,11 +1,11 @@
 # Build and validation specification
 
-- Revision: `2026-11-09T20:24:13+08:00`
+- Revision: `2026-11-19T13:44:51+08:00`
 - Status: limited Serial CPU slice implemented; full [Phase 1](phase-1-design-review.md) and other profiles remain unapproved
 - Official-source verification: `2026-11-06T15:45:05+08:00` (CUDA compilation/package contract; no build or dependency acquisition)
 - Entry point: [architecture overview](overview.md); foundation contracts: [Kokkos design](kokkos-design.md)
 
-The current CPU slice and local provisioning are described below. Later CUDA and complete Phase 1 sections remain proposed targets. Legacy exec exports and their bootstrap consumer have been removed; core, schema, data and control exports remain. The CI workflow provisions Kokkos before configuring Nexora. See [Serial CI validation](serial-ci-validation.md) for the workflow, local replay and actual runner results, and [CPU slice validation](kokkos-cpu-slice-validation.md) for the original slice.
+The current CPU slice and local provisioning are described below. Later CUDA and complete Phase 1 sections remain proposed targets. Legacy exec exports and their bootstrap consumer have been removed; core, schema, data and control exports remain. The CI workflow provisions Kokkos and the test-only GoogleTest package before configuring Nexora. See [Serial CI validation](serial-ci-validation.md) for the workflow, local replay and actual runner results, and [CPU slice validation](kokkos-cpu-slice-validation.md) for the original slice.
 
 ## Real precision configuration
 
@@ -18,6 +18,7 @@ Existing reference numerical state, parameters, operators and local transport us
 | Item | Requirement | Evidence or rationale |
 | --- | --- | --- |
 | Kokkos | **5.2.2**, commit **`8e15454876298832f013ebcaf08d53825b5bda40`** | [Official release](https://github.com/kokkos/kokkos/releases/tag/5.2.2), [release commit](https://github.com/kokkos/kokkos/commit/8e15454876298832f013ebcaf08d53825b5bda40); release date shown as 2026-09-10; exact seconds/timezone were not obtained from the release summary |
+| GoogleTest | **1.17.0**, required when `BUILD_TESTING=ON` | Exact local config package with compiler-matched libraries. [Source, digest and license](../../third_party/README.md#googletest-provenance-record) · [Test development plan](googletest-development-plan.md) |
 | C++ | **20**, consistent for Kokkos, Nexora and downstream consumers | Pinned [standard selection](https://github.com/kokkos/kokkos/blob/8e15454876298832f013ebcaf08d53825b5bda40/cmake/kokkos_pick_cxx_std.cmake) and [standard validation](https://github.com/kokkos/kokkos/blob/8e15454876298832f013ebcaf08d53825b5bda40/cmake/kokkos_test_cxx_std.cmake) |
 | CMake | **3.25.2+** for every Nexora target configuration | Kokkos's [top-level minimum is 3.22](https://github.com/kokkos/kokkos/blob/8e15454876298832f013ebcaf08d53825b5bda40/CMakeLists.txt), but [CUDA as a CMake language requires 3.25.2](https://github.com/kokkos/kokkos/blob/8e15454876298832f013ebcaf08d53825b5bda40/cmake/kokkos_enable_options.cmake); use one stricter project floor |
 | Generator / architecture | Ninja; 64-bit target; record exact Ninja version | Reproducible runner profile; Kokkos's pinned top-level source treats 32-bit as experimental |
@@ -57,7 +58,7 @@ Choose exact compiler, standard library, toolkit, driver and OS patch versions w
 
 ## Current Serial provisioning and proposed package examples
 
-Use `tools/validate_serial.py` for the CI-equivalent Serial checks. Its provisioning phase checks the exact source SHA-256, installs a compiler- and configuration-specific static package, and records file digests and provenance. Its validation phase uses that local `Kokkos_DIR` to configure, build, check the dependency graph, run CTest and the Decimal oracle, then install, relocate and exercise the package in a separate consumer. Linux CI runs this phase in a fresh network namespace. See the [Serial CI validation record](serial-ci-validation.md) for reproducible commands and platform status.
+Use `tools/validate_serial.py` for the CI-equivalent Serial checks. Its provisioning phase checks the exact source SHA-256, installs a compiler- and configuration-specific static package, and records file digests and provenance. For test builds it also verifies and provisions GoogleTest into a separate prefix. Its validation phase uses local `Kokkos_DIR` and `GTest_DIR` to configure, build, check the dependency graph, run CTest and the Decimal oracle, then install, relocate and exercise the package in a separate consumer. Linux CI runs this phase in a fresh network namespace. See the [Serial CI validation record](serial-ci-validation.md) for reproducible commands and platform status.
 
 The following is the separately networked acquisition and offline local provisioning used for the current Serial slice. Choose paths appropriate to the machine. Confirm the manifest line matches before extraction and retain license notices as described in [third-party provenance](../../third_party/README.md).
 

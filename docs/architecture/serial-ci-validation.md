@@ -8,7 +8,9 @@
 
 [验证脚本](../../tools/validate_serial.py) 先把官方 Kokkos 5.2.2 源归档与锁定的 SHA-256 比对。使用 `--download` 时也获取官方摘要清单，确认归档和摘要清单后再使用。源码 commit `8e15454876298832f013ebcaf08d53825b5bda40` 与归档的关联沿用已核验的[依赖记录](../../third_party/README.md#kokkos-provenance-record)。脚本保留上游许可和版权文件。源码无补丁，以 C++20、Serial-only、静态库安装，保留编译器、构建选项和完整安装文件的 SHA-256。cache key 纳入操作系统、架构、编译器二进制与版本、工具链输入、构建选项、锁定源码摘要及脚本版本。每个 build type 独立供应 Kokkos，MSVC 的 Debug 和 Release 库与各自的 CRT 配置匹配。
 
-验证阶段只使用已验证安装的 `Kokkos_DIR`。依次执行配置、编译、依赖图检查、运行测试和独立 Decimal oracle。最后由包测试执行干净安装、搬迁、独立消费者构建与运行，并检查拒绝路径。GitHub Actions 的 Linux Serial job 用 `unshare --net` 创建隔离网络命名空间，降回 runner 用户执行验证。Windows Serial 和 MPI smoke job 使用本地依赖。
+当前验证脚本也供应锁定的 GoogleTest 1.17.0，按相同编译器和构建类型分别安装。验证阶段从本地 `Kokkos_DIR` 和 `GTest_DIR` 加载依赖。GoogleTest 用例通过 CTest 逐项发现和执行。[迁移与开发计划](googletest-development-plan.md)
+
+验证脚本依次执行配置、编译、依赖图检查、测试和独立 Decimal oracle。最后由包测试执行干净安装、搬迁、独立消费者构建与运行，并检查拒绝路径。GitHub Actions 的 Linux Serial job 用 `unshare --net` 创建隔离网络命名空间，降回 runner 用户执行验证。Windows Serial 和 MPI smoke job 使用本地依赖。
 
 ## 受控 runner 实测
 
@@ -54,18 +56,21 @@ review 发现 job 级 `env` 无法引用 `runner.temp`。工作流改为在首�
 
 ## 重跑
 
-准备官方归档。需要网络获取时在 `provision` 中显式加 `--download`。在网络隔离环境内执行 `verify`，保留 `--require-network-blocked` 以使探针失败时停止验证。以下使用本次实际的工具链和归档，按 profile 使用新目录。只执行一组精度时传 `--precisions float` 或 `--precisions double`。
+准备官方归档。需要网络获取时在 `provision` 中显式加 `--download`。在网络隔离环境内执行 `verify`，保留 `--require-network-blocked` 以使探针失败时停止验证。以下按当前的两个归档和本机工具链演示，按 profile 使用新目录。只执行一组精度时传 `--precisions float` 或 `--precisions double`。
 
 ```sh
 nexora_run=$(mktemp -d /tmp/nexora-serial-ci.XXXXXX)
 nexora_archive="$PWD/.cache/dependencies/kokkos-5.2.2/kokkos-5.2.2.tar.gz"
+gtest_archive="$PWD/.cache/dependencies/googletest-1.17.0/googletest-1.17.0.tar.gz"
 
 for config in Debug Release; do
   python3 tools/validate_serial.py --cc /usr/bin/cc --cxx /usr/bin/c++ --config "$config" \
-    provision --archive "$nexora_archive" --prefix "$nexora_run/kokkos-$config" \
+    provision --archive "$nexora_archive" --gtest-archive "$gtest_archive" \
+    --prefix "$nexora_run/kokkos-$config" --gtest-prefix "$nexora_run/gtest-$config" \
     --logs "$nexora_run/logs" --jobs 2 || exit
   python3 tools/validate_serial.py --cc /usr/bin/cc --cxx /usr/bin/c++ --config "$config" \
-    verify --prefix "$nexora_run/kokkos-$config" --work-dir "$nexora_run/build" \
+    verify --prefix "$nexora_run/kokkos-$config" --gtest-prefix "$nexora_run/gtest-$config" \
+    --work-dir "$nexora_run/build" \
     --logs "$nexora_run/logs-$config" --jobs 2 --require-network-blocked || exit
 done
 ```

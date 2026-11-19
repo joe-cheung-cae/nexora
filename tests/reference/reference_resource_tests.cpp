@@ -1,14 +1,10 @@
-#ifdef NDEBUG
-#undef NDEBUG
-#endif
 #include <Kokkos_Core.hpp>
+#include <gtest/gtest.h>
 #include <nexora/simulation/Simulation.hpp>
 #include <participants/reference/Participant.hpp>
 
 #include <array>
-#include <cassert>
 #include <cstdint>
-#include <iostream>
 #include <optional>
 #include <stdexcept>
 #include <utility>
@@ -26,6 +22,16 @@ void count_kokkos_allocation(Kokkos::Tools::SpaceHandle, const char*, const void
     ++kokkos_allocations;
 }
 
+struct AllocationCounter {
+    AllocationCounter() {
+        kokkos_allocations = 0;
+        Kokkos::Tools::Experimental::set_allocate_data_callback(count_kokkos_allocation);
+    }
+    ~AllocationCounter() {
+        Kokkos::Tools::Experimental::set_allocate_data_callback(nullptr);
+    }
+};
+
 Snapshot snapshot(const Participant& participant) {
     auto result = participant.snapshot();
     if (!result.ok()) {
@@ -35,30 +41,32 @@ Snapshot snapshot(const Participant& participant) {
 }
 
 Config fixture() {
-    return {{17, 3, 42}, {real{1}, real{2}, real{-4}},
-            {real{0}, real{1}, real{5}}, real{2}};
+    return {{17, 3, 42}, {real{1}, real{2}, real{-4}}, {real{0}, real{1}, real{5}}, real{2}};
 }
 
-void check_payload(const Snapshot& s, const std::array<real, 3>& x,
-                   const std::array<real, 3>& q, double time,
-                   std::uint64_t version, std::uint64_t attempt,
-                   std::uint64_t accepted_steps,
-                   std::optional<std::uint64_t> expected_history = {},
+void check_payload(const Snapshot& s, const std::array<real, 3>& x, const std::array<real, 3>& q,
+                   double time, std::uint64_t version, std::uint64_t attempt,
+                   std::uint64_t accepted_steps, std::optional<std::uint64_t> expected_history = {},
                    std::optional<std::uint64_t> expected_sequence = {}) {
-    assert(s.time == time && s.version == StateVersion{version} && s.attempt == attempt);
-    assert(s.ids.extent(0) == 3 && s.x.extent(0) == 3 && s.q.extent(0) == 3);
+    ASSERT_EQ(s.time, time);
+    ASSERT_EQ(s.version, StateVersion{version});
+    ASSERT_EQ(s.attempt, attempt);
+    ASSERT_EQ(s.ids.extent(0), 3);
+    ASSERT_EQ(s.x.extent(0), 3);
+    ASSERT_EQ(s.q.extent(0), 3);
     constexpr std::array<std::uint64_t, 3> ids{17, 3, 42};
     for (std::size_t i = 0; i < 3; ++i) {
-        assert(s.ids(i) == ids[i]);
-        assert(s.x(i) == x[i] && s.q(i) == q[i]);
+        ASSERT_EQ(s.ids(i), ids[i]);
+        ASSERT_EQ(s.x(i), x[i]);
+        ASSERT_EQ(s.q(i), q[i]);
     }
-    assert(s.history.extent(0) == 1);
+    ASSERT_EQ(s.history.extent(0), 1);
     const auto sequence = expected_sequence.value_or(accepted_steps);
-    assert(s.control.sequence == sequence);
-    const auto history = expected_history.value_or(accepted_steps == 0 ? 0 :
-                                                    (accepted_steps == 1 ? 1 : 35));
-    assert(s.history(0) == history);
-    assert(s.diagnostic == history + sequence);
+    ASSERT_EQ(s.control.sequence, sequence);
+    const auto history =
+        expected_history.value_or(accepted_steps == 0 ? 0 : (accepted_steps == 1 ? 1 : 35));
+    ASSERT_EQ(s.history(0), history);
+    ASSERT_EQ(s.diagnostic, history + sequence);
 }
 
 struct AcceptedExpectation {
@@ -78,11 +86,13 @@ struct AcceptedExpectation {
 };
 
 AcceptedExpectation capture_accepted(const Snapshot& s) {
-    AcceptedExpectation result{s.stamp(), s.version, s.time, s.attempt, s.control,
-                               s.diagnostic, {}, {}, {}, s.history(0), s.ids.data(),
-                               s.x.data(), s.q.data(), s.history.data()};
-    assert(s.ids.extent(0) == result.ids.size() && s.x.extent(0) == result.x.size() &&
-           s.q.extent(0) == result.q.size());
+    if (s.ids.extent(0) != 3 || s.x.extent(0) != 3 || s.q.extent(0) != 3 ||
+        s.history.extent(0) != 1) {
+        throw std::runtime_error("accepted snapshot has unexpected extents");
+    }
+    AcceptedExpectation result{
+        s.stamp(), s.version,    s.time,       s.attempt,  s.control,  s.diagnostic,    {}, {},
+        {},        s.history(0), s.ids.data(), s.x.data(), s.q.data(), s.history.data()};
     for (std::size_t i = 0; i < result.ids.size(); ++i) {
         result.ids[i] = s.ids(i);
         result.x[i] = s.x(i);
@@ -92,20 +102,25 @@ AcceptedExpectation capture_accepted(const Snapshot& s) {
 }
 
 void check_accepted(const AcceptedExpectation& expected, const Snapshot& actual) {
-    assert(expected.stamp == actual.stamp() && expected.version == actual.version &&
-           expected.time == actual.time && expected.attempt == actual.attempt);
-    assert(expected.control == actual.control && expected.diagnostic == actual.diagnostic);
-    assert(expected.ids_storage == actual.ids.data() && expected.x_storage == actual.x.data() &&
-           expected.q_storage == actual.q.data() &&
-           expected.history_storage == actual.history.data());
+    ASSERT_EQ(expected.stamp, actual.stamp());
+    ASSERT_EQ(expected.version, actual.version);
+    ASSERT_EQ(expected.time, actual.time);
+    ASSERT_EQ(expected.attempt, actual.attempt);
+    ASSERT_EQ(expected.control, actual.control);
+    ASSERT_EQ(expected.diagnostic, actual.diagnostic);
+    ASSERT_EQ(expected.ids_storage, actual.ids.data());
+    ASSERT_EQ(expected.x_storage, actual.x.data());
+    ASSERT_EQ(expected.q_storage, actual.q.data());
+    ASSERT_EQ(expected.history_storage, actual.history.data());
     for (std::size_t i = 0; i < expected.ids.size(); ++i) {
-        assert(expected.ids[i] == actual.ids(i) && expected.x[i] == actual.x(i) &&
-               expected.q[i] == actual.q(i));
+        ASSERT_EQ(expected.ids[i], actual.ids(i));
+        ASSERT_EQ(expected.x[i], actual.x(i));
+        ASSERT_EQ(expected.q[i], actual.q(i));
     }
-    assert(expected.history == actual.history(0));
+    ASSERT_EQ(expected.history, actual.history(0));
 }
 
-void test_history_replay_matches_uninterrupted() {
+TEST(ReferenceResource, HistoryReplayMatchesUninterrupted) {
     auto replay_input = fixture();
     replay_input.history_seed = 7;
     replay_input.control_seed.sequence = 4;
@@ -113,43 +128,51 @@ void test_history_replay_matches_uninterrupted() {
     Participant replay(std::move(replay_input));
     Participant oracle(std::move(oracle_input));
     Simulation replay_sim(replay), oracle_sim(oracle);
-    assert(replay_sim.initialize().ok() && replay_sim.prepare().ok());
-    assert(oracle_sim.initialize().ok() && oracle_sim.prepare().ok());
+    ASSERT_TRUE(replay_sim.initialize().ok());
+    ASSERT_TRUE(replay_sim.prepare().ok());
+    ASSERT_TRUE(oracle_sim.initialize().ok());
+    ASSERT_TRUE(oracle_sim.prepare().ok());
 
     const auto initial = snapshot(replay);
-    check_payload(initial, {1, 2, -4}, {0, 1, 5}, 0.0, 0, 0, 0, 7, 4);
+    ASSERT_NO_FATAL_FAILURE(check_payload(initial, {1, 2, -4}, {0, 1, 5}, 0.0, 0, 0, 0, 7, 4));
 
-    assert(replay_sim.begin_window(step).ok());
-    assert(replay_sim.advance_trial().ok());
-    assert(replay_sim.restore_window().ok());
-    check_payload(snapshot(replay), {1, 2, -4}, {0, 1, 5}, 0.0, 0, 0, 0, 7, 4);
-    assert(replay_sim.time().accepted_time == 0.0 && replay_sim.time().accepted_steps == 0);
+    ASSERT_TRUE(replay_sim.begin_window(step).ok());
+    ASSERT_TRUE(replay_sim.advance_trial().ok());
+    ASSERT_TRUE(replay_sim.restore_window().ok());
+    ASSERT_NO_FATAL_FAILURE(
+        check_payload(snapshot(replay), {1, 2, -4}, {0, 1, 5}, 0.0, 0, 0, 0, 7, 4));
+    ASSERT_EQ(replay_sim.time().accepted_time, 0.0);
+    ASSERT_EQ(replay_sim.time().accepted_steps, 0);
 
-    assert(replay_sim.advance(step).ok());
-    assert(oracle_sim.advance(step).ok());
-    assert(replay_sim.advance(step).ok());
-    assert(oracle_sim.advance(step).ok());
+    ASSERT_TRUE(replay_sim.advance(step).ok());
+    ASSERT_TRUE(oracle_sim.advance(step).ok());
+    ASSERT_TRUE(replay_sim.advance(step).ok());
+    ASSERT_TRUE(oracle_sim.advance(step).ok());
     const auto replayed = snapshot(replay);
     const auto uninterrupted = snapshot(oracle);
-    assert(replayed.time == uninterrupted.time && replayed.version == uninterrupted.version);
-    assert(replayed.control.sequence == uninterrupted.control.sequence);
-    assert(replayed.history(0) == uninterrupted.history(0));
-    assert(replayed.history.data() != initial.history.data());
-    assert(replayed.diagnostic == uninterrupted.diagnostic);
-    assert(replayed.history(0) == 7794 && replayed.control.sequence == 6 &&
-           replayed.diagnostic == 7800);
+    ASSERT_EQ(replayed.time, uninterrupted.time);
+    ASSERT_EQ(replayed.version, uninterrupted.version);
+    ASSERT_EQ(replayed.control.sequence, uninterrupted.control.sequence);
+    ASSERT_EQ(replayed.history(0), uninterrupted.history(0));
+    ASSERT_NE(replayed.history.data(), initial.history.data());
+    ASSERT_EQ(replayed.diagnostic, uninterrupted.diagnostic);
+    ASSERT_EQ(replayed.history(0), 7794);
+    ASSERT_EQ(replayed.control.sequence, 6);
+    ASSERT_EQ(replayed.diagnostic, 7800);
     for (std::size_t i = 0; i < 3; ++i) {
-        assert(replayed.ids(i) == uninterrupted.ids(i));
-        assert(replayed.x(i) == uninterrupted.x(i) && replayed.q(i) == uninterrupted.q(i));
+        ASSERT_EQ(replayed.ids(i), uninterrupted.ids(i));
+        ASSERT_EQ(replayed.x(i), uninterrupted.x(i));
+        ASSERT_EQ(replayed.q(i), uninterrupted.q(i));
     }
 }
 
-void test_faults_preserve_accepted_state() {
+TEST(ReferenceResource, FaultsPreserveAcceptedState) {
     const auto exercise = [](Participant::Fault fault) {
         Participant participant(fixture());
         Simulation simulation(participant);
-        assert(simulation.initialize().ok() && simulation.prepare().ok());
-        assert(simulation.advance(step).ok());
+        ASSERT_TRUE(simulation.initialize().ok());
+        ASSERT_TRUE(simulation.prepare().ok());
+        ASSERT_TRUE(simulation.advance(step).ok());
         auto baseline = snapshot(participant);
         const auto expected = capture_accepted(baseline);
         const auto baseline_time = simulation.time();
@@ -157,327 +180,335 @@ void test_faults_preserve_accepted_state() {
 
         participant.fail_next(fault);
         if (fault == Participant::Fault::begin) {
-            assert(simulation.begin_window(step).code() == StatusCode::execution_failure);
+            ASSERT_EQ(simulation.begin_window(step).code(), StatusCode::execution_failure);
         } else if (fault == Participant::Fault::advance) {
-            assert(simulation.begin_window(step).ok());
-            assert(simulation.advance_trial().code() == StatusCode::execution_failure);
+            ASSERT_TRUE(simulation.begin_window(step).ok());
+            ASSERT_EQ(simulation.advance_trial().code(), StatusCode::execution_failure);
         } else {
-            assert(simulation.begin_window(step).ok() && simulation.advance_trial().ok());
-            assert(simulation.commit_window().code() == StatusCode::execution_failure);
+            ASSERT_TRUE(simulation.begin_window(step).ok());
+            ASSERT_TRUE(simulation.advance_trial().ok());
+            ASSERT_EQ(simulation.commit_window().code(), StatusCode::execution_failure);
         }
-        assert(simulation.state() == SimulationState::prepared);
-        assert(simulation.time().accepted_time == baseline_time.accepted_time &&
-               simulation.time().accepted_steps == baseline_time.accepted_steps);
-        check_accepted(expected, baseline);
-        check_accepted(expected, snapshot(participant));
-        assert(participant.resource_usage().controlled_bytes == baseline_usage.controlled_bytes);
-        assert(participant.resource_usage().snapshot_records == baseline_usage.snapshot_records);
-        assert(simulation.advance(step).ok());
-        assert(simulation.time().accepted_steps == baseline_time.accepted_steps + 1);
-        assert(simulation.finalize().ok());
+        ASSERT_EQ(simulation.state(), SimulationState::prepared);
+        ASSERT_EQ(simulation.time().accepted_time, baseline_time.accepted_time);
+        ASSERT_EQ(simulation.time().accepted_steps, baseline_time.accepted_steps);
+        ASSERT_NO_FATAL_FAILURE(check_accepted(expected, baseline));
+        ASSERT_NO_FATAL_FAILURE(check_accepted(expected, snapshot(participant)));
+        ASSERT_EQ(participant.resource_usage().controlled_bytes, baseline_usage.controlled_bytes);
+        ASSERT_EQ(participant.resource_usage().snapshot_records, baseline_usage.snapshot_records);
+        ASSERT_TRUE(simulation.advance(step).ok());
+        ASSERT_EQ(simulation.time().accepted_steps, baseline_time.accepted_steps + 1);
+        ASSERT_TRUE(simulation.finalize().ok());
     };
-    exercise(Participant::Fault::begin);
-    exercise(Participant::Fault::advance);
-    exercise(Participant::Fault::prepare);
+    ASSERT_NO_FATAL_FAILURE(exercise(Participant::Fault::begin));
+    ASSERT_NO_FATAL_FAILURE(exercise(Participant::Fault::advance));
+    ASSERT_NO_FATAL_FAILURE(exercise(Participant::Fault::prepare));
 }
 
-void test_receive_fault_uses_distinct_source_payload() {
+TEST(ReferenceResource, ReceiveFaultUsesDistinctSourcePayload) {
     auto remote_config = fixture();
     remote_config.x = {real{30}, real{-10}, real{7}};
     remote_config.q = {real{5}, real{8}, real{-3}};
     Participant receiver(fixture()), sender(std::move(remote_config));
     Simulation receiver_sim(receiver), sender_sim(sender);
-    assert(receiver_sim.initialize().ok() && receiver_sim.prepare().ok());
-    assert(sender_sim.initialize().ok() && sender_sim.prepare().ok());
-    assert(receiver_sim.advance(step).ok() && sender_sim.advance(step).ok());
+    ASSERT_TRUE(receiver_sim.initialize().ok());
+    ASSERT_TRUE(receiver_sim.prepare().ok());
+    ASSERT_TRUE(sender_sim.initialize().ok());
+    ASSERT_TRUE(sender_sim.prepare().ok());
+    ASSERT_TRUE(receiver_sim.advance(step).ok());
+    ASSERT_TRUE(sender_sim.advance(step).ok());
     auto baseline = snapshot(receiver);
     const auto expected = capture_accepted(baseline);
     const auto baseline_time = receiver_sim.time();
     const auto baseline_usage = receiver.resource_usage();
 
-    assert(receiver_sim.begin_window(step).ok() && receiver_sim.advance_trial().ok());
-    assert(sender_sim.begin_window(step).ok() && sender_sim.advance_trial().ok());
+    ASSERT_TRUE(receiver_sim.begin_window(step).ok());
+    ASSERT_TRUE(receiver_sim.advance_trial().ok());
+    ASSERT_TRUE(sender_sim.begin_window(step).ok());
+    ASSERT_TRUE(sender_sim.advance_trial().ok());
     auto incoming = sender.send_trial(reference::TrialField::x);
-    assert(incoming.ok());
+    ASSERT_TRUE(incoming.ok());
     auto receiver_trial = receiver.send_trial(reference::TrialField::x);
-    assert(receiver_trial.ok());
-    assert(incoming.value().values()(0, 0) != receiver_trial.value().values()(0, 0));
+    ASSERT_TRUE(receiver_trial.ok());
+    ASSERT_NE(incoming.value().values()(0, 0), receiver_trial.value().values()(0, 0));
     receiver_trial.value().complete();
     receiver.fail_next(Participant::Fault::receive);
-    assert(receiver.receive_trial(reference::TrialField::x, incoming.value(), incoming.value().stamp())
-               .code() == StatusCode::execution_failure);
-    assert(!receiver_sim.commit_window().ok());
-    assert(receiver_sim.state() == SimulationState::prepared);
-    assert(receiver_sim.time().accepted_time == baseline_time.accepted_time &&
-           receiver_sim.time().accepted_steps == baseline_time.accepted_steps);
-    check_accepted(expected, baseline);
-    check_accepted(expected, snapshot(receiver));
-    assert(receiver.resource_usage().controlled_bytes == baseline_usage.controlled_bytes);
-    assert(receiver.resource_usage().snapshot_records == baseline_usage.snapshot_records);
-    assert(sender_sim.restore_window().ok());
-    assert(receiver_sim.advance(step).ok());
-    assert(receiver_sim.finalize().ok() && sender_sim.finalize().ok());
+    ASSERT_EQ(
+        receiver.receive_trial(reference::TrialField::x, incoming.value(), incoming.value().stamp())
+            .code(),
+        StatusCode::execution_failure);
+    ASSERT_FALSE(receiver_sim.commit_window().ok());
+    ASSERT_EQ(receiver_sim.state(), SimulationState::prepared);
+    ASSERT_EQ(receiver_sim.time().accepted_time, baseline_time.accepted_time);
+    ASSERT_EQ(receiver_sim.time().accepted_steps, baseline_time.accepted_steps);
+    ASSERT_NO_FATAL_FAILURE(check_accepted(expected, baseline));
+    ASSERT_NO_FATAL_FAILURE(check_accepted(expected, snapshot(receiver)));
+    ASSERT_EQ(receiver.resource_usage().controlled_bytes, baseline_usage.controlled_bytes);
+    ASSERT_EQ(receiver.resource_usage().snapshot_records, baseline_usage.snapshot_records);
+    ASSERT_TRUE(sender_sim.restore_window().ok());
+    ASSERT_TRUE(receiver_sim.advance(step).ok());
+    ASSERT_TRUE(receiver_sim.finalize().ok());
+    ASSERT_TRUE(sender_sim.finalize().ok());
 }
 
-void test_failed_restore_fails_simulation_without_publishing() {
+TEST(ReferenceResource, FailedRestoreFailsSimulationWithoutPublishing) {
     Participant participant(fixture());
     Simulation simulation(participant);
-    assert(simulation.initialize().ok() && simulation.prepare().ok());
-    assert(simulation.advance(step).ok());
+    ASSERT_TRUE(simulation.initialize().ok());
+    ASSERT_TRUE(simulation.prepare().ok());
+    ASSERT_TRUE(simulation.advance(step).ok());
     auto baseline = snapshot(participant);
     const auto expected = capture_accepted(baseline);
     const auto baseline_time = simulation.time();
     const auto baseline_usage = participant.resource_usage();
     participant.fail_next(Participant::Fault::advance);
     participant.fail_next(Participant::Fault::restore);
-    assert(simulation.begin_window(step).ok());
-    assert(simulation.advance_trial().code() == StatusCode::execution_failure);
-    assert(simulation.state() == SimulationState::failed);
-    assert(simulation.time().accepted_time == baseline_time.accepted_time &&
-           simulation.time().accepted_steps == baseline_time.accepted_steps);
-    check_accepted(expected, baseline);
-    check_accepted(expected, snapshot(participant));
-    assert(!simulation.begin_window(step).ok() && !simulation.commit_window().ok());
-    assert(simulation.finalize().ok());
-    check_accepted(expected, baseline);
-    assert(participant.resource_usage().controlled_bytes == baseline_usage.controlled_bytes);
-    assert(participant.resource_usage().snapshot_records == 1);
+    ASSERT_TRUE(simulation.begin_window(step).ok());
+    ASSERT_EQ(simulation.advance_trial().code(), StatusCode::execution_failure);
+    ASSERT_EQ(simulation.state(), SimulationState::failed);
+    ASSERT_EQ(simulation.time().accepted_time, baseline_time.accepted_time);
+    ASSERT_EQ(simulation.time().accepted_steps, baseline_time.accepted_steps);
+    ASSERT_NO_FATAL_FAILURE(check_accepted(expected, baseline));
+    ASSERT_NO_FATAL_FAILURE(check_accepted(expected, snapshot(participant)));
+    ASSERT_FALSE(simulation.begin_window(step).ok());
+    ASSERT_FALSE(simulation.commit_window().ok());
+    ASSERT_TRUE(simulation.finalize().ok());
+    ASSERT_NO_FATAL_FAILURE(check_accepted(expected, baseline));
+    ASSERT_EQ(participant.resource_usage().controlled_bytes, baseline_usage.controlled_bytes);
+    ASSERT_EQ(participant.resource_usage().snapshot_records, 1);
     baseline = Snapshot{};
-    assert(participant.resource_usage().controlled_bytes == 0);
-    assert(participant.resource_usage().snapshot_records == 0);
+    ASSERT_EQ(participant.resource_usage().controlled_bytes, 0);
+    ASSERT_EQ(participant.resource_usage().snapshot_records, 0);
 }
 
-void test_partial_initialization_failure_and_close() {
+TEST(ReferenceResource, PartialInitializationFailureAndClose) {
     Participant participant(fixture());
     participant.fail_next(Participant::Fault::initialize);
-    assert(participant.initialize(0.0).code() == StatusCode::execution_failure);
-    assert(!participant.snapshot().ok());
-    assert(participant.resource_usage().snapshot_records == 0);
-    assert(participant.resource_usage().controlled_bytes == 0);
-    assert(participant.finalize().ok());
+    ASSERT_EQ(participant.initialize(0.0).code(), StatusCode::execution_failure);
+    ASSERT_FALSE(participant.snapshot().ok());
+    ASSERT_EQ(participant.resource_usage().snapshot_records, 0);
+    ASSERT_EQ(participant.resource_usage().controlled_bytes, 0);
+    ASSERT_TRUE(participant.finalize().ok());
 
     Participant ready(fixture());
-    assert(ready.initialize(0.0).ok() && ready.prepare().ok());
+    ASSERT_TRUE(ready.initialize(0.0).ok());
+    ASSERT_TRUE(ready.prepare().ok());
     auto retained = snapshot(ready);
-    assert(ready.finalize().ok());
-    check_payload(retained, {1, 2, -4}, {0, 1, 5}, 0.0, 0, 0, 0);
+    ASSERT_TRUE(ready.finalize().ok());
+    ASSERT_NO_FATAL_FAILURE(check_payload(retained, {1, 2, -4}, {0, 1, 5}, 0.0, 0, 0, 0));
 }
 
-void test_budget_snapshot_backpressure_and_retry() {
+TEST(ReferenceResource, BudgetSnapshotBackpressureAndRetry) {
     Participant participant(fixture(), ParticipantId{1},
-                             reference::ResourceBudget::Limits{1, 1'000'000});
-    assert(participant.initialize(0.0).ok() && participant.prepare().ok());
+                            reference::ResourceBudget::Limits{1, 1'000'000});
+    ASSERT_TRUE(participant.initialize(0.0).ok());
+    ASSERT_TRUE(participant.prepare().ok());
     auto first = snapshot(participant);
     const auto initial_usage = participant.resource_usage();
-    assert(initial_usage.snapshot_records == 1);
-    assert(initial_usage.known_external_owner_bytes == 0);
+    ASSERT_EQ(initial_usage.snapshot_records, 1);
+    ASSERT_EQ(initial_usage.known_external_owner_bytes, 0);
     auto exhausted = participant.snapshot();
-    assert(exhausted.status().code() == StatusCode::resource_exhausted);
+    ASSERT_EQ(exhausted.status().code(), StatusCode::resource_exhausted);
     first = Snapshot{};
     auto retry = participant.snapshot();
-    assert(retry.ok());
-    assert(participant.resource_usage().snapshot_records == 1);
-    assert(participant.finalize().ok());
+    ASSERT_TRUE(retry.ok());
+    ASSERT_EQ(participant.resource_usage().snapshot_records, 1);
+    ASSERT_TRUE(participant.finalize().ok());
 }
 
-void test_exact_shared_and_packed_allocation_accounting() {
+TEST(ReferenceResource, ExactSharedAndPackedAllocationAccounting) {
     constexpr std::size_t count = 3;
-    const std::size_t initial_bytes = count * sizeof(std::uint64_t) +
-                                      2 * count * sizeof(real) + sizeof(std::uint64_t);
+    const std::size_t initial_bytes =
+        count * sizeof(std::uint64_t) + 2 * count * sizeof(real) + sizeof(std::uint64_t);
     const std::size_t bank_bytes = 2 * count * sizeof(real) + sizeof(std::uint64_t);
     const std::size_t packed_bytes = count * (sizeof(real) + sizeof(std::uint64_t));
-    Participant participant(fixture(), ParticipantId{1},
-                             reference::ResourceBudget::Limits{2, initial_bytes + bank_bytes + packed_bytes});
-    assert(participant.initialize(0.0).ok() && participant.prepare().ok());
+    Participant participant(
+        fixture(), ParticipantId{1},
+        reference::ResourceBudget::Limits{2, initial_bytes + bank_bytes + packed_bytes});
+    ASSERT_TRUE(participant.initialize(0.0).ok());
+    ASSERT_TRUE(participant.prepare().ok());
     auto usage = participant.resource_usage();
-    assert(usage.controlled_bytes == initial_bytes);
-    assert(usage.snapshot_records == 0);
+    ASSERT_EQ(usage.controlled_bytes, initial_bytes);
+    ASSERT_EQ(usage.snapshot_records, 0);
     auto old_snapshot = snapshot(participant);
-    assert(participant.resource_usage().snapshot_records == 1);
-    assert(participant.resource_usage().controlled_bytes == initial_bytes);
+    ASSERT_EQ(participant.resource_usage().snapshot_records, 1);
+    ASSERT_EQ(participant.resource_usage().controlled_bytes, initial_bytes);
 
     const TimeInterval interval{0.0, step, step};
-    assert(participant.begin_window(interval).ok());
-    assert(participant.resource_usage().controlled_bytes == initial_bytes + bank_bytes);
-    assert(participant.advance_trial(interval).ok());
+    ASSERT_TRUE(participant.begin_window(interval).ok());
+    ASSERT_EQ(participant.resource_usage().controlled_bytes, initial_bytes + bank_bytes);
+    ASSERT_TRUE(participant.advance_trial(interval).ok());
     std::optional<TransportView<real>> packed;
     {
         auto result = participant.send_trial(reference::TrialField::x);
-        assert(result.ok());
+        ASSERT_TRUE(result.ok());
         packed.emplace(std::move(result).value());
     }
     usage = participant.resource_usage();
-    assert(usage.snapshot_records == 2);
-    assert(usage.controlled_bytes == initial_bytes + bank_bytes + packed_bytes);
-    assert(participant.send_trial(reference::TrialField::x).status().code() ==
-           StatusCode::resource_exhausted);
+    ASSERT_EQ(usage.snapshot_records, 2);
+    ASSERT_EQ(usage.controlled_bytes, initial_bytes + bank_bytes + packed_bytes);
+    ASSERT_EQ(participant.send_trial(reference::TrialField::x).status().code(),
+              StatusCode::resource_exhausted);
     packed.reset();
-    assert(participant.resource_usage().snapshot_records == 1);
-    assert(participant.resource_usage().controlled_bytes == initial_bytes + bank_bytes);
+    ASSERT_EQ(participant.resource_usage().snapshot_records, 1);
+    ASSERT_EQ(participant.resource_usage().controlled_bytes, initial_bytes + bank_bytes);
     {
         auto retry = participant.send_trial(reference::TrialField::x);
-        assert(retry.ok());
-        assert(participant.resource_usage().snapshot_records == 2);
+        ASSERT_TRUE(retry.ok());
+        ASSERT_EQ(participant.resource_usage().snapshot_records, 2);
     }
-    assert(participant.resource_usage().snapshot_records == 1);
+    ASSERT_EQ(participant.resource_usage().snapshot_records, 1);
     old_snapshot = Snapshot{};
-    assert(participant.resource_usage().snapshot_records == 0);
-    assert(participant.restore_window().ok());
-    assert(participant.resource_usage().controlled_bytes == initial_bytes);
-    assert(participant.finalize().ok());
+    ASSERT_EQ(participant.resource_usage().snapshot_records, 0);
+    ASSERT_TRUE(participant.restore_window().ok());
+    ASSERT_EQ(participant.resource_usage().controlled_bytes, initial_bytes);
+    ASSERT_TRUE(participant.finalize().ok());
 }
 
-void test_diagnostic_cache_keys_reject_old_attempt() {
+TEST(ReferenceResource, DiagnosticCacheKeysRejectOldAttempt) {
     Participant participant(fixture());
     Simulation simulation(participant);
-    assert(simulation.initialize().ok() && simulation.prepare().ok());
-    assert(simulation.begin_window(step).ok() && simulation.advance_trial().ok());
+    ASSERT_TRUE(simulation.initialize().ok());
+    ASSERT_TRUE(simulation.prepare().ok());
+    ASSERT_TRUE(simulation.begin_window(step).ok());
+    ASSERT_TRUE(simulation.advance_trial().ok());
     const auto first_key = participant.trial_diagnostic_key();
-    assert(first_key.ok());
-    assert(participant.trial_diagnostic(first_key.value()).ok());
+    ASSERT_TRUE(first_key.ok());
+    ASSERT_TRUE(participant.trial_diagnostic(first_key.value()).ok());
     auto wrong_layout = first_key.value();
     wrong_layout.stamp.layout = LayoutVersion{first_key.value().stamp.layout.value() + 1};
-    assert(participant.trial_diagnostic(wrong_layout).status().code() ==
-           StatusCode::invalid_argument);
+    ASSERT_EQ(participant.trial_diagnostic(wrong_layout).status().code(),
+              StatusCode::invalid_argument);
     auto wrong_storage = first_key.value();
     ++wrong_storage.stamp.storage_incarnation;
-    assert(participant.trial_diagnostic(wrong_storage).status().code() ==
-           StatusCode::invalid_argument);
-    assert(simulation.restore_window().ok());
-    assert(simulation.begin_window(step).ok() && simulation.advance_trial().ok());
-    assert(participant.trial_diagnostic(first_key.value()).status().code() ==
-           StatusCode::invalid_argument);
+    ASSERT_EQ(participant.trial_diagnostic(wrong_storage).status().code(),
+              StatusCode::invalid_argument);
+    ASSERT_TRUE(simulation.restore_window().ok());
+    ASSERT_TRUE(simulation.begin_window(step).ok());
+    ASSERT_TRUE(simulation.advance_trial().ok());
+    ASSERT_EQ(participant.trial_diagnostic(first_key.value()).status().code(),
+              StatusCode::invalid_argument);
     const auto retry_key = participant.trial_diagnostic_key();
-    assert(retry_key.ok());
-    assert(participant.trial_diagnostic(retry_key.value()).ok());
-    assert(simulation.restore_window().ok());
+    ASSERT_TRUE(retry_key.ok());
+    ASSERT_TRUE(participant.trial_diagnostic(retry_key.value()).ok());
+    ASSERT_TRUE(simulation.restore_window().ok());
 }
 
-void test_control_counter_exhaustion_precedes_candidate_allocation() {
+TEST(ReferenceResource, ControlCounterExhaustionPrecedesCandidateAllocation) {
     auto input = fixture();
     input.control_seed.sequence = ~std::uint64_t{0};
     Participant participant(std::move(input));
-    assert(participant.initialize(0.0).ok() && participant.prepare().ok());
+    ASSERT_TRUE(participant.initialize(0.0).ok());
+    ASSERT_TRUE(participant.prepare().ok());
     const auto before = participant.resource_usage();
-    assert(participant.begin_window(TimeInterval{0.0, step, step}).code() ==
-           StatusCode::resource_exhausted);
+    ASSERT_EQ(participant.begin_window(TimeInterval{0.0, step, step}).code(),
+              StatusCode::resource_exhausted);
     const auto after = participant.resource_usage();
-    assert(after.controlled_bytes == before.controlled_bytes);
-    assert(after.snapshot_records == before.snapshot_records);
+    ASSERT_EQ(after.controlled_bytes, before.controlled_bytes);
+    ASSERT_EQ(after.snapshot_records, before.snapshot_records);
     const auto accepted = snapshot(participant);
-    assert(accepted.history(0) == 0 && accepted.control.sequence == ~std::uint64_t{0});
-    assert(accepted.diagnostic == ~std::uint64_t{0});
-    assert(participant.finalize().ok());
+    ASSERT_EQ(accepted.history(0), 0);
+    ASSERT_EQ(accepted.control.sequence, ~std::uint64_t{0});
+    ASSERT_EQ(accepted.diagnostic, ~std::uint64_t{0});
+    ASSERT_TRUE(participant.finalize().ok());
 }
 
-void test_two_bank_budget_waits_for_last_snapshot_holder() {
+TEST(ReferenceResource, TwoBankBudgetWaitsForLastSnapshotHolder) {
     constexpr std::size_t count = 3;
-    const std::size_t initial_bytes = count * sizeof(std::uint64_t) +
-                                      2 * count * sizeof(real) + sizeof(std::uint64_t);
+    const std::size_t initial_bytes =
+        count * sizeof(std::uint64_t) + 2 * count * sizeof(real) + sizeof(std::uint64_t);
     const std::size_t bank_bytes = 2 * count * sizeof(real) + sizeof(std::uint64_t);
     Participant participant(fixture(), ParticipantId{1},
-                             reference::ResourceBudget::Limits{4, initial_bytes + bank_bytes});
-    assert(participant.initialize(0.0).ok() && participant.prepare().ok());
+                            reference::ResourceBudget::Limits{4, initial_bytes + bank_bytes});
+    ASSERT_TRUE(participant.initialize(0.0).ok());
+    ASSERT_TRUE(participant.prepare().ok());
     std::optional<Snapshot> old_snapshot{snapshot(participant)};
     std::optional<Snapshot> old_snapshot_copy{*old_snapshot};
     const TimeInterval interval{0.0, step, step};
-    assert(participant.begin_window(interval).ok());
-    assert(participant.advance_trial(interval).ok());
-    assert(participant.prepare_commit(interval).ok());
-    assert(participant.commit_window(interval).ok());
-    assert(participant.resource_usage().controlled_bytes == initial_bytes + bank_bytes);
+    ASSERT_TRUE(participant.begin_window(interval).ok());
+    ASSERT_TRUE(participant.advance_trial(interval).ok());
+    ASSERT_TRUE(participant.prepare_commit(interval).ok());
+    ASSERT_TRUE(participant.commit_window(interval).ok());
+    ASSERT_EQ(participant.resource_usage().controlled_bytes, initial_bytes + bank_bytes);
     const auto accepted = capture_accepted(snapshot(participant));
 
-    Kokkos::Tools::Experimental::set_allocate_data_callback(count_kokkos_allocation);
-    kokkos_allocations = 0;
-    const auto exhausted_with_two_holders = participant.begin_window(TimeInterval{step, 2 * step, step});
-    Kokkos::Tools::Experimental::set_allocate_data_callback(nullptr);
-    assert(exhausted_with_two_holders.code() == StatusCode::resource_exhausted);
-    assert(kokkos_allocations == 0);
-    assert(participant.resource_usage().controlled_bytes == initial_bytes + bank_bytes);
-    check_accepted(accepted, snapshot(participant));
+    const TimeInterval next_interval{step, 2 * step, step};
+    {
+        const AllocationCounter counter;
+        ASSERT_EQ(participant.begin_window(next_interval).code(), StatusCode::resource_exhausted);
+        ASSERT_EQ(kokkos_allocations, 0);
+    }
+    ASSERT_EQ(participant.resource_usage().controlled_bytes, initial_bytes + bank_bytes);
+    ASSERT_NO_FATAL_FAILURE(check_accepted(accepted, snapshot(participant)));
+
     old_snapshot.reset();
-    Kokkos::Tools::Experimental::set_allocate_data_callback(count_kokkos_allocation);
-    kokkos_allocations = 0;
-    const auto exhausted_with_one_holder = participant.begin_window(TimeInterval{step, 2 * step, step});
-    Kokkos::Tools::Experimental::set_allocate_data_callback(nullptr);
-    assert(exhausted_with_one_holder.code() == StatusCode::resource_exhausted);
-    assert(kokkos_allocations == 0);
-    check_accepted(accepted, snapshot(participant));
+    {
+        const AllocationCounter counter;
+        ASSERT_EQ(participant.begin_window(next_interval).code(), StatusCode::resource_exhausted);
+        ASSERT_EQ(kokkos_allocations, 0);
+    }
+    ASSERT_NO_FATAL_FAILURE(check_accepted(accepted, snapshot(participant)));
 
     old_snapshot_copy.reset();
-    assert(participant.resource_usage().controlled_bytes == initial_bytes);
-    assert(participant.begin_window(TimeInterval{step, 2 * step, step}).ok());
-    assert(participant.resource_usage().controlled_bytes == initial_bytes + bank_bytes);
-    assert(participant.restore_window().ok());
-    check_accepted(accepted, snapshot(participant));
-    assert(participant.finalize().ok());
+    ASSERT_EQ(participant.resource_usage().controlled_bytes, initial_bytes);
+    ASSERT_TRUE(participant.begin_window(next_interval).ok());
+    ASSERT_EQ(participant.resource_usage().controlled_bytes, initial_bytes + bank_bytes);
+    ASSERT_TRUE(participant.restore_window().ok());
+    ASSERT_NO_FATAL_FAILURE(check_accepted(accepted, snapshot(participant)));
+    ASSERT_TRUE(participant.finalize().ok());
 }
 
-void test_finalize_with_snapshot_and_packed_consumer_outliving_owner() {
+TEST(ReferenceResource, FinalizeWithSnapshotAndPackedConsumerOutlivingOwner) {
     constexpr std::size_t count = 3;
-    const std::size_t initial_bytes = count * sizeof(std::uint64_t) +
-                                      2 * count * sizeof(real) + sizeof(std::uint64_t);
+    const std::size_t initial_bytes =
+        count * sizeof(std::uint64_t) + 2 * count * sizeof(real) + sizeof(std::uint64_t);
     const std::size_t packed_bytes = count * (sizeof(real) + sizeof(std::uint64_t));
     Participant participant(fixture());
-    assert(participant.initialize(0.0).ok() && participant.prepare().ok());
+    ASSERT_TRUE(participant.initialize(0.0).ok());
+    ASSERT_TRUE(participant.prepare().ok());
     std::optional<Snapshot> retained{snapshot(participant)};
-    assert(participant.begin_window(TimeInterval{0.0, step, step}).ok());
-    assert(participant.advance_trial(TimeInterval{0.0, step, step}).ok());
+    ASSERT_TRUE(participant.begin_window(TimeInterval{0.0, step, step}).ok());
+    ASSERT_TRUE(participant.advance_trial(TimeInterval{0.0, step, step}).ok());
     std::optional<TransportView<real>> consumer;
     {
         auto packed = participant.send_trial(reference::TrialField::x);
-        assert(packed.ok());
+        ASSERT_TRUE(packed.ok());
         consumer.emplace(std::move(packed).value());
     }
-    assert(participant.finalize().ok());
+    ASSERT_TRUE(participant.finalize().ok());
     auto usage = participant.resource_usage();
-    assert(usage.snapshot_records == 2);
-    assert(usage.controlled_bytes == initial_bytes + packed_bytes);
+    ASSERT_EQ(usage.snapshot_records, 2);
+    ASSERT_EQ(usage.controlled_bytes, initial_bytes + packed_bytes);
     retained.reset();
     usage = participant.resource_usage();
-    assert(usage.snapshot_records == 1 && usage.controlled_bytes == packed_bytes);
+    ASSERT_EQ(usage.snapshot_records, 1);
+    ASSERT_EQ(usage.controlled_bytes, packed_bytes);
     consumer->complete();
     consumer.reset();
     usage = participant.resource_usage();
-    assert(usage.snapshot_records == 0 && usage.controlled_bytes == 0);
+    ASSERT_EQ(usage.snapshot_records, 0);
+    ASSERT_EQ(usage.controlled_bytes, 0);
 }
 
-void test_snapshot_lifetime_after_participant_close() {
+TEST(ReferenceResource, SnapshotLifetimeAfterParticipantClose) {
     std::optional<Snapshot> old;
     {
         Participant participant(fixture());
         Simulation simulation(participant);
-        assert(simulation.initialize().ok() && simulation.prepare().ok());
+        ASSERT_TRUE(simulation.initialize().ok());
+        ASSERT_TRUE(simulation.prepare().ok());
         old.emplace(snapshot(participant));
-        assert(simulation.advance(step).ok());
+        ASSERT_TRUE(simulation.advance(step).ok());
         const auto current = snapshot(participant);
-        assert(current.x.data() != old->x.data());
-        assert(simulation.finalize().ok());
+        ASSERT_NE(current.x.data(), old->x.data());
+        ASSERT_TRUE(simulation.finalize().ok());
     }
-    check_payload(*old, {1, 2, -4}, {0, 1, 5}, 0.0, 0, 0, 0);
+    ASSERT_NO_FATAL_FAILURE(check_payload(*old, {1, 2, -4}, {0, 1, 5}, 0.0, 0, 0, 0));
     const auto consumer_a = *old;
     const auto consumer_b = *old;
     old.reset();
-    check_payload(consumer_a, {1, 2, -4}, {0, 1, 5}, 0.0, 0, 0, 0);
-    check_payload(consumer_b, {1, 2, -4}, {0, 1, 5}, 0.0, 0, 0, 0);
+    ASSERT_NO_FATAL_FAILURE(check_payload(consumer_a, {1, 2, -4}, {0, 1, 5}, 0.0, 0, 0, 0));
+    ASSERT_NO_FATAL_FAILURE(check_payload(consumer_b, {1, 2, -4}, {0, 1, 5}, 0.0, 0, 0, 0));
 }
 
 } // namespace
-
-int main(int argc, char** argv) {
-    Kokkos::ScopeGuard guard(argc, argv);
-    test_history_replay_matches_uninterrupted();
-    test_faults_preserve_accepted_state();
-    test_receive_fault_uses_distinct_source_payload();
-    test_failed_restore_fails_simulation_without_publishing();
-    test_partial_initialization_failure_and_close();
-    test_budget_snapshot_backpressure_and_retry();
-    test_exact_shared_and_packed_allocation_accounting();
-    test_diagnostic_cache_keys_reject_old_attempt();
-    test_control_counter_exhaustion_precedes_candidate_allocation();
-    test_two_bank_budget_waits_for_last_snapshot_holder();
-    test_finalize_with_snapshot_and_packed_consumer_outliving_owner();
-    test_snapshot_lifetime_after_participant_close();
-    std::cout << "reference resource lifecycle tests passed\n";
-}

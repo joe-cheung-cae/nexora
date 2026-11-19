@@ -42,7 +42,7 @@ endif()
 set(consumer_copy "${scratch}/consumer-source")
 file(COPY "${consumer_source}/CMakeLists.txt" "${consumer_source}/main.cpp"
     "${consumer_source}/time.cpp" "${consumer_source}/schema.cpp"
-    "${consumer_source}/field_binding.cpp" "${kokkos_test_source}"
+    "${consumer_source}/field_binding.cpp" "${consumer_source}/kokkos.cpp" "${view_probe}"
     DESTINATION "${consumer_copy}")
 
 set(generator_args -G "${generator}")
@@ -71,7 +71,7 @@ set(source_arg "-DCMAKE_C_COMPILER=${c_compiler}")
 set(precision_expectation_arg "-DNEXORA_TEST_EXPECT_DOUBLE_PRECISION=${expected_double_precision}")
 execute_process(COMMAND "${CMAKE_COMMAND}" -S "${consumer_copy}" -B "${scratch}/consumer"
     ${configure_args} "${nexora_arg}" "-DKokkos_DIR=${kokkos_dir}"
-    "${precision_expectation_arg}" COMMAND_ERROR_IS_FATAL ANY)
+    -DCMAKE_DISABLE_FIND_PACKAGE_GTest=TRUE "${precision_expectation_arg}" COMMAND_ERROR_IS_FATAL ANY)
 execute_process(COMMAND "${CMAKE_COMMAND}" --build "${scratch}/consumer" ${config_args}
     COMMAND_ERROR_IS_FATAL ANY)
 execute_process(COMMAND "${CMAKE_CTEST_COMMAND}" --test-dir "${scratch}/consumer"
@@ -140,6 +140,20 @@ write_basic_package_version_file("${wrong_version_dir}/KokkosConfigVersion.cmake
     VERSION 5.2.1 COMPATIBILITY ExactVersion ARCH_INDEPENDENT)
 expect_source_and_consumer_rejection(wrong-kokkos-version "version: 5.2.1"
     ${isolate_kokkos} "-DKokkos_DIR=${wrong_version_dir}")
+
+# A directory-only search keeps a system or checkout-local GTest from masking these failures.
+set(gtest_fixture "${fixture_root}/gtest")
+file(MAKE_DIRECTORY "${gtest_fixture}")
+set(isolate_gtest "-DCMAKE_FIND_ROOT_PATH=${gtest_fixture}" "-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY")
+expect_configure_rejection(source-missing-gtest "${project_source}"
+    "Could not find a package configuration file provided by \"GTest\""
+    "${source_arg}" -DBUILD_TESTING=ON "-DKokkos_DIR=${kokkos_dir}" ${isolate_gtest})
+file(WRITE "${gtest_fixture}/GTestConfig.cmake" "# Mock package for version rejection.\n")
+write_basic_package_version_file("${gtest_fixture}/GTestConfigVersion.cmake"
+    VERSION 1.16.0 COMPATIBILITY ExactVersion ARCH_INDEPENDENT)
+expect_configure_rejection(source-wrong-gtest-version "${project_source}" "version: 1.16.0"
+    "${source_arg}" -DBUILD_TESTING=ON "-DKokkos_DIR=${kokkos_dir}"
+    "-DGTest_DIR=${gtest_fixture}" ${isolate_gtest})
 
 expect_configure_rejection(source-legacy-gpu-backend "${project_source}" "NEXORA_GPU_BACKEND was removed"
     "${source_arg}" "-DKokkos_DIR=${kokkos_dir}" "-DNEXORA_GPU_BACKEND=NONE")

@@ -13,6 +13,9 @@
 #include <memory>
 #include <nexora/core/Real.hpp>
 #include <span>
+#include <source_location>
+#include <stdexcept>
+#include <string>
 #include <utility>
 
 // Shared literal fixture and independent checks from structure_reorder_tests.
@@ -24,10 +27,17 @@ constexpr std::array original_ids{GlobalEntityId{10}, GlobalEntityId{30},
 constexpr std::array reordered_ids{GlobalEntityId{20}, GlobalEntityId{10},
                                    GlobalEntityId{40}, GlobalEntityId{30}};
 
-struct Failure { Status status; };
+inline void require_check(bool passed, const char* expression,
+                          std::source_location where = std::source_location::current()) {
+    if (!passed)
+        throw std::runtime_error(std::string(where.file_name()) + ":" + std::to_string(where.line())
+                                 + ": " + expression);
+}
+#define NEXORA_FIXTURE_CHECK(expression) require_check((expression), #expression)
+
 template <class T> T require(Result<T> result) {
     if (!result.ok())
-        throw Failure{result.status()};
+        throw std::runtime_error(result.status().message());
     return std::move(result).value();
 }
 inline FieldDescriptor descriptor(unsigned id, bool ids = false) {
@@ -75,27 +85,27 @@ inline void expect_bank(const Bank& bank, bool reordered, bool committed = false
     const std::array<std::array<std::uint64_t, 2>, 5> oe{{{10, 30}, {10, 20}, {20, 40}, {40, 10}, {40, 20}}};
     const std::array<std::array<std::uint64_t, 2>, 5> ne{{{20, 40}, {10, 30}, {10, 20}, {40, 10}, {40, 20}}};
     for (std::size_t i = 0; i < 4; ++i) {
-        assert(bank.ids.grant.view()(i) == (reordered ? next : original)[i]);
-        assert(bank.x.grant.view()(i) == (reordered ? nx : ox)[i]);
-        assert(bank.q.grant.view()(i) == (committed ? std::array<real, 4>{21, 11, 41, 31} : (reordered ? nq : oq))[i]);
-        assert(bank.history.grant.view()(i) == (reordered ? nh : oh)[i]);
+        NEXORA_FIXTURE_CHECK(bank.ids.grant.view()(i) == (reordered ? next : original)[i]);
+        NEXORA_FIXTURE_CHECK(bank.x.grant.view()(i) == (reordered ? nx : ox)[i]);
+        NEXORA_FIXTURE_CHECK(bank.q.grant.view()(i) == (committed ? std::array<real, 4>{21, 11, 41, 31} : (reordered ? nq : oq))[i]);
+        NEXORA_FIXTURE_CHECK(bank.history.grant.view()(i) == (reordered ? nh : oh)[i]);
     }
     for (std::size_t i = 0; i < 5; ++i) {
-        assert(bank.adjacency.offsets()(i) == (reordered ? no : oo)[i]);
-        assert(bank.adjacency.indices()(i) == (reordered ? ni : oi)[i]);
+        NEXORA_FIXTURE_CHECK(bank.adjacency.offsets()(i) == (reordered ? no : oo)[i]);
+        NEXORA_FIXTURE_CHECK(bank.adjacency.indices()(i) == (reordered ? ni : oi)[i]);
     }
     std::size_t edge = 0;
     for (std::size_t row = 0; row < 4; ++row)
         for (Offset k = bank.adjacency.offsets()(row); k < bank.adjacency.offsets()(row + 1); ++k, ++edge) {
-            assert(bank.order.ids()(row) == (reordered ? ne : oe)[edge][0]);
-            assert(bank.order.ids()(bank.adjacency.indices()(k)) == (reordered ? ne : oe)[edge][1]);
+            NEXORA_FIXTURE_CHECK(bank.order.ids()(row) == (reordered ? ne : oe)[edge][0]);
+            NEXORA_FIXTURE_CHECK(bank.order.ids()(bank.adjacency.indices()(k)) == (reordered ? ne : oe)[edge][1]);
         }
-    assert(bank.adjacency.validate_for(bank.order, bank.order, bank.logical.topology).ok());
+    NEXORA_FIXTURE_CHECK(bank.adjacency.validate_for(bank.order, bank.order, bank.logical.topology).ok());
     auto check_stamp = [&](const FieldStamp& field) {
         auto logical = field;
-        assert(logical.storage_incarnation != 0);
+        NEXORA_FIXTURE_CHECK(logical.storage_incarnation != 0);
         logical.storage_incarnation = 0;
-        assert(logical == bank.logical);
+        NEXORA_FIXTURE_CHECK(logical == bank.logical);
     };
     check_stamp(bank.ids.grant.stamp());
     check_stamp(bank.x.grant.stamp());
@@ -136,13 +146,14 @@ inline void receive_reordered(const Kokkos::Serial& exec, const TransportView<re
                                                  {Association::particle, "1", id_axes}));
     auto stale = source.stamp();
     ++stale.storage_incarnation;
-    assert(!TransportReceiver::unpack(exec, source, write, read_ids, stale).ok());
+    NEXORA_FIXTURE_CHECK(!TransportReceiver::unpack(exec, source, write, read_ids, stale).ok());
     for (std::size_t i = 0; i < 4; ++i)
-        assert(values(0, i) == real{-999});
-    assert(TransportReceiver::unpack(exec, source, write, read_ids, source.stamp()).ok());
+        NEXORA_FIXTURE_CHECK(values(0, i) == real{-999});
+    NEXORA_FIXTURE_CHECK(TransportReceiver::unpack(exec, source, write, read_ids, source.stamp()).ok());
     const std::array<real, 4> expected{200, 100, 400, 300};
     for (std::size_t i = 0; i < 4; ++i)
-        assert(values(0, i) == expected[i]);
+        NEXORA_FIXTURE_CHECK(values(0, i) == expected[i]);
 }
 
+#undef NEXORA_FIXTURE_CHECK
 } // namespace nexora::test_fixture

@@ -45,35 +45,35 @@ REQUIRED_LINKS = {
         "nexora_participant_api", "nexora_methods_reference", "nexora_data"},
     "nexora_methods_sph": ALLOWED_LINKS["nexora_methods_sph"],
     "nexora_participants_sph": ALLOWED_LINKS["nexora_participants_sph"],
-    "nexora_sph_tests": SPH_LEAF_LINKS,
     "nexora_sph_benchmark": SPH_LEAF_LINKS,
     "nexora": {"nexora_core", "nexora_simulation", "nexora_participants_reference", "Kokkos::kokkos"},
-    "nexora_entity_topology_tests": {"nexora_data"},
-    "nexora_structure_reorder_tests": {"nexora_participants_reference", "nexora_data"},
-    "nexora_serial_irregular_measurement": {"nexora_participants_reference", "nexora_data"},
-    "nexora_field_group_tests": {"nexora_data", "Threads::Threads"},
-    "nexora_transport_tests": {"nexora_data"},
-    "nexora_transport_receive_tests": {"nexora_data"},
-    "nexora_reference_transport_tests": {"nexora_participants_reference", "nexora_simulation"},
-    "nexora_reference_resource_tests": {"nexora_participants_reference", "nexora_simulation"},
-    "nexora_reference_cli_oracle": {"nexora_participants_reference", "nexora_simulation"},
 }
 
+GTEST_MAIN = "GTest::gtest_main"
+KOKKOS_TEST_MAIN = "nexora_kokkos_test_main"
+REFERENCE_TEST_LINKS = {"nexora_participants_reference", "nexora_simulation"}
 SPECIAL_TEST_LINKS = {
-    "nexora_entity_topology_tests": {"nexora_data"},
-    "nexora_structure_reorder_tests": {"nexora_participants_reference", "nexora_data"},
+    KOKKOS_TEST_MAIN: {"GTest::gtest", "Kokkos::kokkos"},
+    "nexora_core_tests": {GTEST_MAIN, "nexora_core"},
+    "nexora_data_tests": {GTEST_MAIN, "nexora_data_schema"},
+    "nexora_simulation_tests": {GTEST_MAIN, "nexora_simulation"},
+    "nexora_data_uninitialized_tests": {GTEST_MAIN, "nexora_data"},
+    "nexora_reference_uninitialized_tests": {GTEST_MAIN, "nexora_participants_reference"},
+    "nexora_entity_topology_tests": {KOKKOS_TEST_MAIN, "nexora_data"},
+    "nexora_structure_reorder_tests": {KOKKOS_TEST_MAIN, "nexora_participants_reference", "nexora_data"},
+    "nexora_field_group_tests": {KOKKOS_TEST_MAIN, "nexora_data", "Threads::Threads"},
+    "nexora_field_binding_tests": {KOKKOS_TEST_MAIN, "nexora_data"},
+    "nexora_kokkos_tests": {KOKKOS_TEST_MAIN, "nexora_data"},
+    "nexora_reference_tests": {KOKKOS_TEST_MAIN, *REFERENCE_TEST_LINKS},
+    "nexora_reference_transport_tests": {KOKKOS_TEST_MAIN, *REFERENCE_TEST_LINKS},
+    "nexora_reference_resource_tests": {KOKKOS_TEST_MAIN, *REFERENCE_TEST_LINKS},
+    "nexora_sph_tests": {KOKKOS_TEST_MAIN, *SPH_LEAF_LINKS},
+    "nexora_transport_tests": {KOKKOS_TEST_MAIN, "nexora_data"},
+    "nexora_transport_receive_tests": {KOKKOS_TEST_MAIN, "nexora_data"},
     "nexora_serial_irregular_measurement": {"nexora_participants_reference", "nexora_data"},
-    "nexora_field_group_tests": {"nexora_data", "Threads::Threads"},
-    "nexora_field_binding_tests": {"nexora_data"},
-    "nexora_kokkos_tests": {"nexora_data"},
-    "nexora_reference_tests": {"nexora_participants_reference", "nexora_simulation"},
-    "nexora_reference_transport_tests": {"nexora_participants_reference", "nexora_simulation"},
-    "nexora_reference_resource_tests": {"nexora_participants_reference", "nexora_simulation"},
-    "nexora_reference_cli_oracle": {"nexora_participants_reference", "nexora_simulation"},
-    "nexora_sph_tests": SPH_LEAF_LINKS,
-    "nexora_transport_tests": {"nexora_data"},
-    "nexora_transport_receive_tests": {"nexora_data"},
+    "nexora_reference_cli_oracle": REFERENCE_TEST_LINKS,
 }
+REQUIRED_LINKS.update(SPECIAL_TEST_LINKS)
 
 ALLOWED_INCLUDES = {
     "core": {"core"},
@@ -116,10 +116,18 @@ SPH_LEAF_SOURCES = {
     "nexora_sph_benchmark": Path("benchmarks/sph/sph_benchmark.cpp"),
 }
 SPH_FIXTURE_HEADER = "sph_fixture.hpp"
+DATA_PREINIT_TEST = Path("tests/data/preinitialization_tests.cpp")
+KOKKOS_VIEW_PROBE_CONSUMERS = {Path("tests/kokkos/kokkos_tests.cpp"),
+                               Path("tests/package/consumer/kokkos.cpp")}
+# These test-tree sources are also compiled by standalone programs.
+STANDALONE_TEST_SOURCES = {
+    SERIAL_IRREGULAR_MEASUREMENT, STRUCTURE_FIXTURE, Path("tests/kokkos/view_probe.hpp"),
+    Path("tests/reference/cli_oracle.cpp"), Path("tests/methods/sph") / SPH_FIXTURE_HEADER,
+}
 PRIVATE_DATA_HEADERS = {
-    "FieldIssuer.hpp": {STRUCTURE_FIXTURE, BINDING_TEST, FIELD_GROUP_TEST,
+    "FieldIssuer.hpp": {DATA_PREINIT_TEST, STRUCTURE_FIXTURE, BINDING_TEST, FIELD_GROUP_TEST,
                         TRANSPORT_TEST, RECEIVE_TEST, REFERENCE_TRANSPORT_TEST},
-    "ExternalField.hpp": {TRANSPORT_TEST},
+    "ExternalField.hpp": {DATA_PREINIT_TEST, TRANSPORT_TEST},
     "TransportBuilder.hpp": {STRUCTURE_FIXTURE, TRANSPORT_TEST, RECEIVE_TEST,
                              REFERENCE_TRANSPORT_TEST},
     "TransportReceiver.hpp": {STRUCTURE_FIXTURE, RECEIVE_TEST},
@@ -177,6 +185,11 @@ def check_internal_include(relative: Path, scope: str, header: str) -> list[str]
     if not parts:
         return []
     location = relative.parts
+    if ({"gtest", "gmock"}.intersection(parts) or parts[-1].startswith(("gtest", "gmock"))) and (
+            scope != "tests" or location[:2] == ("tests", "package") or relative in STANDALONE_TEST_SOURCES):
+        return [f"{relative}: {header} is private to GoogleTest unit targets"]
+    if parts[-1] == "view_probe.hpp" and relative not in KOKKOS_VIEW_PROBE_CONSUMERS:
+        return [f"{relative}: {header} is private to the Kokkos unit test and installed consumer"]
     if parts[-1] == STRUCTURE_FIXTURE.name:
         if relative in STRUCTURE_FIXTURE_CONSUMERS:
             return []
@@ -293,18 +306,9 @@ def policy_self_test() -> list[str]:
         ("nexora_methods_sph", ["nexora_core", "Kokkos::kokkos"]),
         ("nexora_participants_sph",
          ["nexora_participant_api", "nexora_methods_sph", "nexora_data", "Kokkos::kokkos"]),
-        ("nexora_sph_tests", ["nexora_participants_sph", "nexora_simulation"]),
         ("nexora_sph_benchmark", ["nexora_participants_sph", "nexora_simulation"]),
         ("nexora", ["nexora_core", "nexora_simulation", "nexora_participants_reference", "Kokkos::kokkos"]),
-        ("nexora_entity_topology_tests", ["nexora_data"]),
-        ("nexora_structure_reorder_tests", ["nexora_participants_reference", "nexora_data"]),
-        ("nexora_serial_irregular_measurement", ["nexora_participants_reference", "nexora_data"]),
-        ("nexora_field_group_tests", ["nexora_data", "Threads::Threads"]),
-        ("nexora_transport_tests", ["nexora_data"]),
-        ("nexora_transport_receive_tests", ["nexora_data"]),
-        ("nexora_reference_transport_tests", ["nexora_participants_reference", "nexora_simulation"]),
-        ("nexora_reference_resource_tests", ["nexora_participants_reference", "nexora_simulation"]),
-        ("nexora_reference_cli_oracle", ["nexora_participants_reference", "nexora_simulation"]),
+        *SPECIAL_TEST_LINKS.items(),
     ):
         if check_link_policy(target, links) or any(
             not check_link_policy(target, [link for link in links if link != removed])
@@ -337,27 +341,28 @@ def policy_self_test() -> list[str]:
     if not check_link_policy("nexora_participants_reference", [
             "nexora_participant_api", "nexora_methods_reference", "nexora_data", "Kokkos::kokkos"]):
         failures.append("checker self-test failed to reject a direct participant Kokkos dependency")
-    if not check_link_policy("nexora_reference_transport_tests", [
-            "nexora_participants_reference", "nexora_simulation", "nexora_data"]):
-        failures.append("checker self-test failed to reject extra reference transport test dependencies")
-    if not check_link_policy("nexora_reference_resource_tests", [
-            "nexora_participants_reference", "nexora_simulation", "nexora_data"]):
-        failures.append("checker self-test failed to reject extra reference resource test dependencies")
-    if not check_link_policy("nexora_reference_cli_oracle", [
-            "nexora_participants_reference", "nexora_simulation", "nexora_data"]):
-        failures.append("checker self-test failed to reject extra direct-library oracle dependencies")
-    if check_link_policy("nexora_kokkos_tests", ["nexora_data"]):
-        failures.append("checker self-test failed to allow the dedicated test's data dependency")
-    if not check_link_policy("nexora_kokkos_tests", ["nexora_data", "nexora_core"]):
-        failures.append("checker self-test failed to reject extra dependencies from the dedicated test")
-    for target in ("nexora_entity_topology_tests", "nexora_transport_tests", "nexora_transport_receive_tests"):
-        if not check_link_policy(target, ["nexora_data", "nexora_core"]):
-            failures.append(f"checker self-test failed to reject extra dependencies for {target}")
-    if not check_link_policy("nexora_field_group_tests", ["nexora_data", "Threads::Threads", "nexora_core"]):
-        failures.append("checker self-test failed to reject extra group test dependencies")
-    for target in ("nexora_structure_reorder_tests", "nexora_serial_irregular_measurement"):
-        if not check_link_policy(target, ["nexora_participants_reference", "nexora_data", "nexora_core"]):
-            failures.append(f"checker self-test failed to reject extra dependencies for {target}")
+    for target, deps in SPECIAL_TEST_LINKS.items():
+        for forbidden in (set(ALLOWED_LINKS) | {"GTest::gtest", GTEST_MAIN, KOKKOS_TEST_MAIN}) - deps:
+            if not check_link_policy(target, [*deps, forbidden]):
+                failures.append(f"checker self-test failed to reject {forbidden} from {target}")
+    for target in ("nexora_core", "nexora", "nexora_sph_benchmark",
+                   "nexora_reference_cli_oracle", "nexora_serial_irregular_measurement"):
+        for dep in ("GTest::gtest", GTEST_MAIN, KOKKOS_TEST_MAIN):
+            if not check_link_policy(target, [*REQUIRED_LINKS.get(target, ()), dep]):
+                failures.append(f"checker self-test failed to keep {dep} out of {target}")
+    for path in (Path("include/nexora/core/Status.hpp"), Path("src/data/Fields.cpp"),
+                 REFERENCE_COMMAND_SOURCE, *STANDALONE_TEST_SOURCES,
+                 Path("tests/package/consumer/kokkos.cpp"), SPH_LEAF_SOURCES["nexora_sph_benchmark"]):
+        if not check_internal_include(path, path.parts[0], "gtest/gtest.h"):
+            failures.append(f"checker self-test failed to keep GoogleTest out of {path}")
+    for path in (Path("tests/kokkos/gtest_main.cpp"), DATA_PREINIT_TEST, REFERENCE_TRANSPORT_TEST):
+        if check_internal_include(path, "tests", "gtest/gtest.h"):
+            failures.append(f"checker self-test failed to allow GoogleTest in {path}")
+    for path in KOKKOS_VIEW_PROBE_CONSUMERS:
+        if check_internal_include(path, "tests", "view_probe.hpp"):
+            failures.append(f"checker self-test failed to allow native View probe in {path}")
+    if not check_internal_include(Path("src/data/Fields.cpp"), "src", "view_probe.hpp"):
+        failures.append("checker self-test failed to keep native View probe out of production")
     if check_kokkos_header(Path("include/nexora/data/FieldBinding.hpp"),
                            "include/nexora", "data", "Kokkos_Core.hpp"):
         failures.append("checker self-test failed to allow Kokkos in data headers")
@@ -513,6 +518,10 @@ def check_graph(path: Path) -> list[str]:
         if name not in ALLOWED_LINKS and not is_test:
             errors.append(f"unclassified in-tree target '{name}'")
             continue
+        if name in SPECIAL_TEST_LINKS and not graph["testing_enabled"]:
+            errors.append(f"{name}: test target exists with testing disabled")
+        if name == KOKKOS_TEST_MAIN and source_dir != "tests/kokkos":
+            errors.append(f"{name}: unexpected source directory {source_dir!r}")
         if name in SPH_LEAF_SOURCES and source_dir != SPH_LEAF_SOURCES[name].parent.as_posix():
             errors.append(f"{name}: unexpected source directory {source_dir!r}")
         seen.add(name)
@@ -524,7 +533,7 @@ def check_graph(path: Path) -> list[str]:
 
     required_targets = set(ALLOWED_LINKS)
     if graph["testing_enabled"]:
-        required_targets.add("nexora_sph_tests")
+        required_targets.update(SPECIAL_TEST_LINKS)
     errors.extend(f"target graph is missing '{name}'" for name in sorted(required_targets - seen))
     return errors
 

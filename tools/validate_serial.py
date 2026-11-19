@@ -160,6 +160,15 @@ def verify_checksums(path):
     return digest(path)
 
 
+def verify_kokkos(prefix, profile, logs):
+    manifest = json.loads((prefix / MANIFEST).read_text(encoding="utf-8"))
+    if any(manifest.get(key) != value for key, value in profile.items()):
+        raise RuntimeError(f"Kokkos installation does not match this runner profile: {prefix}")
+    if manifest.get("installed_files") != installed_files(prefix):
+        raise RuntimeError(f"Kokkos installation digests differ from the manifest: {prefix}")
+    write_json(logs / MANIFEST, manifest)
+
+
 def provision(args, profile):
     archive = args.archive.absolute()
     checksums = archive.with_name(CHECKSUMS)
@@ -167,7 +176,9 @@ def provision(args, profile):
     log = args.logs.absolute() / f"provision-{args.config.lower()}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     if prefix.exists():
-        raise RuntimeError(f"Kokkos installation must use a fresh prefix: {prefix}")
+        verify_kokkos(prefix, profile, log.parent)
+        print(f"[{now()}] Reusing verified Kokkos installation: {prefix}", flush=True)
+        return
     if args.download:
         archive.parent.mkdir(parents=True, exist_ok=True)
         for path, artifact in ((archive, ARCHIVE), (checksums, CHECKSUMS)):
@@ -211,6 +222,89 @@ def provision(args, profile):
         profile["provisioned_at"] = now()
         write_json(staged / MANIFEST, profile)
         staged.rename(prefix)
+
+
+GTEST_VERSION = "1.17.0"
+GTEST_REVISION = "52eb8108c5bdec04579160ae17225d66034bd723"
+GTEST_URL = f"https://codeload.github.com/google/googletest/tar.gz/refs/tags/v{GTEST_VERSION}"
+GTEST_SHA256 = "65fab701d9829d38cb77c14acdc431d2108bfdbf8979e40eb8ae567edf10b27c"
+GTEST_PACKAGE_DIR = Path("lib/cmake/GTest")
+GTEST_MANIFEST = "nexora-gtest-provision.json"
+GTEST_OPTIONS = ["-DBUILD_GMOCK=OFF", "-DINSTALL_GTEST=ON", "-Dgtest_build_tests=OFF",
+           "-Dgtest_build_samples=OFF", "-Dgtest_force_shared_crt=ON"]
+
+
+def gtest_identity(profile):
+    return {key: profile[key] for key in (
+        "system", "architecture", "build_type", "toolchain", "toolchain_environment",
+    )} | {"options": toolchain_options(profile) + GTEST_OPTIONS,
+         "source": {"version": GTEST_VERSION, "commit": GTEST_REVISION, "archive": GTEST_URL,
+                    "sha256": GTEST_SHA256, "license": "BSD-3-Clause", "patches": []}}
+
+
+def gtest_installed_files(prefix):
+    config = prefix / GTEST_PACKAGE_DIR
+    for name in ("GTestConfig.cmake", "GTestConfigVersion.cmake", "GTestTargets.cmake"):
+        if not (config / name).is_file():
+            raise RuntimeError(f"incomplete GoogleTest package: {config / name}")
+    if not (prefix / "include/gtest/gtest.h").is_file():
+        raise RuntimeError(f"missing GoogleTest headers: {prefix}")
+    libraries = {path.stem for path in (prefix / "lib").iterdir()
+                 if path.suffix in (".a", ".lib")}
+    if not libraries.intersection(("libgtest", "gtest", "libgtestd", "gtestd")):
+        raise RuntimeError(f"missing GoogleTest static library: {prefix}")
+    return {path.relative_to(prefix).as_posix(): digest(path)
+            for path in sorted(prefix.rglob("*")) if path.is_file() and path != prefix / GTEST_MANIFEST}
+
+
+def provision_gtest(args, profile):
+    archive, prefix = args.gtest_archive.absolute(), args.gtest_prefix.absolute()
+    log = args.logs.absolute() / f"provision-gtest-{args.config.lower()}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    if prefix.exists():
+        verify_gtest(prefix, profile, log.parent)
+        print(f"[{now()}] Reusing verified GoogleTest installation: {prefix}", flush=True)
+        return
+    if args.download and not archive.is_file():
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=archive.parent) as directory:
+            downloaded = Path(directory) / "googletest.tar.gz"
+            with urllib.request.urlopen(GTEST_URL, timeout=60) as response, downloaded.open("wb") as target:
+                shutil.copyfileobj(response, target)
+            if digest(downloaded) != GTEST_SHA256:
+                raise RuntimeError("downloaded GoogleTest archive disagrees with repository lock")
+            downloaded.replace(archive)
+    if digest(archive) != GTEST_SHA256:
+        raise RuntimeError(f"GoogleTest archive SHA-256 differs from repository lock: {archive}")
+    record = gtest_identity(profile)
+    record["archive_verified_at"] = now()
+    prefix.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="gtest-build-", dir=prefix.parent) as directory:
+        scratch = Path(directory)
+        shutil.unpack_archive(archive, scratch)
+        source, build = scratch / f"googletest-{GTEST_VERSION}", scratch / "build"
+        command(["cmake", "-S", source, "-B", build, *toolchain_options(profile), *GTEST_OPTIONS,
+                 f"-DCMAKE_INSTALL_PREFIX={prefix.as_posix()}"], log)
+        command(["cmake", "--build", build, "--parallel", args.jobs], log)
+        staged = scratch / "install"
+        command(["cmake", "--install", build, "--prefix", staged], log)
+        notices = staged / "share/nexora-gtest-provenance"
+        notices.mkdir(parents=True)
+        shutil.copyfile(source / "LICENSE", notices / "LICENSE")
+        record["installed_files"] = gtest_installed_files(staged)
+        record["provisioned_at"] = now()
+        write_json(staged / GTEST_MANIFEST, record)
+        staged.rename(prefix)
+
+
+def verify_gtest(prefix, profile, logs):
+    prefix = prefix.absolute()
+    record = json.loads((prefix / GTEST_MANIFEST).read_text(encoding="utf-8"))
+    if any(record.get(key) != value for key, value in gtest_identity(profile).items()):
+        raise RuntimeError(f"GoogleTest installation does not match runner profile: {prefix}")
+    if record.get("installed_files") != gtest_installed_files(prefix):
+        raise RuntimeError(f"GoogleTest installation digests differ from manifest: {prefix}")
+    write_json(logs / GTEST_MANIFEST, record)
 
 
 def verify_network():
@@ -417,6 +511,7 @@ def verify_precision(args, profile, precision):
     mpi = "ON" if args.mpi else "OFF"
     command(["cmake", "-S", ROOT, "-B", build, *toolchain_options(profile),
              f"-DKokkos_DIR={(args.prefix.absolute() / PACKAGE_DIR).as_posix()}",
+             f"-DGTest_DIR={(args.gtest_prefix.absolute() / GTEST_PACKAGE_DIR).as_posix()}",
              "-DBUILD_TESTING=ON", f"-DNEXORA_ENABLE_DOUBLE_PRECISION={double}",
              f"-DNEXORA_ENABLE_MPI={mpi}"], logs / "configure.log")
     command(["cmake", "--build", build, "--parallel", args.jobs], logs / "build.log")
@@ -426,7 +521,15 @@ def verify_precision(args, profile, precision):
     command([*ctest, "--label-exclude", "^package$", "--output-junit", logs / "ctest.xml"],
             logs / "ctest.log")
     mpi_test = "nexora_mpi_smoke" if args.mpi else "nexora_cli_mpi_disabled"
-    check_ctest(logs / "ctest.xml", ["nexora_reference_tests", "nexora_sph_tests", mpi_test])
+    check_ctest(logs / "ctest.xml", [
+        "nexora_reference_tests.Reference.EulerConvergence",
+        "nexora_reference_tests.Reference.NonDyadicStepMatchesEulerOracle",
+        "nexora_sph_tests.Sph.FrozenLayoutAndReorder",
+        "nexora_data_uninitialized_tests.DataPreinitialization.FieldIssuerRequiresInitializedRuntime",
+        "nexora_data_uninitialized_tests.DataPreinitialization.ExternalFieldRequiresInitializedRuntime",
+        "nexora_reference_uninitialized_tests.ReferenceUninitialized.RejectUninitializedRuntime",
+        mpi_test,
+    ])
     test_log = build / "Testing/Temporary/LastTest.log"
     shutil.copyfile(test_log, logs / "reference-ctest.log")
     command([sys.executable, ROOT / "tools/check_reference_precision.py", "--log", test_log,
@@ -443,12 +546,8 @@ def verify(args, profile):
     prefix = args.prefix.absolute()
     logs = args.logs.absolute()
     logs.mkdir(parents=True, exist_ok=True)
-    manifest = json.loads((prefix / MANIFEST).read_text(encoding="utf-8"))
-    if any(manifest.get(key) != value for key, value in profile.items()):
-        raise RuntimeError(f"Kokkos installation does not match this runner profile: {prefix}")
-    if manifest.get("installed_files") != installed_files(prefix):
-        raise RuntimeError(f"Kokkos installation digests differ from the manifest: {prefix}")
-    write_json(logs / MANIFEST, manifest)
+    verify_kokkos(prefix, profile, logs)
+    verify_gtest(args.gtest_prefix, profile, logs)
     evidence = {"started": now(), "platform": platform.platform(),
                 "runner_image": os.environ.get("ImageVersion"), "jobs": args.jobs,
                 "mpi": args.mpi, "profiles": {}, "measurements": {}}
@@ -507,9 +606,13 @@ def main():
         phase = subparsers.add_parser(action)
         phase.add_argument("--prefix", type=Path, required=True)
         phase.add_argument("--logs", type=Path, required=True)
+        phase.add_argument("--gtest-prefix", type=Path,
+                           help="default: sibling gtest-1.17.0-<config> of --prefix")
         phase.add_argument("--jobs", type=int, default=2)
         if action == "provision":
             phase.add_argument("--archive", type=Path, required=True)
+            phase.add_argument("--gtest-archive", type=Path,
+                               help="default: googletest-1.17.0.tar.gz beside --archive")
             phase.add_argument("--download", action="store_true")
         else:
             phase.add_argument("--work-dir", type=Path, required=True)
@@ -520,13 +623,22 @@ def main():
             phase.add_argument("--measure-irregular", action="store_true",
                                help="build, run twice, and record the irregular Serial measurement")
     args = parser.parse_args()
+    if args.action != "cache-key":
+        if args.gtest_prefix is None:
+            args.gtest_prefix = args.prefix.parent / f"gtest-{GTEST_VERSION}-{args.config.lower()}"
+        if args.action == "provision" and args.gtest_archive is None:
+            args.gtest_archive = args.archive.with_name(f"googletest-{GTEST_VERSION}.tar.gz")
+        if args.gtest_prefix.absolute() == args.prefix.absolute():
+            parser.error("Kokkos and GoogleTest require distinct installation prefixes")
     try:
         profile = identity(args)
         if args.action == "cache-key":
-            key = hashlib.sha256(json.dumps(profile, sort_keys=True).encode()).hexdigest()
+            dependencies = {"kokkos": profile, "gtest": gtest_identity(profile)}
+            key = hashlib.sha256(json.dumps(dependencies, sort_keys=True).encode()).hexdigest()
             print(f"kokkos-{VERSION}-{profile['system']}-{profile['architecture']}-{args.config}-{key}")
         elif args.action == "provision":
             provision(args, profile)
+            provision_gtest(args, profile)
         else:
             verify(args, profile)
     except (OSError, RuntimeError, subprocess.CalledProcessError, ValueError, ET.ParseError) as error:
