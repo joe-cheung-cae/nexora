@@ -1,27 +1,32 @@
 # Nexora
 
-*Different Methods. One Physical World.*
+Nexora is a C++ foundation for high-performance multiphysics simulation. It uses Kokkos for numerical storage and execution. The current Serial CPU implementation includes field management, simulation state and time-step control, a Reference case CLI, and an internal one-dimensional SPH density calculation.
 
-Nexora is a modular C++ foundation for multiphysics and HPC simulation. Its selected architecture uses **Kokkos as the sole execution and numerical-storage foundation**, including the default CPU build. GPU backends and MPI are optional.
+## Quick start
 
-## Start here
+Use a 64-bit C/C++ toolchain with C++20 support, CMake 3.25.2 or newer, and Ninja. The Debug preset requires locally installed Kokkos 5.2.2 (Serial only) and GoogleTest 1.17.0. See the [dependency provisioning commands](docs/architecture/serial-ci-validation.md#重跑) and [CMake package paths](CONTRIBUTING.md#current-cpu-checks).
 
-The [architecture overview](docs/architecture/overview.md) is the authoritative entry point for the target design, current implementation, migration, and review gate. The [Kokkos design](docs/architecture/kokkos-design.md) defines the foundation contracts; [build and validation](docs/architecture/build-and-validation.md) defines the dependency lock, current offline workflow, proposed later profiles, and evidence requirements.
+Build and test from the repository root, then run the Reference example.
 
-**The first limited CPU slice is implemented.** It requires locally installed Kokkos **5.2.2**, locked to commit `8e15454876298832f013ebcaf08d53825b5bda40`, with Serial only, C++20 and CMake 3.25.2+. A typed Kokkos View and execution test and an installed consumer through `nexora::data` exercise the new boundary. The old exec layer and core numerical wrappers have been removed; domain and control contracts remain. See [core data structures](docs/architecture/core-data-structures.md) for migration and native Kokkos interfaces. This does not complete or approve [Phase 1](docs/architecture/phase-1-design-review.md).
+```sh
+cmake --preset cpu-debug
+cmake --build --preset cpu-debug
+ctest --preset cpu-debug
+./build/cpu-debug/apps/nexora/nexora run --fixture cases/reference/cli-nonbinary-tail.case
+```
 
-**The minimal reference state lifecycle is also implemented.** An internal reference participant uses Kokkos `x/q` arrays, stable IDs and independent accepted/trial storage through the existing Simulation. CPU tests cover commit, restore, numerical failure, retry, replay and retained read-only snapshots; see the [implementation and validation record](docs/architecture/reference-lifecycle-validation.md). It is an infrastructure fixture, with internal scope and no installed reference API.
+The example reports `accepted_steps=3`. See the [Reference case guide](docs/architecture/reference-case.md) for the input format and the `validate`, `plan`, and `run` commands.
 
-`nexora::real` is a configurable scalar alias exposed by `nexora/core/Real.hpp` and `Types.hpp`: it defaults to `float`, and `-DNEXORA_ENABLE_DOUBLE_PRECISION=ON` selects `double`. The installed package fixes this choice; changing it requires a clean build and install prefix and rebuilding consumers. Existing reference fields, parameters, operators and local transport now use `real`; time values remain `double`. Field descriptors default to the corresponding float32/float64 dtype. See the [numerical validation](docs/architecture/real-numerics-validation.md) for both precisions. See [core data structures](docs/architecture/core-data-structures.md).
+## Documentation
 
-The managed Serial data layer exports `nexora::data_schema` for field semantics and `nexora::data` for native Kokkos View bindings with read/write leases. See the [field binding validation record](docs/architecture/field-binding-validation.md).
+- [Build and validation](docs/architecture/build-and-validation.md)
+- [Architecture and roadmap](docs/architecture/overview.md)
+- [Serial SPH validation](validation/sph/serial.md)
 
-The CLI supports `nexora validate <case>`, `nexora plan <case>`, and `nexora run <case>` for the Serial Reference fixture. See the [v1 case schema and example](docs/architecture/reference-case.md).
+## Contributing
 
-Configure, build, test and install use locally provisioned dependencies. Test builds also require GoogleTest **1.17.0**. CI provisions both locked packages and checks both real precisions in Debug and Release. The optional MPI C API smoke has its own CI profile. See [CONTRIBUTING.md](CONTRIBUTING.md), the [dependency provenance](third_party/README.md) and the [Serial validation record](docs/architecture/serial-ci-validation.md) for commands and executed profiles. `NEXORA_GPU_BACKEND` is rejected with any value. The old native CUDA source is dormant. OpenMP and GPU profiles are planned.
-
-See [AGENTS.md](AGENTS.md) before changing the project. The [archived v1.2 plan](docs/archive/CFDX_Multimethod_HPC_Architecture_Plan_v1.2_NVIDIA_Integration.md) is historical context, not implementation guidance.
+See the [contribution guide](CONTRIBUTING.md) and [code of conduct](CODE_OF_CONDUCT.md). Use [GitHub Issues](https://github.com/joe-cheung-cae/nexora/issues) for bugs and feature requests. See the [security policy](SECURITY.md) to report a vulnerability privately.
 
 ## License
 
-Nexora's original code and documentation are available under the [BSD 3-Clause License](LICENSE), which permits commercial use, modification, and redistribution subject to its notice and endorsement terms. Dependencies such as Kokkos are governed by their own licenses. See [third-party provenance](third_party/README.md) and [ADR-014](docs/adr/ADR-014-license-and-provenance.md).
+Nexora is licensed under the [BSD 3-Clause License](LICENSE). Dependency licenses and provenance are listed in the [third-party documentation](third_party/README.md).
