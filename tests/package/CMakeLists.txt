@@ -12,7 +12,7 @@ if(NOT CMAKE_CROSSCOMPILING)
         "-Dproject_source=${PROJECT_SOURCE_DIR}"
         "-Dproject_build=${PROJECT_BINARY_DIR}"
         "-Dconsumer_source=${CMAKE_CURRENT_SOURCE_DIR}/consumer"
-        "-Dkokkos_test_source=${CMAKE_CURRENT_SOURCE_DIR}/../kokkos/kokkos_tests.cpp"
+        "-Dview_probe=${CMAKE_CURRENT_SOURCE_DIR}/../kokkos/view_probe.hpp"
         "-Dscratch=${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>"
         "-Dconfig=$<CONFIG>"
         "-Dgenerator=${CMAKE_GENERATOR}"

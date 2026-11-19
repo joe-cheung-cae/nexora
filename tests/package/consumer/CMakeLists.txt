@@ -4,7 +4,7 @@ project(NexoraConsumer LANGUAGES CXX)
 set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(Nexora 0.1 CONFIG REQUIRED)
 foreach(internal_target IN ITEMS methods_reference participants_reference methods_sph
-                                 participants_sph sph_tests sph_benchmark)
+                                 participants_sph sph_tests sph_benchmark kokkos_test_main)
     if(TARGET "nexora_${internal_target}" OR TARGET "nexora::${internal_target}"
        OR TARGET "nexora::nexora_${internal_target}")
         message(FATAL_ERROR "Internal target is exported: ${internal_target}")
@@ -86,7 +86,7 @@ target_compile_definitions(consumer PRIVATE
 add_executable(schema_consumer schema.cpp)
 target_link_libraries(schema_consumer PRIVATE nexora::data_schema)
 
-add_executable(kokkos_consumer kokkos_tests.cpp field_binding.cpp)
+add_executable(kokkos_consumer kokkos.cpp field_binding.cpp)
 target_link_libraries(kokkos_consumer PRIVATE nexora::data)
 target_compile_definitions(kokkos_consumer PRIVATE
     "NEXORA_TEST_EXPECT_DOUBLE_PRECISION=${NEXORA_TEST_EXPECT_DOUBLE_PRECISION}")

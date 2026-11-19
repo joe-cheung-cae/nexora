@@ -64,25 +64,27 @@ jobs:
       - name: Install optional MPI C API inputs
         if: matrix.toolchain.mpi
         run: sudo apt-get update && sudo apt-get install -y libopenmpi-dev openmpi-bin
-      - name: Identify the locked Kokkos build
-        id: kokkos
+      - name: Identify the locked test dependencies
+        id: dependencies
         shell: bash
         run: |
           key=$(python tools/validate_serial.py --cc "$NEXORA_CC" --cxx "$NEXORA_CXX" --config "$NEXORA_CONFIG" cache-key)
           echo "key=$key" >> "$GITHUB_OUTPUT"
-      - name: Restore the compiler-matched Kokkos install
+      - name: Restore the compiler-matched dependency installs
         id: cache
         uses: actions/cache@v4
         with:
-          path: ${{ env.NEXORA_RUN }}/kokkos
-          key: ${{ steps.kokkos.outputs.key }}-${{ hashFiles('tools/validate_serial.py') }}
-      - name: Acquire and provision the locked Kokkos Serial dependency
+          path: |
+            ${{ env.NEXORA_RUN }}/kokkos
+            ${{ env.NEXORA_RUN }}/gtest
+          key: ${{ steps.dependencies.outputs.key }}-${{ hashFiles('tools/validate_serial.py') }}
+      - name: Acquire and provision the locked Kokkos Serial and GoogleTest dependencies
         if: steps.cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           python tools/validate_serial.py --cc "$NEXORA_CC" --cxx "$NEXORA_CXX" --config "$NEXORA_CONFIG" provision \
-            --archive "$NEXORA_RUN/kokkos-5.2.2.tar.gz" --download \
-            --prefix "$NEXORA_RUN/kokkos" --logs "$NEXORA_RUN/logs"
+            --archive "$NEXORA_RUN/kokkos-5.2.2.tar.gz" --gtest-archive "$NEXORA_RUN/googletest-1.17.0.tar.gz" --download \
+            --prefix "$NEXORA_RUN/kokkos" --gtest-prefix "$NEXORA_RUN/gtest" --logs "$NEXORA_RUN/logs"
       - name: Verify Serial without network access
         if: runner.os == 'Linux' && !matrix.toolchain.mpi
         shell: bash
@@ -90,20 +92,20 @@ jobs:
           sudo --non-interactive /usr/bin/unshare --net --setgid "$(id -g)" --setuid "$(id -u)" -- \
             /usr/bin/env "PATH=$PATH" "ImageVersion=${ImageVersion:-}" "$(command -v python)" tools/validate_serial.py \
             --cc "$NEXORA_CC" --cxx "$NEXORA_CXX" --config "$NEXORA_CONFIG" verify \
-            --prefix "$NEXORA_RUN/kokkos" --work-dir "$NEXORA_RUN/build" --logs "$NEXORA_RUN/logs" \
+            --prefix "$NEXORA_RUN/kokkos" --gtest-prefix "$NEXORA_RUN/gtest" --work-dir "$NEXORA_RUN/build" --logs "$NEXORA_RUN/logs" \
             --require-network-blocked
       - name: Verify Windows Serial
         if: runner.os == 'Windows'
         shell: bash
         run: |
           python tools/validate_serial.py --cc "$NEXORA_CC" --cxx "$NEXORA_CXX" --config "$NEXORA_CONFIG" verify \
-            --prefix "$NEXORA_RUN/kokkos" --work-dir "$NEXORA_RUN/build" --logs "$NEXORA_RUN/logs"
+            --prefix "$NEXORA_RUN/kokkos" --gtest-prefix "$NEXORA_RUN/gtest" --work-dir "$NEXORA_RUN/build" --logs "$NEXORA_RUN/logs"
       - name: Verify the optional two-rank MPI smoke
         if: matrix.toolchain.mpi
         shell: bash
         run: |
           python tools/validate_serial.py --cc "$NEXORA_CC" --cxx "$NEXORA_CXX" --config "$NEXORA_CONFIG" verify \
-            --prefix "$NEXORA_RUN/kokkos" --work-dir "$NEXORA_RUN/build" --logs "$NEXORA_RUN/logs" \
+            --prefix "$NEXORA_RUN/kokkos" --gtest-prefix "$NEXORA_RUN/gtest" --work-dir "$NEXORA_RUN/build" --logs "$NEXORA_RUN/logs" \
             --precisions float --mpi
       - name: Retain runner logs and validation evidence
         if: always()

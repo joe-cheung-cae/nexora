@@ -1,8 +1,7 @@
 #include <nexora/simulation/Simulation.hpp>
 
 #include <cmath>
-#include <cstdlib>
-#include <iostream>
+#include <gtest/gtest.h>
 #include <limits>
 #include <optional>
 #include <string>
@@ -11,14 +10,6 @@
 namespace {
 
 using namespace nexora;
-
-void check(bool condition, const char* expression, int line) {
-    if (!condition) {
-        std::cerr << "line " << line << ": " << expression << '\n';
-        std::exit(EXIT_FAILURE);
-    }
-}
-#define CHECK(expression) check(static_cast<bool>(expression), #expression, __LINE__)
 
 enum class Failure {
     none,
@@ -83,7 +74,10 @@ class DummyParticipant final : public ParticipantIF {
     }
     Result<TrialReport> advance_trial(const TimeInterval& interval) override {
         calls.push_back("trial");
-        CHECK(checkpoint.has_value());
+        if (!checkpoint) {
+            ADD_FAILURE() << "advance_trial called without a checkpoint";
+            return Status{StatusCode::invalid_state, "missing checkpoint"};
+        }
         state.value += static_cast<real>(interval.duration()) * static_cast<real>(state.history + 1);
         ++state.history;
         ++state.sequence;
@@ -119,7 +113,10 @@ class DummyParticipant final : public ParticipantIF {
         }
         auto status = status_for(Failure::restore);
         if (status.ok()) {
-            CHECK(checkpoint.has_value());
+            if (!checkpoint) {
+                ADD_FAILURE() << "restore_window called without a checkpoint";
+                return {StatusCode::invalid_state, "missing checkpoint"};
+            }
             state = *checkpoint;
             checkpoint.reset();
         }
@@ -157,194 +154,195 @@ class DummyParticipant final : public ParticipantIF {
 };
 
 void prepare(Simulation& simulation) {
-    CHECK(simulation.initialize().ok());
-    CHECK(simulation.prepare().ok());
+    ASSERT_TRUE(simulation.initialize().ok());
+    ASSERT_TRUE(simulation.prepare().ok());
 }
 
-void lifecycle_and_replay() {
+TEST(SimulationTest, LifecycleAndReplay) {
     DummyParticipant participant;
     Simulation simulation(participant);
-    CHECK(!simulation.advance(0.5).ok());
-    CHECK(!simulation.prepare().ok());
-    CHECK(participant.calls.empty());
-    prepare(simulation);
-    CHECK(!simulation.initialize().ok());
-    CHECK(!simulation.commit_window().ok());
-    CHECK(!simulation.restore_window().ok());
-    CHECK(simulation.begin_window(0.5).ok());
-    CHECK(!simulation.begin_window(0.5).ok());
-    CHECK(simulation.advance_trial().ok());
-    CHECK(!simulation.advance_trial().ok());
-    CHECK(participant.state.value == 0.5);
-    CHECK(participant.state.history == 1);
-    CHECK(participant.state.sequence == 11);
-    CHECK(participant.state.version == StateVersion{0});
-    CHECK(simulation.time().accepted_time == 0.0);
-    CHECK(participant.published_outputs == 0);
-    CHECK(simulation.restore_window().ok());
-    CHECK(participant.state.value == 0.0);
-    CHECK(participant.state.history == 0);
-    CHECK(participant.state.sequence == 10);
-    CHECK(simulation.advance(0.25).ok());
-    CHECK(simulation.advance(0.25).ok());
-    CHECK(simulation.time().accepted_time == 0.5);
-    CHECK(simulation.time().accepted_steps == 2);
-    CHECK(simulation.time().trial_attempts == 3);
-    CHECK(participant.state.value == 0.75);
-    CHECK(participant.state.history == 2);
-    CHECK(participant.state.sequence == 12);
-    CHECK(participant.state.version == StateVersion{2});
-    CHECK(participant.published_outputs == 2);
-    CHECK(participant.last_constraint_time == 0.25);
-    CHECK(simulation.finalize().ok());
-    CHECK(simulation.state() == SimulationState::finalized);
-    CHECK(!simulation.advance(0.1).ok());
-    CHECK(!simulation.finalize().ok());
+    ASSERT_FALSE(simulation.advance(0.5).ok());
+    ASSERT_FALSE(simulation.prepare().ok());
+    ASSERT_TRUE(participant.calls.empty());
+    ASSERT_NO_FATAL_FAILURE(prepare(simulation));
+    ASSERT_FALSE(simulation.initialize().ok());
+    ASSERT_FALSE(simulation.commit_window().ok());
+    ASSERT_FALSE(simulation.restore_window().ok());
+    ASSERT_TRUE(simulation.begin_window(0.5).ok());
+    ASSERT_FALSE(simulation.begin_window(0.5).ok());
+    ASSERT_TRUE(simulation.advance_trial().ok());
+    ASSERT_FALSE(simulation.advance_trial().ok());
+    ASSERT_EQ(participant.state.value, 0.5);
+    ASSERT_EQ(participant.state.history, 1);
+    ASSERT_EQ(participant.state.sequence, 11);
+    ASSERT_EQ(participant.state.version, StateVersion{0});
+    ASSERT_EQ(simulation.time().accepted_time, 0.0);
+    ASSERT_EQ(participant.published_outputs, 0);
+    ASSERT_TRUE(simulation.restore_window().ok());
+    ASSERT_EQ(participant.state.value, 0.0);
+    ASSERT_EQ(participant.state.history, 0);
+    ASSERT_EQ(participant.state.sequence, 10);
+    ASSERT_TRUE(simulation.advance(0.25).ok());
+    ASSERT_TRUE(simulation.advance(0.25).ok());
+    ASSERT_EQ(simulation.time().accepted_time, 0.5);
+    ASSERT_EQ(simulation.time().accepted_steps, 2);
+    ASSERT_EQ(simulation.time().trial_attempts, 3);
+    ASSERT_EQ(participant.state.value, 0.75);
+    ASSERT_EQ(participant.state.history, 2);
+    ASSERT_EQ(participant.state.sequence, 12);
+    ASSERT_EQ(participant.state.version, StateVersion{2});
+    ASSERT_EQ(participant.published_outputs, 2);
+    ASSERT_EQ(participant.last_constraint_time, 0.25);
+    ASSERT_TRUE(simulation.finalize().ok());
+    ASSERT_EQ(simulation.state(), SimulationState::finalized);
+    ASSERT_FALSE(simulation.advance(0.1).ok());
+    ASSERT_FALSE(simulation.finalize().ok());
 
     DummyParticipant fresh;
     Simulation reference(fresh);
-    prepare(reference);
-    CHECK(reference.advance(0.25).ok());
-    CHECK(reference.advance(0.25).ok());
-    CHECK(participant.state.value == fresh.state.value);
-    CHECK(participant.state.history == fresh.state.history);
-    CHECK(participant.state.sequence == fresh.state.sequence);
-    CHECK(reference.finalize().ok());
+    ASSERT_NO_FATAL_FAILURE(prepare(reference));
+    ASSERT_TRUE(reference.advance(0.25).ok());
+    ASSERT_TRUE(reference.advance(0.25).ok());
+    ASSERT_EQ(participant.state.value, fresh.state.value);
+    ASSERT_EQ(participant.state.history, fresh.state.history);
+    ASSERT_EQ(participant.state.sequence, fresh.state.sequence);
+    ASSERT_TRUE(reference.finalize().ok());
 }
 
-void failures_and_retry() {
+TEST(SimulationTest, FailuresAndRetry) {
     for (const auto failure :
          {Failure::begin, Failure::trial, Failure::report, Failure::precommit, Failure::commit}) {
         DummyParticipant participant;
         Simulation simulation(participant, 2.0);
-        prepare(simulation);
-        CHECK(simulation.advance(0.25).ok());
+        ASSERT_NO_FATAL_FAILURE(prepare(simulation));
+        ASSERT_TRUE(simulation.advance(0.25).ok());
         const auto accepted = participant.state;
         participant.failure = failure;
-        CHECK(!simulation.advance(0.5).ok());
-        CHECK(simulation.state() == SimulationState::prepared);
-        CHECK(simulation.time().accepted_time == 2.25);
-        CHECK(simulation.time().accepted_steps == 1);
-        CHECK(participant.state.time == accepted.time);
-        CHECK(participant.state.value == accepted.value);
-        CHECK(participant.state.history == accepted.history);
-        CHECK(participant.state.sequence == accepted.sequence);
-        CHECK(participant.state.version == accepted.version);
-        CHECK(participant.published_outputs == 1);
-        CHECK(!participant.checkpoint.has_value());
-        CHECK(simulation.advance(0.25).ok());
-        CHECK(simulation.time().accepted_time == 2.5);
-        CHECK(participant.state.value == 0.75);
-        CHECK(simulation.finalize().ok());
+        ASSERT_FALSE(simulation.advance(0.5).ok());
+        ASSERT_EQ(simulation.state(), SimulationState::prepared);
+        ASSERT_EQ(simulation.time().accepted_time, 2.25);
+        ASSERT_EQ(simulation.time().accepted_steps, 1);
+        ASSERT_EQ(participant.state.time, accepted.time);
+        ASSERT_EQ(participant.state.value, accepted.value);
+        ASSERT_EQ(participant.state.history, accepted.history);
+        ASSERT_EQ(participant.state.sequence, accepted.sequence);
+        ASSERT_EQ(participant.state.version, accepted.version);
+        ASSERT_EQ(participant.published_outputs, 1);
+        ASSERT_FALSE(participant.checkpoint.has_value());
+        ASSERT_TRUE(simulation.advance(0.25).ok());
+        ASSERT_EQ(simulation.time().accepted_time, 2.5);
+        ASSERT_EQ(participant.state.value, 0.75);
+        ASSERT_TRUE(simulation.finalize().ok());
     }
 }
 
-void failed_restore_and_finalization() {
+TEST(SimulationTest, FailedRestoreAndFinalization) {
     DummyParticipant participant;
     Simulation simulation(participant);
-    prepare(simulation);
-    CHECK(simulation.begin_window(0.5).ok());
-    CHECK(simulation.advance_trial().ok());
+    ASSERT_NO_FATAL_FAILURE(prepare(simulation));
+    ASSERT_TRUE(simulation.begin_window(0.5).ok());
+    ASSERT_TRUE(simulation.advance_trial().ok());
     participant.failure = Failure::restore;
-    CHECK(!simulation.restore_window().ok());
-    CHECK(simulation.state() == SimulationState::failed);
-    CHECK(simulation.time().accepted_time == 0.0);
-    CHECK(simulation.time().accepted_steps == 0);
-    CHECK(!simulation.advance(0.1).ok());
-    CHECK(!simulation.commit_window().ok());
-    CHECK(simulation.finalize().ok());
-    CHECK(!participant.checkpoint.has_value());
+    ASSERT_FALSE(simulation.restore_window().ok());
+    ASSERT_EQ(simulation.state(), SimulationState::failed);
+    ASSERT_EQ(simulation.time().accepted_time, 0.0);
+    ASSERT_EQ(simulation.time().accepted_steps, 0);
+    ASSERT_FALSE(simulation.advance(0.1).ok());
+    ASSERT_FALSE(simulation.commit_window().ok());
+    ASSERT_TRUE(simulation.finalize().ok());
+    ASSERT_FALSE(participant.checkpoint.has_value());
 
     DummyParticipant double_failure;
     Simulation poisoned(double_failure);
-    prepare(poisoned);
+    ASSERT_NO_FATAL_FAILURE(prepare(poisoned));
     double_failure.failure = Failure::trial;
     double_failure.fail_restore = true;
     const auto status = poisoned.advance(0.5);
-    CHECK(!status.ok());
-    CHECK(status.message().find("rollback failed") != std::string::npos);
-    CHECK(poisoned.state() == SimulationState::failed);
-    CHECK(poisoned.time().accepted_time == 0.0);
-    CHECK(!poisoned.advance(0.1).ok());
-    CHECK(poisoned.finalize().ok());
+    ASSERT_FALSE(status.ok());
+    ASSERT_TRUE(status.message().find("rollback failed") != std::string::npos);
+    ASSERT_EQ(poisoned.state(), SimulationState::failed);
+    ASSERT_EQ(poisoned.time().accepted_time, 0.0);
+    ASSERT_FALSE(poisoned.advance(0.1).ok());
+    ASSERT_TRUE(poisoned.finalize().ok());
 
     DummyParticipant abandoned;
     Simulation cleanup(abandoned);
-    prepare(cleanup);
-    CHECK(cleanup.begin_window(0.5).ok());
-    CHECK(cleanup.advance_trial().ok());
-    CHECK(cleanup.finalize().ok());
-    CHECK(abandoned.state.value == 0.0);
-    CHECK(abandoned.published_outputs == 0);
-    CHECK(abandoned.calls[abandoned.calls.size() - 2] == "restore");
-    CHECK(abandoned.calls.back() == "finalize");
+    ASSERT_NO_FATAL_FAILURE(prepare(cleanup));
+    ASSERT_TRUE(cleanup.begin_window(0.5).ok());
+    ASSERT_TRUE(cleanup.advance_trial().ok());
+    ASSERT_TRUE(cleanup.finalize().ok());
+    ASSERT_EQ(abandoned.state.value, 0.0);
+    ASSERT_EQ(abandoned.published_outputs, 0);
+    ASSERT_GE(abandoned.calls.size(), 2u);
+    ASSERT_EQ(abandoned.calls[abandoned.calls.size() - 2], "restore");
+    ASSERT_EQ(abandoned.calls.back(), "finalize");
 
     DummyParticipant cleanup_failure;
     Simulation retry_cleanup(cleanup_failure);
-    prepare(retry_cleanup);
+    ASSERT_NO_FATAL_FAILURE(prepare(retry_cleanup));
     cleanup_failure.failure = Failure::finalize;
-    CHECK(!retry_cleanup.finalize().ok());
-    CHECK(retry_cleanup.state() == SimulationState::failed);
-    CHECK(retry_cleanup.finalize().ok());
+    ASSERT_FALSE(retry_cleanup.finalize().ok());
+    ASSERT_EQ(retry_cleanup.state(), SimulationState::failed);
+    ASSERT_TRUE(retry_cleanup.finalize().ok());
 
     for (auto failure : {Failure::initialize, Failure::prepare}) {
         DummyParticipant broken;
         Simulation failed(broken);
         broken.failure = failure;
         if (failure == Failure::prepare) {
-            CHECK(failed.initialize().ok());
-            CHECK(!failed.prepare().ok());
+            ASSERT_TRUE(failed.initialize().ok());
+            ASSERT_FALSE(failed.prepare().ok());
         } else {
-            CHECK(!failed.initialize().ok());
+            ASSERT_FALSE(failed.initialize().ok());
         }
-        CHECK(failed.state() == SimulationState::failed);
-        CHECK(!failed.advance(0.1).ok());
-        CHECK(failed.finalize().ok());
+        ASSERT_EQ(failed.state(), SimulationState::failed);
+        ASSERT_FALSE(failed.advance(0.1).ok());
+        ASSERT_TRUE(failed.finalize().ok());
     }
 }
 
-void constraints_and_metadata() {
+TEST(SimulationTest, ConstraintsAndMetadata) {
     const double nan = std::numeric_limits<double>::quiet_NaN();
     const double infinity = std::numeric_limits<double>::infinity();
     for (double step : {0.0, -1.0, nan, infinity, 1.5}) {
         DummyParticipant participant;
         Simulation simulation(participant);
-        prepare(simulation);
-        CHECK(!simulation.advance(step).ok());
-        CHECK(participant.calls.size() == 2);
-        CHECK(simulation.time().trial_attempts == 0);
-        CHECK(simulation.finalize().ok());
+        ASSERT_NO_FATAL_FAILURE(prepare(simulation));
+        ASSERT_FALSE(simulation.advance(step).ok());
+        ASSERT_EQ(participant.calls.size(), 2);
+        ASSERT_EQ(simulation.time().trial_attempts, 0);
+        ASSERT_TRUE(simulation.finalize().ok());
     }
-    CHECK(!validate_time_constraint({0.0, 0.0, {}}).ok());
-    CHECK(!validate_time_constraint({1.0, 2.0, {}}).ok());
-    CHECK(!validate_time_constraint({1.0, 0.0, 0.0}).ok());
-    CHECK(!validate_time_constraint({1.0, nan, {}}).ok());
-    CHECK(!validate_time_constraint({1.0, 0.0, infinity}).ok());
-    CHECK(!validate_time_step({1.0, 0.2, {}}, 0.1).ok());
-    CHECK(!validate_time_step({1.0, 0.0, 0.1}, 0.15).ok());
-    CHECK(validate_time_step({1.0, 0.0, 0.1}, 0.3).ok());
-    CHECK(validate_time_step({1e15 + 1.0, 0.0, 1.0}, 1e15).ok());
-    CHECK(!validate_time_step({1e15 + 1.0, 0.0, 1.0}, 1e15 + 0.5).ok());
-    CHECK(!validate_time_step({1e15 + 1.0, 0.0, 1.0}, 1e15 + 0.25).ok());
+    ASSERT_FALSE(validate_time_constraint({0.0, 0.0, {}}).ok());
+    ASSERT_FALSE(validate_time_constraint({1.0, 2.0, {}}).ok());
+    ASSERT_FALSE(validate_time_constraint({1.0, 0.0, 0.0}).ok());
+    ASSERT_FALSE(validate_time_constraint({1.0, nan, {}}).ok());
+    ASSERT_FALSE(validate_time_constraint({1.0, 0.0, infinity}).ok());
+    ASSERT_FALSE(validate_time_step({1.0, 0.2, {}}, 0.1).ok());
+    ASSERT_FALSE(validate_time_step({1.0, 0.0, 0.1}, 0.15).ok());
+    ASSERT_TRUE(validate_time_step({1.0, 0.0, 0.1}, 0.3).ok());
+    ASSERT_TRUE(validate_time_step({1e15 + 1.0, 0.0, 1.0}, 1e15).ok());
+    ASSERT_FALSE(validate_time_step({1e15 + 1.0, 0.0, 1.0}, 1e15 + 0.5).ok());
+    ASSERT_FALSE(validate_time_step({1e15 + 1.0, 0.0, 1.0}, 1e15 + 0.25).ok());
 
     DummyParticipant quantized;
     quantized.constraint = {1.0, 0.1, 0.1};
     Simulation simulation(quantized);
-    prepare(simulation);
-    CHECK(!simulation.advance(0.15).ok());
-    CHECK(simulation.advance(0.3).ok());
-    CHECK(simulation.finalize().ok());
+    ASSERT_NO_FATAL_FAILURE(prepare(simulation));
+    ASSERT_FALSE(simulation.advance(0.15).ok());
+    ASSERT_TRUE(simulation.advance(0.3).ok());
+    ASSERT_TRUE(simulation.finalize().ok());
 
     DummyParticipant decimal;
     decimal.constraint = {0.1, 0.1, 0.1};
     Simulation repeating(decimal);
-    prepare(repeating);
+    ASSERT_NO_FATAL_FAILURE(prepare(repeating));
     for (int index = 0; index < 1000; ++index) {
-        CHECK(repeating.advance(0.1).ok());
+        ASSERT_TRUE(repeating.advance(0.1).ok());
     }
-    CHECK(repeating.time().accepted_steps == 1000);
-    CHECK(std::abs(repeating.time().accepted_time - 100.0) < 1e-10);
-    CHECK(repeating.finalize().ok());
+    ASSERT_EQ(repeating.time().accepted_steps, 1000);
+    ASSERT_TRUE(std::abs(repeating.time().accepted_time - 100.0) < 1e-10);
+    ASSERT_TRUE(repeating.finalize().ok());
 
     for (int invalid = 0; invalid < 3; ++invalid) {
         DummyParticipant participant;
@@ -352,36 +350,29 @@ void constraints_and_metadata() {
         participant.invalid_port = invalid == 1;
         participant.duplicate_port = invalid == 2;
         Simulation rejected(participant);
-        CHECK(!rejected.initialize().ok());
-        CHECK(participant.calls.empty());
+        ASSERT_FALSE(rejected.initialize().ok());
+        ASSERT_TRUE(participant.calls.empty());
     }
     DummyParticipant nonfinite;
     Simulation bad_time(nonfinite, nan);
-    CHECK(!bad_time.initialize().ok());
-    CHECK(nonfinite.calls.empty());
+    ASSERT_FALSE(bad_time.initialize().ok());
+    ASSERT_TRUE(nonfinite.calls.empty());
 
     DummyParticipant imprecise;
     Simulation too_small(imprecise, 0x1p54);
-    prepare(too_small);
-    CHECK(!too_small.advance(1.0).ok());
-    CHECK(imprecise.calls.size() == 2);
-    CHECK(too_small.finalize().ok());
+    ASSERT_NO_FATAL_FAILURE(prepare(too_small));
+    ASSERT_FALSE(too_small.advance(1.0).ok());
+    ASSERT_EQ(imprecise.calls.size(), 2);
+    ASSERT_TRUE(too_small.finalize().ok());
 
     DummyParticipant rounded;
     rounded.constraint = {0.75, 0.75, 0.75};
     Simulation rounded_time(rounded, 0x1p52);
-    prepare(rounded_time);
-    CHECK(rounded_time.advance(0.75).ok());
-    CHECK(rounded_time.time().accepted_time == 0x1p52 + 1.0);
-    CHECK(rounded.state.value == 0.75);
-    CHECK(rounded_time.finalize().ok());
+    ASSERT_NO_FATAL_FAILURE(prepare(rounded_time));
+    ASSERT_TRUE(rounded_time.advance(0.75).ok());
+    ASSERT_EQ(rounded_time.time().accepted_time, 0x1p52 + 1.0);
+    ASSERT_EQ(rounded.state.value, 0.75);
+    ASSERT_TRUE(rounded_time.finalize().ok());
 }
 
 } // namespace
-
-int main() {
-    lifecycle_and_replay();
-    failures_and_retry();
-    failed_restore_and_finalization();
-    constraints_and_metadata();
-}

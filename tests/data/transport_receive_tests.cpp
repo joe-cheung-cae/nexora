@@ -1,18 +1,13 @@
-#ifdef NDEBUG
-#undef NDEBUG
-#endif
+#include <gtest/gtest.h>
+#include <stdexcept>
 #include <Kokkos_Core.hpp>
 #include <nexora/core/Real.hpp>
 #include <array>
-#include <cassert>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <data/FieldIssuer.hpp>
 #include <data/TransportBuilder.hpp>
 #include <data/TransportReceiver.hpp>
-#include <iostream>
-#include <source_location>
 #include <span>
 #include <utility>
 
@@ -27,13 +22,9 @@ using Id = std::uint64_t;
 using Ids = Kokkos::View<Id*, Kokkos::Serial>;
 using Scalars = Kokkos::View<real*, Kokkos::Serial>;
 
-template <class T>
-T take(Result<T> result, const std::source_location source = std::source_location::current()) {
-    if (!result.ok()) {
-        std::cerr << source.file_name() << ':' << source.line() << ": " << result.status().message()
-                  << '\n';
-        std::abort();
-    }
+template <class T> T take(Result<T> result) {
+    if (!result.ok())
+        throw std::runtime_error(result.status().message());
     return std::move(result).value();
 }
 
@@ -98,7 +89,8 @@ TransportView<real> pack(const Kokkos::Serial& exec, TransportPurpose purpose, c
                                           std::move(read_ids)));
 }
 
-void test_validation_and_retry(const Kokkos::Serial& exec) {
+TEST(TransportReceive, ValidationAndRetry) {
+    const Kokkos::Serial exec;
     const std::array axes{FieldAxis{3}};
     const FieldBindingSpec value_spec{Association::particle, "m", axes};
     const FieldBindingSpec id_spec{Association::particle, "1", axes};
@@ -126,47 +118,47 @@ void test_validation_and_retry(const Kokkos::Serial& exec) {
 
     auto expect_unchanged = [&] {
         for (std::size_t i = 0; i < target_values.extent(0); ++i)
-            assert(target.view()(i) == real{-77});
+            ASSERT_EQ(target.view()(i), real{-77});
     };
     auto reject_snapshot = [&](const TransportView<real>& source, const FieldStamp& expected) {
-        assert(!TransportReceiver::unpack(exec, source, target, ids, expected).ok());
-        expect_unchanged();
+        ASSERT_FALSE(TransportReceiver::unpack(exec, source, target, ids, expected).ok());
+        ASSERT_NO_FATAL_FAILURE(expect_unchanged());
     };
 
     auto stale_plan = valid.stamp();
     ++stale_plan.storage_incarnation;
-    reject_snapshot(valid, stale_plan);
+    ASSERT_NO_FATAL_FAILURE(reject_snapshot(valid, stale_plan));
 
     auto stale_epoch = stamp;
     ++stale_epoch.trial.attempt;
     const auto stale = pack(exec, TransportPurpose::coupling, source_values, descriptor, axes,
                             source_ids, stale_epoch);
-    reject_snapshot(stale, stale.stamp());
+    ASSERT_NO_FATAL_FAILURE(reject_snapshot(stale, stale.stamp()));
 
     auto wrong_units = descriptor;
     wrong_units.units = "cm";
     const auto incompatible = pack(exec, TransportPurpose::coupling, source_values, wrong_units,
                                    axes, source_ids, stamp);
-    reject_snapshot(incompatible, incompatible.stamp());
+    ASSERT_NO_FATAL_FAILURE(reject_snapshot(incompatible, incompatible.stamp()));
 
     const auto visualization = pack(exec, TransportPurpose::visualization, source_values,
                                     descriptor, axes, source_ids, stamp);
-    reject_snapshot(visualization, visualization.stamp());
+    ASSERT_NO_FATAL_FAILURE(reject_snapshot(visualization, visualization.stamp()));
     const auto halo = pack(exec, TransportPurpose::halo, source_values, descriptor, axes,
                            source_ids, stamp);
-    reject_snapshot(halo, halo.stamp());
+    ASSERT_NO_FATAL_FAILURE(reject_snapshot(halo, halo.stamp()));
 
     const auto wrong_ids = make_ids(std::array<Id, 3>{41, 7, 999});
     const auto missing_id = pack(exec, TransportPurpose::coupling, source_values, descriptor, axes,
                                  wrong_ids, stamp);
-    reject_snapshot(missing_id, missing_id.stamp());
+    ASSERT_NO_FATAL_FAILURE(reject_snapshot(missing_id, missing_id.stamp()));
 
     auto short_ids = Kokkos::subview(target_ids, std::pair<std::size_t, std::size_t>{0, 2});
     const std::array short_axes{FieldAxis{2}};
     auto wrong_shape = take(id_issuer.read(short_ids, id_field(), id_issuer.stamp(),
                                            {Association::particle, "1", short_axes}));
-    assert(!TransportReceiver::unpack(exec, valid, target, wrong_shape, valid.stamp()).ok());
-    expect_unchanged();
+    ASSERT_FALSE(TransportReceiver::unpack(exec, valid, target, wrong_shape, valid.stamp()).ok());
+    ASSERT_NO_FATAL_FAILURE(expect_unchanged());
 
     const auto stale_target_ids = make_ids(std::array<Id, 3>{29, 41, 7});
     auto stale_id_stamp = target_stamp;
@@ -174,22 +166,23 @@ void test_validation_and_retry(const Kokkos::Serial& exec) {
     auto stale_id_issuer = take(FieldIssuer::create(stale_target_ids, stale_id_stamp));
     auto stale_ids = take(stale_id_issuer.read(stale_target_ids, id_field(),
                                                stale_id_issuer.stamp(), id_spec));
-    assert(!TransportReceiver::unpack(exec, valid, target, stale_ids, valid.stamp()).ok());
-    expect_unchanged();
+    ASSERT_FALSE(TransportReceiver::unpack(exec, valid, target, stale_ids, valid.stamp()).ok());
+    ASSERT_NO_FATAL_FAILURE(expect_unchanged());
 
     const auto duplicate_ids = make_ids(std::array<Id, 3>{29, 41, 41});
     auto duplicate_issuer = take(FieldIssuer::create(duplicate_ids, target_stamp));
     auto duplicate = take(duplicate_issuer.read(duplicate_ids, id_field(), duplicate_issuer.stamp(),
                                                 id_spec));
-    assert(!TransportReceiver::unpack(exec, valid, target, duplicate, valid.stamp()).ok());
-    expect_unchanged();
+    ASSERT_FALSE(TransportReceiver::unpack(exec, valid, target, duplicate, valid.stamp()).ok());
+    ASSERT_NO_FATAL_FAILURE(expect_unchanged());
 
-    assert(TransportReceiver::unpack(exec, valid, target, ids, valid.stamp()).ok());
-    assert(target.view()(0) == real{9.5} && target.view()(1) == real{18} &&
+    ASSERT_TRUE(TransportReceiver::unpack(exec, valid, target, ids, valid.stamp()).ok());
+    ASSERT_TRUE(target.view()(0) == real{9.5} && target.view()(1) == real{18} &&
            target.view()(2) == real{-4});
 }
 
-void test_ghost_subview(const Kokkos::Serial& exec) {
+TEST(TransportReceive, GhostSubview) {
+    const Kokkos::Serial exec;
     auto stamp = trial_stamp();
     stamp.trial = {};
     Kokkos::View<real**, Kokkos::LayoutRight, Kokkos::Serial> source("halo source", 3, 2);
@@ -224,23 +217,16 @@ void test_ghost_subview(const Kokkos::Serial& exec) {
     auto ids = take(id_issuer.read(target_ids, id_field(), id_issuer.stamp(),
                                    {Association::particle, "1", id_axes}));
 
-    assert(!TransportReceiver::unpack(exec, wrong_components, target, ids,
+    ASSERT_TRUE(!TransportReceiver::unpack(exec, wrong_components, target, ids,
                                       wrong_components.stamp()).ok());
     for (std::size_t component = 0; component < backing.extent(0); ++component)
         for (std::size_t entity = 0; entity < backing.extent(1); ++entity)
-            assert(backing(component, entity) == real{-99});
+            ASSERT_EQ(backing(component, entity), real{-99});
 
-    assert(TransportReceiver::unpack(exec, snapshot, target, ids, snapshot.stamp()).ok());
-    assert(backing(0, 1) == real{2} && backing(0, 2) == real{3} && backing(0, 3) == real{1});
-    assert(backing(1, 1) == real{11} && backing(1, 2) == real{12} && backing(1, 3) == real{10});
-    assert(backing(0, 0) == real{-99} && backing(0, 4) == real{-99});
-    assert(backing(1, 0) == real{-99} && backing(1, 4) == real{-99});
+    ASSERT_TRUE(TransportReceiver::unpack(exec, snapshot, target, ids, snapshot.stamp()).ok());
+    ASSERT_TRUE(backing(0, 1) == real{2} && backing(0, 2) == real{3} && backing(0, 3) == real{1});
+    ASSERT_TRUE(backing(1, 1) == real{11} && backing(1, 2) == real{12} && backing(1, 3) == real{10});
+    ASSERT_TRUE(backing(0, 0) == real{-99} && backing(0, 4) == real{-99});
+    ASSERT_TRUE(backing(1, 0) == real{-99} && backing(1, 4) == real{-99});
 }
 } // namespace
-
-int main(int argc, char* argv[]) {
-    const Kokkos::ScopeGuard runtime(argc, argv);
-    const Kokkos::Serial exec;
-    test_validation_and_retry(exec);
-    test_ghost_subview(exec);
-}
