@@ -426,7 +426,7 @@ def verify_precision(args, profile, precision):
     command([*ctest, "--label-exclude", "^package$", "--output-junit", logs / "ctest.xml"],
             logs / "ctest.log")
     mpi_test = "nexora_mpi_smoke" if args.mpi else "nexora_cli_mpi_disabled"
-    check_ctest(logs / "ctest.xml", ["nexora_reference_tests", mpi_test])
+    check_ctest(logs / "ctest.xml", ["nexora_reference_tests", "nexora_sph_tests", mpi_test])
     test_log = build / "Testing/Temporary/LastTest.log"
     shutil.copyfile(test_log, logs / "reference-ctest.log")
     command([sys.executable, ROOT / "tools/check_reference_precision.py", "--log", test_log,

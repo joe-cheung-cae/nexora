@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "case": "sph-density-1d",
+  "kernel": "cubic-spline-m4-1d",
+  "h_m": 1,
+  "topology_version": 1,
+  "particles": [
+    {"id": 10, "x_m": 0,   "mass_kg": 1, "role": "owned", "boundary": false},
+    {"id": 30, "x_m": 0.5, "mass_kg": 2, "role": "owned", "boundary": false},
+    {"id": 20, "x_m": 1.5, "mass_kg": 3, "role": "owned", "boundary": false},
+    {"id": 40, "x_m": 2,   "mass_kg": 4, "role": "owned", "boundary": true},
+    {"id": 50, "x_m": 5,   "mass_kg": 5, "role": "owned", "boundary": false},
+    {"id": 60, "x_m": 2.5, "mass_kg": 6, "role": "ghost", "boundary": false}
+  ],
+  "initial": {
+    "layout_version": 1,
+    "row_ids": [10, 30, 20, 40, 50],
+    "column_ids": [10, 30, 20, 40, 50, 60],
+    "offsets": [0, 3, 7, 11, 15, 15],
+    "indices": [1, 2, 3, 0, 2, 3, 5, 0, 1, 3, 5, 0, 1, 2, 5]
+  },
+  "reordered": {
+    "layout_version": 2,
+    "row_ids": [40, 50, 10, 20, 30],
+    "column_ids": [60, 40, 50, 10, 20, 30],
+    "offsets": [0, 4, 4, 7, 11, 15],
+    "indices": [3, 5, 4, 0, 5, 4, 1, 3, 5, 1, 0, 3, 4, 1, 0]
+  },
+  "expected": {
+    "density_kg_per_m_by_id": {"10": "81/48", "30": "115/48", "20": "253/48", "40": "337/48", "50": "160/48"},
+    "owned_density_sum_kg_per_m": "946/48"
+  },
+  "relative_tolerance_in_epsilon": {"density": 8, "owned_density_sum": 16}
+}

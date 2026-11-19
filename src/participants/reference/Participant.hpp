@@ -4,9 +4,11 @@
 #include <nexora/data/TransportView.hpp>
 #include <nexora/participant/ParticipantIF.hpp>
 #include <optional>
-#include <participants/reference/ResourceBudget.hpp>
+#include <participants/ResourceBudget.hpp>
 
 namespace nexora::reference {
+using detail::ResourceBudget;
+
 class Participant final : public ParticipantIF {
   public:
     explicit Participant(Config config = {}, ParticipantId id = ParticipantId{1},

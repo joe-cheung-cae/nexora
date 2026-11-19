@@ -1,6 +1,6 @@
 # Nexora 当前架构入口
 
-修订时间：`2026-11-09T20:24:13+08:00`。**这是唯一有效的架构入口。Kokkos Serial CPU 基础、最小参考状态生命周期及 P1-04 的 CPU 字段访问、外部 owner、本地传输快照和接收解包已获授权并实现。reference 窗口已接入同步 lease 和本地收发；本次授权提前清理旧 core 数值容器及 exec 层，完整 Phase 1 仍开放。**
+修订时间 `2026-11-19T11:40:57+08:00`。**这是唯一有效的架构入口。Kokkos Serial CPU 基础、参考状态生命周期、P1-04 CPU 字段访问与本地传输以及 P1-07 Serial SPH 代表性切片已实现。完整 Phase 1 仍开放。**
 
 ## 1. 决策与文档效力
 
@@ -40,6 +40,8 @@ Nexora 自有数值计算和存储统一使用 Kokkos，包括默认 CPU、可�
 
 Reference 的同步窗口同时推进主状态、replay history 和控制序列，按试算 stamp 检查诊断缓存。旧快照与独立 packed 消费者保留各自的预算记录，最后一个持有者完成时回收额度。见 [进程内恢复与资源预算](reference-resource-validation.md)。
 
+P1-07 的内部 Serial SPH 切片在既有 Simulation 窗口上运行固定 CSR 的一维 M₄ 密度与 owned 归约。逐行输出与普通 double 归约共享一次遍历。具体 participant 负责 stable ID、字段授权、行列重排和结果发布，跨窗口读者持有完整快照。四种构建配置的数值复验与 Release 端到端计量见 [SPH Serial 验证](../../validation/sph/serial.md)。
+
 CLI 的 `validate`、`plan` 和 `run` 共用版本化 Reference case 预检。`run` 装配现有 `Simulation` 与内部 Reference participant，并发布可核对的 accepted 数值摘要。 [case 格式与验证](reference-case.md)
 
 任何 `NEXORA_GPU_BACKEND` 值均被拒绝，旧 native CUDA 源文件休眠。OpenMP、CUDA/HIP 尚未实现。没有真实 SPH/FVM/FEM/LBM/DEM/MBD solver、MPI halo 或持久 checkpoint。CI 先供应锁定的 Kokkos，再用本地安装验证 Serial。可选 MPI smoke 有独立配置。已运行的平台、配置和禁网记录见 [Serial CI 验证](serial-ci-validation.md)。
@@ -63,6 +65,12 @@ flowchart TD
   R --> F
   M --> F
   M --> K
+  SP["participants_sph"] --> P
+  SP --> F
+  SP --> K
+  SP --> SM["methods_sph"]
+  SM --> C
+  SM --> K
 ```
 
 实际源文件与 target 的完整证据见[源码盘点](migration-roadmap.md#source-inventory)。`tools/check_dependencies.py` 检查当前边界，其通过不证明下述目标图全部实现。

@@ -21,10 +21,16 @@ file(GLOB_RECURSE private_headers "${scratch}/relocated/*.hpp")
 string(CONCAT private_header_pattern
     "/(FieldIssuer|ExternalField|TransportBuilder|TransportReceiver|"
     "EntityCapacity|EntityOrder|Permutation|CsrAdjacency|StructureState|ResourceBudget|"
-    "(methods|participants)/reference/[^/]+)[.]hpp$")
+    "(methods|participants)/(reference|sph)/.*)[.]hpp$")
 list(FILTER private_headers INCLUDE REGEX "${private_header_pattern}")
 if(private_headers)
     message(FATAL_ERROR "Private implementation headers leaked into the installation: ${private_headers}")
+endif()
+file(GLOB_RECURSE sph_artifacts "${scratch}/relocated/*")
+list(FILTER sph_artifacts INCLUDE REGEX
+    "/(lib)?nexora_(methods_sph|participants_sph|sph_tests|sph_benchmark)([.][^/]*)?$")
+if(sph_artifacts)
+    message(FATAL_ERROR "Internal SPH artifacts leaked into the installation: ${sph_artifacts}")
 endif()
 file(GLOB_RECURSE retired_headers "${scratch}/relocated/*.hpp")
 list(FILTER retired_headers INCLUDE REGEX

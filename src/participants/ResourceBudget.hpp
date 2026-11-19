@@ -7,7 +7,7 @@
 #include <nexora/core/Result.hpp>
 #include <utility>
 
-namespace nexora::reference {
+namespace nexora::detail {
 
 class ResourceBudget {
   public:
@@ -19,7 +19,7 @@ class ResourceBudget {
     struct Usage {
         std::size_t snapshot_records = 0;
         std::size_t controlled_bytes = 0;
-        // Reference borrows receive input synchronously and retains no external owner.
+        // These synchronous participants retain no external owners.
         std::size_t known_external_owner_bytes = 0;
     };
 
@@ -40,12 +40,12 @@ class ResourceBudget {
             const auto& limits = account_->limits;
             if (snapshot_records > limits.snapshot_records - usage.snapshot_records ||
                 controlled_bytes > limits.controlled_bytes - usage.controlled_bytes) {
-                return Status{StatusCode::resource_exhausted, "reference resource budget exceeded"};
+                return Status{StatusCode::resource_exhausted, "participant resource budget exceeded"};
             }
             try {
                 ticket = std::make_shared<Reservation>(account_, controlled_bytes, snapshot_records);
             } catch (const std::bad_alloc&) {
-                return Status{StatusCode::resource_exhausted, "cannot reserve reference resources"};
+                return Status{StatusCode::resource_exhausted, "cannot reserve participant resources"};
             }
             usage.controlled_bytes += controlled_bytes;
             usage.snapshot_records += snapshot_records;
@@ -84,4 +84,4 @@ class ResourceBudget {
     const std::shared_ptr<Account> account_;
 };
 
-} // namespace nexora::reference
+} // namespace nexora::detail

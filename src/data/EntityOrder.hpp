@@ -58,6 +58,9 @@ class EntityOrder {
     id_view_type ids() const {
         return ids_;
     }
+    GlobalEntityId id_at(std::size_t index) const {
+        return GlobalEntityId{ids_(index)};
+    }
     std::size_t size() const {
         return ids_.extent(0);
     }

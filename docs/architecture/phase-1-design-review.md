@@ -1,6 +1,6 @@
 # Nexora Phase 1：Kokkos 基础与代表性切片评审
 
-修订时间：`2026-11-11T13:29:35+08:00`。**本稿取代原 Phase 1 多 backend 方案。当前已实现 Serial CPU 基础、Reference 同步窗口、P1-04 的 CPU 字段权限与本地传输，以及 Reference 的最小历史恢复和预算。完整 Phase 1 仍开放。**
+修订时间 `2026-11-19T11:40:57+08:00`。**当前已实现 Serial CPU 基础与 Reference 同步窗口，包括字段权限、本地传输、最小历史恢复和预算。P1-07 的 Serial CPU 代表性切片通过审查修复后的回归验收。完整 Phase 1 仍开放。**
 
 唯一架构入口：[overview](overview.md)。关键类型和生命周期：[kokkos-design](kokkos-design.md)。当前源码、旧类型/target 处置及归档逐项映射：[migration-roadmap](migration-roadmap.md)。依赖版本和离线过程：[build-and-validation](build-and-validation.md)。
 
@@ -46,7 +46,17 @@ double 配置的原稿数值门槛不变：`λ=1 s⁻¹, x₀=1, q₀=0, T=1 s`�
 
 必须包含不规则空间分布、不同邻居数、空邻域、长邻域、boundary/ghost 标志及至少一次粒子重排。数据规模包含可人工检查的小例和超出缓存/体现设备带宽的案例；冻结邻域列表、self inclusion、支持半径和对称性约定。测试执行邻域 gather、获准的密度或相互作用阶段以及全局归约；独立 scalar oracle 在测试中计算同一公式，不能成为产品 native CPU 路线。
 
-P1-01 必须从有来源和复用权利的参考公式/数据冻结核函数、参数、精度和误差标准，记录 reference hash。当前仓库没有成熟 SPH 公式可直接宣称已实现，不能由架构修订擅选 WCSPH/IISPH、核函数或新容差。结构门槛先明确：ID 集合/CSR 关系/重排映射精确一致；数值门槛按批准后的 baseline，缺 baseline 的任务保持开放。真实 BASE-001/SPH-001 不因这个切片而关闭。
+`P1-01b` 的 [SPH 一维密度小算例](../../validation/baselines/sph-density-1d-v1.md) 已冻结核函数、输入、精确参考答案、误差判据及 SHA-256。P1-07 按此基准精确核对稳定 ID、CSR 关系和重排，并按精度核对密度与归约。真实 `BASE-001/SPH-001` 继续独立验收。
+
+P1-07 的 [Serial CPU 实现和验证记录](../../validation/sph/serial.md) 包含密度与归约边界、重排和版本失效、快照预算、失败恢复和重放，以及小／大规模端到端与内存计量。CUDA 实机数值和性能仍待验收。
+
+#### 3.2.1 Serial SPH 精简结果
+
+固定 CSR 在初始化时校验每条边是否位于闭支持域内。重排保留邻接关系。M₄ 算子按原 CSR 顺序计算每个 owned 行，单计自身项，ghost 只读。外段用减法余项求 `gap = 2 − |xᵢ − xⱼ|`，先乘质量，再乘三个 gap 因子。举例来说，binary64 下，位置为 2、质量为 1 的 owned 粒子与位置为 `2⁻⁵⁴`、质量为 `2¹⁶⁵` 的 ghost 得到密度 2。直接舍入距离会丢失 ghost 的 `4/3` 贡献。[密度算子](../../src/methods/sph/Density.cpp) · [边界回归](../../tests/methods/sph/sph_tests.cpp)
+
+一次 Kokkos `parallel_reduce` 写入每行的 `real` 密度，并将该值累加到普通 `double` 诊断和。归约结果有限且落在 `real` 的范围内才转换并交给 participant。接近上限时，极小正项可能在加法中舍去，行顺序也可能影响重算能否成功。失败时恢复已提交状态。[Kokkos 归约语义](https://kokkos.org/kokkos-core-wiki/API/core/parallel-dispatch/parallel_reduce.html#semantics)
+
+跨窗口读取持有完整 `Snapshot`，通过数量及按索引取值的接口读取布局和密度。副本共享快照记录与读授权，布局和密度各自持有载荷预算。重排单独预留临时空间；提交时如有读者保留 trial，参与者先为 accepted 密度分配并复制。Serial 四配置及两种精度的基准结果见验证记录。[快照接口](../../src/participants/sph/Participant.hpp) · [Serial 验证](../../validation/sph/serial.md)
 
 ### 3.3 FVM 面通量与单元累积切片
 
@@ -55,7 +65,7 @@ P1-01 必须从有来源和复用权利的参考公式/数据冻结核函数、�
 
 夹具包含非均匀体积、不同每单元面数、内部面和 boundary patch、owner/neighbour，与 cell-face CSR 的双向一致性；两阶段为获准的面通量计算，然后用 Kokkos cell gather/累积验证预算与结果。可用预先规定的 face-flux 数据独立验证累积，但**只拷贝预给通量不足以关闭 face-flux 计算任务**：P1-01 仍须冻结有独立 oracle 的具体标量通量公式/边界方案和误差标准。完整压力–速度耦合、GCL、收敛阶在 P3 另验，不以结构切片冒充完整 FVM 认证。
 
-新增 SPH/FVM baseline 若涉及数值公式、默认值或容差选择，须提交独立数学审批记录；本次文档不授权该选择。已有可用基准则原样迁移。性能样本必须和数值样本使用相同算法约定。
+新增基准若涉及数值公式、默认值或容差选择，须记录独立数学决策。SPH 小算例记录见 §3.2，FVM 基准待定。性能样本必须和数值样本使用相同算法约定。
 
 <a id="acceptance"></a>
 ## 4. 构建、数值、生命周期与性能验收矩阵
@@ -106,7 +116,7 @@ Kokkos 单一路线已定，本表不要求再次确认选型。本次旧 core �
 | 项目 | 本稿提出的具体决定 | 尚需维护者批准/提供 |
 |---|---|---|
 | A1 源码与构建实施包 | 按 P1-01–11 实施；Kokkos 5.2.2 exact commit、C++20、CMake 3.25.2+、Serial 默认；一次切换删除 exec API/导出 | 本次旧容器与 exec 的不兼容删除已获授权；其余范围及仓库外 consumer 的迁移按实际需求确认。无需保留永久旧 facade。 |
-| A2 数值基准 | 保留 §3.1 原 reference 公式/容差；SPH/FVM 按 §3.2/3.3 固定具有权利和独立 oracle 的阶段公式、输入和现有容差 | 确定可使用的真实参考代码/数据及许可证；新公式或容差须独立数学审批。没有这些材料可以先完成通用字段/生命周期工作，但不能关闭 P1-07/08 或完整 P1。 |
+| A2 数值基准 | 保留 §3.1 原 reference 公式与容差。SPH 一维小算例已按 §3.2 固定出处、原创输入、独立答案与容差。 | 按 §3.3 冻结 FVM 阶段公式、输入、独立答案和容差。真实 SPH/DEM 参考来源和复用权利由 `BASE-001` 跟踪。 |
 | A3 实机资源 | CPU Serial 为默认；另验 OpenMP profile；CUDA 需要 Linux/NVIDIA runner，显式架构与匹配 NVCC/host compiler；HIP 留 P6 | 提供可持续使用的 runner、OS、GPU/架构、driver、NVCC/toolkit、host compiler/stdlib 精确配置，按 [首个 CUDA 契约](build-and-validation.md#cuda-build-contract) 锁定并批准；目前均未知，不能用上游最低版本代替实际配置。CPU 可以先交付，完整 P1 CUDA 验收保持开放至取得证据。 |
 | A4 依赖制品与分发 | 独立获取并校验 Kokkos tag/commit/source digest，存入本地 artifact cache；configure 不联网；保留 Apache-2.0 WITH LLVM-exception notices | 确定离线制品保管位置/来源记录；项目自身许可证仍按 ADR-014 单独决策，不阻止本轮设计。 |
 | A5 外部 engine 与高级集成 | 本轮只确定边界，不选择 Chrono/Newton 的生产引擎，不建设 Warp provider | 未来立项时批准具体 engine/formulation/恢复级别及复用权利；不作为 P1 通用基础设施实施的前置。 |

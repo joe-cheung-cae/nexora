@@ -3,11 +3,13 @@ project(NexoraConsumer LANGUAGES CXX)
 
 set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(Nexora 0.1 CONFIG REQUIRED)
-if(TARGET nexora_methods_reference OR TARGET nexora_participants_reference
-   OR TARGET nexora::methods_reference OR TARGET nexora::participants_reference
-   OR TARGET nexora::nexora_methods_reference OR TARGET nexora::nexora_participants_reference)
-    message(FATAL_ERROR "The reference method and participant must remain internal targets")
-endif()
+foreach(internal_target IN ITEMS methods_reference participants_reference methods_sph
+                                 participants_sph sph_tests sph_benchmark)
+    if(TARGET "nexora_${internal_target}" OR TARGET "nexora::${internal_target}"
+       OR TARGET "nexora::nexora_${internal_target}")
+        message(FATAL_ERROR "Internal target is exported: ${internal_target}")
+    endif()
+endforeach()
 foreach(retired_target IN ITEMS nexora_exec_api nexora_exec_cpu nexora::exec_api nexora::exec_cpu)
     if(TARGET "${retired_target}")
         message(FATAL_ERROR "Retired execution target is still exported: ${retired_target}")

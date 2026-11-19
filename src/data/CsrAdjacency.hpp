@@ -16,6 +16,12 @@ class CsrAdjacency {
     index_view_type indices() const {
         return indices_;
     }
+    Offset offset_at(std::size_t row) const {
+        return offsets_(row);
+    }
+    LocalIndex index_at(std::size_t edge) const {
+        return indices_(edge);
+    }
     const EntityOrder& rows() const {
         return rows_;
     }

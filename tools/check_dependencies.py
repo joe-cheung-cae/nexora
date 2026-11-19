@@ -16,6 +16,7 @@ RETIRED_TARGETS = {"nexora_exec_api", "nexora_exec_cpu", "nexora_exec_tests",
 RETIRED_PUBLIC_HEADERS = {"core/ArrayView.hpp", "core/math/Vec.hpp", "core/math/Tensor.hpp",
                           "data/FieldView.hpp"}
 
+SPH_LEAF_LINKS = {"nexora_participants_sph", "nexora_simulation"}
 ALLOWED_LINKS = {
     "nexora_build_options": set(),
     "nexora_core": {"nexora_build_options"},
@@ -26,10 +27,15 @@ ALLOWED_LINKS = {
     "nexora_methods_reference": {"nexora_data", "Kokkos::kokkos"},
     "nexora_participants_reference": {
         "nexora_participant_api", "nexora_methods_reference", "nexora_data"},
+    "nexora_methods_sph": {"nexora_core", "Kokkos::kokkos"},
+    "nexora_participants_sph": {
+        "nexora_participant_api", "nexora_methods_sph", "nexora_data", "Kokkos::kokkos"},
+    "nexora_sph_benchmark": SPH_LEAF_LINKS,
     "nexora": {"nexora_core", "nexora_simulation", "nexora_participants_reference",
                "Kokkos::kokkos", "MPI::MPI_C"},
 }
-TEST_LINKS = set(ALLOWED_LINKS) - {"nexora", "nexora_build_options"}
+TEST_LINKS = set(ALLOWED_LINKS) - {"nexora", "nexora_build_options", "nexora_methods_sph",
+                                   "nexora_participants_sph", "nexora_sph_benchmark"}
 REQUIRED_LINKS = {
     "nexora_data_schema": {"nexora_core"},
     "nexora_data": {"nexora_data_schema", "Kokkos::kokkos"},
@@ -37,6 +43,10 @@ REQUIRED_LINKS = {
     "nexora_methods_reference": {"nexora_data", "Kokkos::kokkos"},
     "nexora_participants_reference": {
         "nexora_participant_api", "nexora_methods_reference", "nexora_data"},
+    "nexora_methods_sph": ALLOWED_LINKS["nexora_methods_sph"],
+    "nexora_participants_sph": ALLOWED_LINKS["nexora_participants_sph"],
+    "nexora_sph_tests": SPH_LEAF_LINKS,
+    "nexora_sph_benchmark": SPH_LEAF_LINKS,
     "nexora": {"nexora_core", "nexora_simulation", "nexora_participants_reference", "Kokkos::kokkos"},
     "nexora_entity_topology_tests": {"nexora_data"},
     "nexora_structure_reorder_tests": {"nexora_participants_reference", "nexora_data"},
@@ -60,6 +70,7 @@ SPECIAL_TEST_LINKS = {
     "nexora_reference_transport_tests": {"nexora_participants_reference", "nexora_simulation"},
     "nexora_reference_resource_tests": {"nexora_participants_reference", "nexora_simulation"},
     "nexora_reference_cli_oracle": {"nexora_participants_reference", "nexora_simulation"},
+    "nexora_sph_tests": SPH_LEAF_LINKS,
     "nexora_transport_tests": {"nexora_data"},
     "nexora_transport_receive_tests": {"nexora_data"},
 }
@@ -93,6 +104,18 @@ REFERENCE_CASE_HEADER = Path("apps/nexora/ReferenceCase.hpp")
 REFERENCE_COMMAND_SOURCE = Path("apps/nexora/ReferenceCommand.cpp")
 REFERENCE_ASSEMBLY_SOURCES = {REFERENCE_CASE_HEADER, REFERENCE_CASE_HEADER.with_suffix(".cpp"),
                               REFERENCE_COMMAND_SOURCE}
+SPH_METHOD_DIR = ("src", "methods", "sph")
+SPH_PARTICIPANT_DIR = ("src", "participants", "sph")
+RESOURCE_BUDGET_HEADER = "participants/ResourceBudget.hpp"
+RESOURCE_BUDGET_CONSUMERS = {
+    Path("src/participants/reference/Participant.hpp"),
+    Path(*SPH_PARTICIPANT_DIR) / "Participant.hpp",
+}
+SPH_LEAF_SOURCES = {
+    "nexora_sph_tests": Path("tests/methods/sph/sph_tests.cpp"),
+    "nexora_sph_benchmark": Path("benchmarks/sph/sph_benchmark.cpp"),
+}
+SPH_FIXTURE_HEADER = "sph_fixture.hpp"
 PRIVATE_DATA_HEADERS = {
     "FieldIssuer.hpp": {STRUCTURE_FIXTURE, BINDING_TEST, FIELD_GROUP_TEST,
                         TRANSPORT_TEST, RECEIVE_TEST, REFERENCE_TRANSPORT_TEST},
@@ -128,13 +151,15 @@ def check_link_policy(name: str, links: list[str]) -> list[str]:
 
 
 def check_kokkos_header(relative: Path, scope: str, module: str, header: str) -> list[str]:
-    """Keep Kokkos headers at approved data, method, test, and CLI boundaries."""
+    """Keep Kokkos headers at approved numerical, validation, and CLI boundaries."""
     header_name = header.replace("\\", "/").split("/")[-1]
     if not KOKKOS_HEADER.fullmatch(header_name):
         return []
     if ((scope == "include/nexora" and module == "data")
             or (scope == "src" and module == "data")
             or (scope == "src" and relative.parts[:3] == ("src", "methods", "reference"))
+            or relative.parts[:3] in {SPH_METHOD_DIR, SPH_PARTICIPANT_DIR}
+            or relative in SPH_LEAF_SOURCES.values()
             or relative in STRUCTURE_STATE_SOURCES
             or (scope == "tests" and relative.parts[:2] in {
                 ("tests", "kokkos"), ("tests", "reference")})
@@ -143,19 +168,30 @@ def check_kokkos_header(relative: Path, scope: str, module: str, header: str) ->
                             BINDING_TEST, TRANSPORT_TEST, RECEIVE_TEST}
             or (scope == "apps" and module == "nexora")):
         return []
-    return [f"{relative}: Kokkos header {header} is outside an approved data/method/test/CLI boundary"]
+    return [f"{relative}: Kokkos header {header} is outside an approved numerical, validation, or CLI boundary"]
 
 
 def check_internal_include(relative: Path, scope: str, header: str) -> list[str]:
     """Enforce downward use of implementation-only headers."""
-    parts = header.replace("\\", "/").split("/")
+    parts = [part for part in header.replace("\\", "/").split("/") if part not in {"", "."}]
+    if not parts:
+        return []
     location = relative.parts
     if parts[-1] == STRUCTURE_FIXTURE.name:
         if relative in STRUCTURE_FIXTURE_CONSUMERS:
             return []
         return [f"{relative}: {header} is private to the structure test and measurement"]
+    if parts[-1] == SPH_FIXTURE_HEADER:
+        if relative in SPH_LEAF_SOURCES.values():
+            return []
+        return [f"{relative}: {header} is private to the SPH test and benchmark"]
+    if parts[-1] == "ResourceBudget.hpp":
+        if "/".join(parts) == RESOURCE_BUDGET_HEADER and relative in RESOURCE_BUDGET_CONSUMERS:
+            return []
+        return [f"{relative}: {header} is private to the Reference and SPH participants"]
     if parts[-1] in PRIVATE_ENTITY_HEADERS:
         if (location[:2] == ("src", "data") or relative in STRUCTURE_STATE_SOURCES
+                or location[:3] == SPH_PARTICIPANT_DIR
                 or relative in {STRUCTURE_FIXTURE, ENTITY_TOPOLOGY_TEST}):
             return []
         return [f"{relative}: {header} is private to data and the approved structure boundaries"]
@@ -167,8 +203,13 @@ def check_internal_include(relative: Path, scope: str, header: str) -> list[str]
 
     if parts[0] not in {"methods", "participants"}:
         return []
-    if len(parts) < 3 or parts[1] != "reference":
-        return [f"{relative}: internal reference include {header} is not a known module path"]
+    if len(parts) < 3 or parts[1] not in {"reference", "sph"}:
+        return [f"{relative}: internal include {header} is not a known module path"]
+    if parts[1] == "sph":
+        if (location[:3] == SPH_PARTICIPANT_DIR or relative in SPH_LEAF_SOURCES.values()
+                or (parts[0] == "methods" and location[:3] == SPH_METHOD_DIR)):
+            return []
+        return [f"{relative}: forbidden internal include {header} from this module"]
 
     in_method = scope == "src" and location[:3] == ("src", "methods", "reference")
     in_participant = scope == "src" and location[:3] == ("src", "participants", "reference")
@@ -249,6 +290,11 @@ def policy_self_test() -> list[str]:
         ("nexora_participant_api", ["nexora_data_schema"]),
         ("nexora_participants_reference",
          ["nexora_participant_api", "nexora_methods_reference", "nexora_data"]),
+        ("nexora_methods_sph", ["nexora_core", "Kokkos::kokkos"]),
+        ("nexora_participants_sph",
+         ["nexora_participant_api", "nexora_methods_sph", "nexora_data", "Kokkos::kokkos"]),
+        ("nexora_sph_tests", ["nexora_participants_sph", "nexora_simulation"]),
+        ("nexora_sph_benchmark", ["nexora_participants_sph", "nexora_simulation"]),
         ("nexora", ["nexora_core", "nexora_simulation", "nexora_participants_reference", "Kokkos::kokkos"]),
         ("nexora_entity_topology_tests", ["nexora_data"]),
         ("nexora_structure_reorder_tests", ["nexora_participants_reference", "nexora_data"]),
@@ -276,6 +322,14 @@ def policy_self_test() -> list[str]:
         failures.append("checker self-test failed to allow the CLI's optional MPI diagnostic")
     if not check_link_policy("nexora", cli_links + ["nexora_methods_reference"]):
         failures.append("checker self-test failed to reject a direct CLI method target dependency")
+    for target in ("nexora_methods_sph", "nexora_participants_sph", "nexora_sph_benchmark"):
+        if not check_link_policy("nexora", cli_links + [target]):
+            failures.append(f"checker self-test failed to reject a CLI dependency on {target}")
+        if not check_link_policy("nexora_core_tests", [target]):
+            failures.append(f"checker self-test failed to reject an unrelated test dependency on {target}")
+    for target in SPH_LEAF_SOURCES:
+        if not check_link_policy(target, sorted(SPH_LEAF_LINKS | {"nexora_data"})):
+            failures.append(f"checker self-test failed to reject extra dependencies for {target}")
     if check_link_policy("nexora_methods_reference", ["nexora_data", "Kokkos::kokkos"]):
         failures.append("checker self-test failed to allow reference-method dependencies")
     if not check_link_policy("nexora_methods_reference", ["nexora_data", "Kokkos::kokkos", "nexora_participant_api"]):
@@ -354,11 +408,13 @@ def policy_self_test() -> list[str]:
     for header in PRIVATE_ENTITY_HEADERS:
         for path, scope in ((Path("src/data/TransportReceiver.hpp"), "src"),
                             (STRUCTURE_STATE, "src"),
+                            (Path("src/participants/sph/Participant.hpp"), "src"),
                             (ENTITY_TOPOLOGY_TEST, "tests"), (STRUCTURE_FIXTURE, "tests")):
             if check_internal_include(path, scope, f"data/{header}"):
                 failures.append(f"checker self-test failed to allow {header} in {path}")
         for path, scope in ((Path("include/nexora/data/FieldBinding.hpp"), "include/nexora"),
                             (Path("src/methods/reference/State.hpp"), "src"),
+                            (Path("src/methods/sph/Density.hpp"), "src"),
                             (Path("src/participants/reference/Participant.cpp"), "src"),
                             (RECEIVE_TEST, "tests")):
             if not check_internal_include(path, scope, f"data/{header}"):
@@ -375,12 +431,14 @@ def policy_self_test() -> list[str]:
     for path in sorted({STRUCTURE_FIXTURE, *STRUCTURE_FIXTURE_CONSUMERS}):
         if not check_internal_include(path, "tests", "methods/reference/State.hpp"):
             failures.append(f"checker self-test failed to keep method state out of {path}")
-    budget_header = "participants/reference/ResourceBudget.hpp"
-    if check_internal_include(Path("src/participants/reference/Participant.hpp"), "src", budget_header):
-        failures.append("checker self-test failed to allow the reference participant's budget")
-    if not check_internal_include(Path("include/nexora/data/TransportView.hpp"), "include/nexora",
-                                  budget_header):
-        failures.append("checker self-test failed to reject the reference budget in public data headers")
+    for path in sorted(RESOURCE_BUDGET_CONSUMERS):
+        if check_internal_include(path, "src", RESOURCE_BUDGET_HEADER):
+            failures.append(f"checker self-test failed to allow the participant budget in {path}")
+    for path, scope in ((Path("include/nexora/data/TransportView.hpp"), "include/nexora"),
+                        (Path("src/methods/sph/Density.hpp"), "src"),
+                        (REFERENCE_COMMAND_SOURCE, "apps")):
+        if not check_internal_include(path, scope, RESOURCE_BUDGET_HEADER):
+            failures.append(f"checker self-test failed to reject the participant budget in {path}")
     if not check_kokkos_header(Path("include/nexora/core/Status.hpp"),
                                "include/nexora", "core", "Kokkos_Core.hpp"):
         failures.append("checker self-test failed to reject Kokkos in core headers")
@@ -403,15 +461,33 @@ def policy_self_test() -> list[str]:
             failures.append(f"checker self-test failed to keep method state out of {path}")
     if not check_internal_include(Path("apps/nexora/main.cpp"), "apps", header):
         failures.append("checker self-test failed to restrict the CLI entry point from Participant.hpp")
-    if not check_internal_include(REFERENCE_COMMAND_SOURCE, "apps",
-                                  "participants/reference/ResourceBudget.hpp"):
-        failures.append("checker self-test failed to keep direct budget access out of the CLI")
     if not check_internal_include(Path("src/core/Time.hpp"),
                                   "src", "methods/reference/State.hpp"):
         failures.append("checker self-test failed to reject core use of method internals")
     if check_internal_include(Path("tests/reference/reference_tests.cpp"),
                               "tests", "methods/reference/State.hpp"):
         failures.append("checker self-test failed to allow reference tests to include internals")
+    sph_method = Path("src/methods/sph/Density.hpp")
+    sph_participant = Path("src/participants/sph/Participant.hpp")
+    for path in (sph_method, sph_participant, *SPH_LEAF_SOURCES.values()):
+        scope = path.parts[0]
+        if check_kokkos_header(path, scope, path.parts[1], "Kokkos_Core.hpp"):
+            failures.append(f"checker self-test failed to allow Kokkos in {path}")
+        if check_internal_include(path, scope, "methods/sph/Density.hpp"):
+            failures.append(f"checker self-test failed to allow the SPH method in {path}")
+    for path in (sph_method, REFERENCE_COMMAND_SOURCE, Path("tests/reference/reference_tests.cpp")):
+        if not check_internal_include(path, path.parts[0], "participants/sph/Participant.hpp"):
+            failures.append(f"checker self-test failed to reject the SPH participant in {path}")
+    if not check_internal_include(REFERENCE_COMMAND_SOURCE, "apps", "./methods/sph/Density.hpp"):
+        failures.append("checker self-test failed to reject an alternate SPH method include in the CLI")
+    for path in (sph_participant, *SPH_LEAF_SOURCES.values()):
+        if check_internal_include(path, path.parts[0], "participants/sph/Participant.hpp"):
+            failures.append(f"checker self-test failed to allow the SPH participant in {path}")
+    for path in SPH_LEAF_SOURCES.values():
+        if check_internal_include(path, path.parts[0], SPH_FIXTURE_HEADER):
+            failures.append(f"checker self-test failed to allow the SPH fixture in {path}")
+    if not check_internal_include(sph_participant, "src", SPH_FIXTURE_HEADER):
+        failures.append("checker self-test failed to keep SPH fixtures out of production source")
     return failures
 
 
@@ -423,6 +499,8 @@ def check_graph(path: Path) -> list[str]:
 
     if not isinstance(graph, dict) or not isinstance(graph.get("targets"), list):
         return ["target graph must contain a 'targets' array"]
+    if not isinstance(graph.get("testing_enabled"), bool):
+        return ["target graph must contain a boolean 'testing_enabled' setting"]
     errors: list[str] = []
     seen: set[str] = set()
     for target in graph["targets"]:
@@ -435,6 +513,8 @@ def check_graph(path: Path) -> list[str]:
         if name not in ALLOWED_LINKS and not is_test:
             errors.append(f"unclassified in-tree target '{name}'")
             continue
+        if name in SPH_LEAF_SOURCES and source_dir != SPH_LEAF_SOURCES[name].parent.as_posix():
+            errors.append(f"{name}: unexpected source directory {source_dir!r}")
         seen.add(name)
         links = target.get("links")
         if not isinstance(links, list) or any(not isinstance(link, str) for link in links):
@@ -442,21 +522,26 @@ def check_graph(path: Path) -> list[str]:
             continue
         errors.extend(check_link_policy(name, links))
 
-    errors.extend(f"target graph is missing '{name}'" for name in sorted(ALLOWED_LINKS.keys() - seen))
+    required_targets = set(ALLOWED_LINKS)
+    if graph["testing_enabled"]:
+        required_targets.add("nexora_sph_tests")
+    errors.extend(f"target graph is missing '{name}'" for name in sorted(required_targets - seen))
     return errors
 
 
 def check_includes() -> list[str]:
     errors: list[str] = []
-    for scope in ("include/nexora", "src", "apps", "tests"):
+    for scope in ("include/nexora", "src", "apps", "tests", "benchmarks"):
         for path in sorted((ROOT / scope).rglob("*")):
             if path.suffix not in SOURCE_SUFFIXES or not path.is_file():
                 continue
             relative = path.relative_to(ROOT)
             below_scope = path.relative_to(ROOT / scope)
             module = public_module(below_scope.parts) if scope == "include/nexora" else below_scope.parts[0]
-            if scope in {"apps", "tests"}:
+            if scope in {"apps", "tests", "benchmarks"}:
                 allowed = set(ALLOWED_INCLUDES)
+            elif relative.parts[:3] == SPH_METHOD_DIR:
+                allowed = ALLOWED_INCLUDES["core"]
             elif module in SOURCE_MODULE_INCLUDES:
                 allowed = SOURCE_MODULE_INCLUDES[module]
             else:
