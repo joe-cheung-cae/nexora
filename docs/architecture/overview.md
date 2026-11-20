@@ -1,6 +1,6 @@
 # Nexora 当前架构入口
 
-修订时间 `2026-11-19T11:40:57+08:00`。**这是唯一有效的架构入口。Kokkos Serial CPU 基础、参考状态生命周期、P1-04 CPU 字段访问与本地传输以及 P1-07 Serial SPH 代表性切片已实现。完整 Phase 1 仍开放。**
+修订时间 `2026-11-20T13:45:00+08:00`。**这是唯一有效的架构入口。Kokkos Serial CPU 已实现参考状态生命周期、P1-04 字段访问与本地传输、P1-07 SPH 代表性切片，以及三维 WCSPH 的密度、压力、Velocity Verlet、恒定重力与 Adami 固定壁。完整 Phase 1 仍开放。**
 
 ## 1. 决策与文档效力
 
@@ -41,6 +41,8 @@ Nexora 自有数值计算和存储统一使用 Kokkos，包括默认 CPU、可�
 Reference 的同步窗口同时推进主状态、replay history 和控制序列，按试算 stamp 检查诊断缓存。旧快照与独立 packed 消费者保留各自的预算记录，最后一个持有者完成时回收额度。见 [进程内恢复与资源预算](reference-resource-validation.md)。
 
 P1-07 的内部 Serial SPH 切片在既有 Simulation 窗口上运行固定 CSR 的一维 M₄ 密度与 owned 归约。逐行输出与普通 double 归约共享一次遍历。具体 participant 负责 stable ID、字段授权、行列重排和结果发布，跨窗口读者持有完整快照。四种构建配置的数值复验与 Release 端到端计量见 [SPH Serial 验证](../../validation/sph/serial.md)。
+
+私有 `sph::Participant3D` 提供外供终点字段和内部时间积分两种窗口模式。前者可计算密度或 WCSPH 压力。后者接收全 owned 的流体初态和速度，可另供固定壁粒子与恒定重力。推进时另供输入流体顺序的初始密度，每个接受步按稳定 ID 携带密度、位置和速度。积分模式通过 `WcsphVerletParameters::smoothing_length` 为每个算例指定统一且固定的三维平滑长度，默认 1 m。格宽和核支持半径均为 `2h`，密度求和、压力加速度和声学 CFL 共享该长度。漂移后按格归属复用或重建 `cellBegin`，在旧状态和新位置的预测速度上分别求连续性方程右端，以梯形公式更新密度，再计算 Tait 表压、Adami 湿壁状态和流体压力加速度。无显式初始密度的 Verlet 重载仅提供初态核求和诊断。Velocity Verlet 的两次半步均使用压力加速度与重力之和，步长上限来自已提交速度的声学 CFL。流体位置、速度和力学字段一起提交，回滚保留原状态、时钟与 CFL 上限。[格索引](../../validation/sph/cell-begin-serial.md#simulation-window) · [压力](../../validation/sph/wcsph-pressure-serial.md) · [多步时间积分](../../validation/sph/wcsph-verlet-serial.md) · [固定壁与历史轨迹对照](../../validation/sph/adami-hydrostatic-serial.md) · [物理质量静水初态验收](../../validation/sph/hydrostatic-initial-resolution.md) · [原核求和轨迹](../../validation/sph/hydrostatic-trajectory-resolution.md) · [连续性密度与壁层验证](../../validation/sph/hydrostatic-continuity-repair.md)
 
 CLI 的 `validate`、`plan` 和 `run` 共用版本化 Reference case 预检。`run` 装配现有 `Simulation` 与内部 Reference participant，并发布可核对的 accepted 数值摘要。 [case 格式与验证](reference-case.md)
 
