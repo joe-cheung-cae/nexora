@@ -276,13 +276,24 @@ TimeConstraint Participant3D::time_constraint(double) const {
 
 Snapshot3D Participant3D::compute(std::shared_ptr<const Geometry3D> geometry, FieldStamp stamp,
                                   const Velocity3D::const_type& input_velocity, double dt,
-                                  const Values::const_type* owned_density) const {
+                                  const Values::const_type* owned_density,
+                                  IntegrationWorkspace* finished_continuity) const {
     stamp.topology = geometry->topology;
     stamp.geometry = geometry->geometry;
     stamp.layout = geometry->layout;
     const auto rows = geometry->grid.owned_slots().extent(0);
-    auto ticket = require(budget_.reserve(
-        field_bytes(rows, pressure_parameters_.has_value(), verlet_cfl_.has_value())));
+    const auto reserve = [&](std::size_t bytes) {
+        auto reservation = budget_.reserve(bytes);
+        if (!reservation.ok() && finished_continuity && finished_continuity->stage) {
+            // The two rates, row mapping and stage velocity have had their last read.
+            finished_continuity->continuity.reset();
+            finished_continuity->stage.reset();
+            reservation = budget_.reserve(bytes);
+        }
+        return require(std::move(reservation));
+    };
+    auto ticket =
+        reserve(field_bytes(rows, pressure_parameters_.has_value(), verlet_cfl_.has_value()));
     auto density = allocate<Values>(*exec_, "sph.participant3d.density", rows);
     {
         auto write = write_field(density, density_field(FieldAccess::overwrite), stamp);
@@ -314,8 +325,7 @@ Snapshot3D Participant3D::compute(std::shared_ptr<const Geometry3D> geometry, Fi
                 const auto sources = geometry->grid.fields().ids.extent(0);
                 const auto bytes =
                     pressure_workspace_bytes_per_source(sources != rows, fixed_walls_.has_value());
-                workspace =
-                    require(budget_.reserve(require(detail::checked_array_bytes(sources, bytes))));
+                workspace = reserve(require(detail::checked_array_bytes(sources, bytes)));
             }
             auto pressure_write =
                 write_field(pressure, pressure_field(FieldAccess::overwrite), stamp);
@@ -380,15 +390,23 @@ Snapshot3D Participant3D::compute(std::shared_ptr<const Geometry3D> geometry, Fi
     return result;
 }
 
-Snapshot3D Participant3D::integrate(FieldStamp stamp, double dt) const {
+Snapshot3D Participant3D::integrate(FieldStamp stamp, double dt) {
+    // Hold scratch locally until the trial succeeds, so failures release its budget.
+    auto work = std::exchange(integration_workspace_, {});
     const auto& before = accepted_->geometry_->grid;
     const auto sources = before.fields().ids.extent(0);
-    const auto bytes = require(detail::checked_array_bytes(sources, 3 * sizeof(real)));
-    const auto half_velocity_ticket = require(budget_.reserve(bytes));
-    auto half_velocity = allocate<Velocity3D>(*exec_, "sph.verlet.half_velocity", sources);
+    const auto source_vector = [&](const char* label) {
+        return IntegrationWorkspace::Buffer<Velocity3D>{
+            require(budget_.reserve(require(detail::checked_array_bytes(sources, 3 * sizeof(real))))),
+            allocate<Velocity3D>(*exec_, label, sources)};
+    };
+    if (!work.half_velocity)
+        work.half_velocity.emplace(source_vector("sph.verlet.half_velocity"));
+    if (!work.stage)
+        work.stage.emplace(source_vector("sph.verlet.stage"));
+    const auto& half_velocity = work.half_velocity->values;
     auto geometry = [&] {
-        const auto position_ticket = require(budget_.reserve(bytes));
-        auto position = allocate<Velocity3D>(*exec_, "sph.verlet.stage_position", sources);
+        const auto& position = work.stage->values;
         const auto& fields = *accepted_->fields_;
         const auto kicked = kick_drift_3d(*exec_, before, fields.velocity->view(),
                                           fields.pressure->acceleration.view(), dt, position,
@@ -404,19 +422,29 @@ Snapshot3D Participant3D::integrate(FieldStamp stamp, double dt) const {
     const auto old_owned = before.owned_slots();
     const auto new_owned = refreshed.owned_slots();
     const auto rows = old_owned.extent(0);
-    const auto corrected_ticket = require(budget_.reserve(
-        require(detail::checked_array_bytes(rows, sizeof(real)))));
-    const auto corrected = allocate<Values>(*exec_, "sph.continuity.density", rows);
+    // Each successful grid path has finished gathering independent packed positions.
+    // Continuity can now use the same source buffer for velocity.
+    if (!work.corrected) {
+        work.corrected.emplace(IntegrationWorkspace::Buffer<Values>{
+            require(budget_.reserve(require(detail::checked_array_bytes(rows, sizeof(real))))),
+            allocate<Values>(*exec_, "sph.continuity.density", rows)});
+    }
+    const auto& corrected = work.corrected->values;
     {
-        const auto source_ticket = require(budget_.reserve(require(detail::checked_array_bytes(
-            sources, 3 * sizeof(real) + sizeof(LocalIndex)))));
-        const auto rate_ticket = require(budget_.reserve(require(detail::checked_array_bytes(
-            rows, 2 * sizeof(double)))));
-        const auto velocity = allocate<Velocity3D>(*exec_, "sph.continuity.stage_velocity", sources);
-        const auto old_row = allocate<CellGrid::Indices::non_const_type>(
-            *exec_, "sph.continuity.old_row", sources);
-        const auto rate_n = allocate<DensityRate3D>(*exec_, "sph.continuity.accepted_rate", rows);
-        const auto rate_star = allocate<DensityRate3D>(*exec_, "sph.continuity.predicted_rate", rows);
+        if (!work.continuity) {
+            work.continuity.emplace(IntegrationWorkspace::Continuity{
+                require(budget_.reserve(
+                    require(detail::checked_array_bytes(sources, sizeof(LocalIndex))))),
+                require(budget_.reserve(
+                    require(detail::checked_array_bytes(rows, 2 * sizeof(double))))),
+                allocate<CellGrid::Indices::non_const_type>(*exec_, "sph.continuity.old_row", sources),
+                allocate<DensityRate3D>(*exec_, "sph.continuity.accepted_rate", rows),
+                allocate<DensityRate3D>(*exec_, "sph.continuity.predicted_rate", rows)});
+        }
+        const auto& velocity = work.stage->values;
+        const auto& old_row = work.continuity->old_row;
+        const auto& rate_n = work.continuity->rate_n;
+        const auto& rate_star = work.continuity->rate_star;
         const auto v = accepted_->fields_->velocity->view();
         const auto rho = accepted_->fields_->density.view();
         const auto acceleration = accepted_->fields_->pressure->acceleration.view();
@@ -471,7 +499,9 @@ Snapshot3D Participant3D::integrate(FieldStamp stamp, double dt) const {
             throw Failure{{StatusCode::numerical_failure, "invalid corrected WCSPH density"}};
     }
     const Values::const_type completed = corrected;
-    return compute(std::move(geometry), stamp, half_velocity, dt, &completed);
+    auto result = compute(std::move(geometry), stamp, half_velocity, dt, &completed, &work);
+    integration_workspace_ = std::move(work);
+    return result;
 }
 
 Status Participant3D::initialize(double time) {
@@ -626,8 +656,13 @@ Status Participant3D::prepare_commit(const TimeInterval& interval) {
             trial_->fields_.reset();
         } else {
             // A retained trial keeps every allocation, binding and stamp.
-            ticket = require(
-                budget_.reserve(field_bytes(density.extent(0), has_pressure, has_velocity)));
+            const auto bytes = field_bytes(density.extent(0), has_pressure, has_velocity);
+            auto reservation = budget_.reserve(bytes);
+            if (!reservation.ok() && integration_workspace_.half_velocity) {
+                integration_workspace_ = {};
+                reservation = budget_.reserve(bytes);
+            }
+            ticket = require(std::move(reservation));
             density = copy_field(*exec_, density, "sph.participant3d.accepted_density");
             if (has_pressure) {
                 pressure = copy_field(*exec_, pressure, "sph.participant3d.accepted_pressure");
@@ -682,6 +717,7 @@ Status Participant3D::finalize() {
     initial_velocity_ = {};
     initial_density_.reset();
     fixed_walls_.reset();
+    integration_workspace_ = {};
     exec_.reset();
     stage_ = Stage::finalized;
     return {};

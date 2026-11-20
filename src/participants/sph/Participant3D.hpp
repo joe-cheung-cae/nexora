@@ -123,10 +123,26 @@ class Participant3D final : public ParticipantIF {
         failed,
         finalized
     };
+    struct IntegrationWorkspace {
+        template <class View> struct Buffer {
+            detail::ResourceBudget::Ticket reservation;
+            View values;
+        };
+        struct Continuity {
+            detail::ResourceBudget::Ticket source_rows, rates;
+            CellGrid::Indices::non_const_type old_row;
+            DensityRate3D rate_n, rate_star;
+        };
+
+        std::optional<Buffer<Velocity3D>> half_velocity, stage;
+        std::optional<Buffer<Values>> corrected;
+        std::optional<Continuity> continuity;
+    };
     Snapshot3D compute(std::shared_ptr<const Geometry3D> geometry, FieldStamp stamp,
                        const Velocity3D::const_type& input_velocity = {}, double dt = 0,
-                       const Values::const_type* owned_density = nullptr) const;
-    Snapshot3D integrate(FieldStamp stamp, double dt) const;
+                       const Values::const_type* owned_density = nullptr,
+                       IntegrationWorkspace* finished_continuity = nullptr) const;
+    Snapshot3D integrate(FieldStamp stamp, double dt);
     Result<Snapshot3D> issue(const Snapshot3D&) const;
     bool matches(const TimeInterval& interval) const;
     void close_window() noexcept;
@@ -143,6 +159,7 @@ class Participant3D final : public ParticipantIF {
     Velocity3D::const_type initial_velocity_;
     std::optional<Values::const_type> initial_density_;
     std::optional<Kokkos::Serial> exec_;
+    IntegrationWorkspace integration_workspace_;
     std::optional<StagedFields3D> staged_;
     std::optional<Snapshot3D> accepted_, trial_, pending_;
     Stage stage_ = Stage::created;

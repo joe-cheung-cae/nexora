@@ -398,6 +398,151 @@ TEST(SphVerletWindow, OwnsInitialBuffersDuringBallisticStep) {
     ASSERT_TRUE(simulation.finalize().ok());
 }
 
+TEST(SphVerletWindow, ReusedWorkspaceIsReleasedWithoutInvalidatingRetainedSnapshot) {
+    const sph::WcsphVerletParameters parameters{{1, .5, 3}, .5};
+    const Trajectory initial{{{{.25, .5, .75}, 1, 11, 0}}, {{11, {0, 0, 0}}}};
+    Fields fields(initial.particles);
+    sph::Participant3D participant(fields.get(), 1, parameters, input_velocity(initial),
+                                   seed_density(initial.particles));
+    Simulation simulation(participant);
+    ASSERT_TRUE(simulation.initialize().ok());
+    ASSERT_TRUE(simulation.prepare().ok());
+    const auto accepted_bytes = participant.resource_usage().controlled_bytes;
+    ASSERT_TRUE(simulation.advance(.125).ok());
+    const auto warmed_bytes = participant.resource_usage().controlled_bytes;
+    EXPECT_GT(warmed_bytes, accepted_bytes);
+    for (int step = 0; step < 3; ++step) {
+        ASSERT_TRUE(simulation.advance(.125).ok());
+        EXPECT_EQ(participant.resource_usage().controlled_bytes, warmed_bytes);
+    }
+    {
+        const auto held = checked(participant.snapshot());
+        ASSERT_TRUE(simulation.finalize().ok());
+        // Only the published geometry/fields remain pinned by the reader. Private
+        // integration workspace must end with the participant's execution lifetime.
+        EXPECT_EQ(participant.resource_usage().controlled_bytes, accepted_bytes);
+        EXPECT_EQ(participant.resource_usage().snapshot_records, 1u);
+        ASSERT_NO_FATAL_FAILURE(check_trajectory(held, initial, parameters.eos, 4));
+    }
+    EXPECT_EQ(participant.resource_usage().controlled_bytes, 0u);
+    EXPECT_EQ(participant.resource_usage().snapshot_records, 0u);
+}
+
+TEST(SphVerletWindow, WorkspaceBudgetPressurePreservesHistoricalStepCapacity) {
+    const sph::WcsphVerletParameters parameters{{.375, .5, 3}, .5};
+    const Trajectory initial{{{{.25, .5, .75}, 1, 11, 0}, {{1.25, .5, .75}, .75, 22, 0}},
+                             {{11, {.125, 0, 0}}, {22, {-.125, 0, 0}}}};
+    Fields fields(initial.particles);
+    const auto velocity = input_velocity(initial);
+    const auto density = seed_density(initial.particles);
+    const auto count = initial.particles.size();
+    constexpr double dt = .125;
+    std::size_t accepted_bytes{};
+    {
+        sph::Participant3D baseline(fields.get(), 1, parameters, velocity, density);
+        ASSERT_TRUE(baseline.initialize(0).ok());
+        accepted_bytes = baseline.resource_usage().controlled_bytes;
+        ASSERT_TRUE(baseline.finalize().ok());
+    }
+    // There is room for one scratch vector. A failed step must release its
+    // allocations and preserve the original publication.
+    {
+        const auto insufficient = accepted_bytes + count * 3 * sizeof(real);
+        sph::Participant3D limited(fields.get(), 1, parameters, velocity, density, ParticipantId{1},
+                                   {32, insufficient});
+        Simulation simulation(limited);
+        ASSERT_TRUE(simulation.initialize().ok());
+        ASSERT_TRUE(simulation.prepare().ok());
+        const auto held = checked(limited.snapshot());
+        const auto bound = limited.time_constraint(0).maximum_step;
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            EXPECT_EQ(simulation.advance(dt).code(), StatusCode::resource_exhausted);
+            EXPECT_EQ(simulation.state(), SimulationState::prepared);
+            EXPECT_EQ(simulation.time().accepted_steps, 0u);
+            EXPECT_EQ(simulation.time().accepted_time, 0);
+            EXPECT_EQ(limited.time_constraint(0).maximum_step, bound);
+            EXPECT_EQ(limited.resource_usage().controlled_bytes, accepted_bytes);
+            EXPECT_EQ(checked(limited.snapshot()).stamp, held.stamp);
+        }
+        ASSERT_NO_FATAL_FAILURE(check_trajectory(held, initial, parameters.eos, 0));
+        ASSERT_TRUE(simulation.finalize().ok());
+    }
+    // Both particles stay in one cell, so the grid index is shared across the
+    // step. At pressure evaluation the original implementation needed the half
+    // velocity (3), new geometry (4), corrected density (1), output fields (8),
+    // and the pressure method's workspace per particle.
+    const auto trial_bytes = 16 * sizeof(real) + sph::pressure_workspace_bytes_per_source(false);
+    const auto limit = accepted_bytes + count * trial_bytes;
+    sph::Participant3D participant(fields.get(), 1, parameters, velocity, density,
+                                   ParticipantId{1}, {32, limit});
+    Simulation simulation(participant);
+    ASSERT_TRUE(simulation.initialize().ok());
+    ASSERT_TRUE(simulation.prepare().ok());
+
+    {
+        const auto accepted = checked(participant.snapshot());
+        ASSERT_TRUE(simulation.begin_window(dt).ok());
+        ASSERT_TRUE(simulation.advance_trial().ok());
+        const auto trial_stamp = checked(participant.trial_stamp());
+        const auto trial = checked(participant.trial_snapshot(trial_stamp));
+        ASSERT_TRUE(simulation.restore_window().ok());
+        EXPECT_EQ(simulation.time().accepted_steps, 0u);
+        EXPECT_EQ(checked(participant.snapshot()).stamp, accepted.stamp);
+        EXPECT_FALSE(participant.trial_snapshot(trial_stamp).ok());
+        const auto endpoint = explicit_verlet(initial, parameters.eos, dt);
+        ASSERT_NO_FATAL_FAILURE(check_trajectory(trial, endpoint, parameters.eos, 1));
+    }
+
+    auto expected = initial;
+    for (int step = 1; step <= 3; ++step) {
+        expected = explicit_verlet(expected, parameters.eos, dt);
+        ASSERT_TRUE(simulation.advance(dt).ok());
+        EXPECT_LE(participant.resource_usage().controlled_bytes, limit);
+        ASSERT_NO_FATAL_FAILURE(
+            check_trajectory(checked(participant.snapshot()), expected, parameters.eos, step));
+    }
+    ASSERT_TRUE(simulation.finalize().ok());
+    EXPECT_EQ(participant.resource_usage().controlled_bytes, 0u);
+    EXPECT_EQ(participant.resource_usage().snapshot_records, 0u);
+}
+
+TEST(SphVerletWindow, RetainedTrialCanCommitWithinWorkspaceBudget) {
+    const sph::WcsphVerletParameters parameters{{1, .5, 3}, .5};
+    const Trajectory initial{{{{.25, .5, .75}, 1, 11, 0}}, {{11, {0, 0, 0}}}};
+    Fields fields(initial.particles);
+    const auto velocity = input_velocity(initial);
+    const auto density = seed_density(initial.particles);
+    std::size_t accepted_bytes{};
+    {
+        sph::Participant3D baseline(fields.get(), 1, parameters, velocity, density);
+        ASSERT_TRUE(baseline.initialize(0).ok());
+        accepted_bytes = baseline.resource_usage().controlled_bytes;
+        ASSERT_TRUE(baseline.finalize().ok());
+    }
+    // Allow the old accepted state, new geometry (4 scalars), and two new field
+    // banks (8 scalars each) so a reader can keep the trial across publication.
+    const auto limit = accepted_bytes + 20 * sizeof(real);
+    sph::Participant3D participant(fields.get(), 1, parameters, velocity, density, ParticipantId{1},
+                                   {32, limit});
+    Simulation simulation(participant);
+    ASSERT_TRUE(simulation.initialize().ok());
+    ASSERT_TRUE(simulation.prepare().ok());
+    ASSERT_TRUE(simulation.begin_window(.125).ok());
+    ASSERT_TRUE(simulation.advance_trial().ok());
+    {
+        const auto trial = checked(participant.trial_snapshot(checked(participant.trial_stamp())));
+        ASSERT_TRUE(simulation.commit_window().ok());
+        EXPECT_FALSE(trial.stamp.accepted);
+        ASSERT_NO_FATAL_FAILURE(check_trajectory(trial, initial, parameters.eos, 1));
+        const auto accepted = checked(participant.snapshot());
+        EXPECT_TRUE(accepted.stamp.accepted);
+        ASSERT_NO_FATAL_FAILURE(check_trajectory(accepted, initial, parameters.eos, 1));
+    }
+    ASSERT_TRUE(simulation.finalize().ok());
+    EXPECT_EQ(participant.resource_usage().controlled_bytes, 0u);
+    EXPECT_EQ(participant.resource_usage().snapshot_records, 0u);
+}
+
 TEST(SphVerletWindow, ChecksInitialVelocityCflAndOwnershipBeforePublishing) {
     const sph::WcsphVerletParameters parameters{{1, 1, 3}, .5};
     Fields fields({{{0, 0, 0}, 1, 1, 0}});
@@ -455,6 +600,26 @@ TEST(SphVerletWindow, ChecksInitialVelocityCflAndOwnershipBeforePublishing) {
     ASSERT_TRUE(empty_sim.advance(.5).ok());
     EXPECT_EQ(checked(empty.snapshot()).row_count(), 0u);
     ASSERT_TRUE(empty_sim.finalize().ok());
+
+    Fields fixed({{{.25, .5, .75}, 1, 19, 1}});
+    sph::Participant3D walls_only(
+        Fields({}).get(), 1, parameters, {}, sph::Values("empty.density", 0),
+        sph::FixedWallParticles3D{fixed.position, fixed.mass, fixed.ids});
+    Simulation walls_sim(walls_only);
+    ASSERT_TRUE(walls_sim.initialize().ok());
+    ASSERT_TRUE(walls_sim.prepare().ok());
+    const auto wall_stamp = checked(walls_only.snapshot()).stamp;
+    for (int step = 0; step < 2; ++step) {
+        ASSERT_TRUE(walls_sim.advance(.5).ok());
+        const auto state = checked(walls_only.snapshot());
+        EXPECT_EQ(state.row_count(), 0u);
+        EXPECT_EQ(state.stamp.geometry, wall_stamp.geometry);
+        EXPECT_EQ(state.stamp.layout, wall_stamp.layout);
+        EXPECT_EQ(state.stamp.topology, wall_stamp.topology);
+    }
+    ASSERT_TRUE(walls_sim.finalize().ok());
+    EXPECT_EQ(walls_only.resource_usage().controlled_bytes, 0u);
+    EXPECT_EQ(walls_only.resource_usage().snapshot_records, 0u);
 }
 
 } // namespace
