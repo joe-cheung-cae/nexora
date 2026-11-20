@@ -112,11 +112,6 @@ class Participant3D final : public ParticipantIF {
         return budget_.usage();
     }
 
-    enum class Fault { advance, prepare };
-    void fail_next(Fault fault) noexcept {
-        fault_ = fault;
-    }
-
   private:
     enum class Stage {
         created,
@@ -134,7 +129,6 @@ class Participant3D final : public ParticipantIF {
     Snapshot3D integrate(FieldStamp stamp, double dt) const;
     Result<Snapshot3D> issue(const Snapshot3D&) const;
     bool matches(const TimeInterval& interval) const;
-    bool consume_fault(Fault fault) noexcept;
     void close_window() noexcept;
 
     ParticleFields3D initial_;
@@ -154,7 +148,6 @@ class Participant3D final : public ParticipantIF {
     Stage stage_ = Stage::created;
     TimeInterval interval_;
     std::uint64_t attempt_{};
-    std::optional<Fault> fault_;
 };
 
 } // namespace nexora::sph

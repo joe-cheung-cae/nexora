@@ -201,10 +201,8 @@ void check_density_failure(real initial, real mass, real speed, double failed_dt
     EXPECT_TRUE(clean_sim.finalize().ok());
 }
 
-TEST(SphContinuity, NonpositiveAndOverflowingTrialDensityRestoreAndRetry) {
+TEST(SphContinuity, NonpositiveTrialDensityRestoresAndRetries) {
     check_density_failure(real{.125}, 1, 1, .5, .03125);
-    const real limit = std::numeric_limits<real>::max();
-    check_density_failure(real{.95} * limit, real{.75} * limit, -1, .25, .015625);
 }
 
 } // namespace

@@ -8,21 +8,11 @@ namespace nexora::sph {
 double density_at_slot_3d(const CellGrid& grid, LocalIndex self) {
     const auto& mass = grid.fields().mass;
     const double h = grid.smoothing_length();
-    int exponent;
-    const double fraction = Kokkos::frexp(h, &exponent);
-    const auto contribution = [&](double m, double weight) {
-        if (h == 1)
-            return m * weight;
-        int mass_exponent;
-        const double mass_fraction = Kokkos::frexp(m, &mass_exponent);
-        return Kokkos::ldexp(mass_fraction * weight / (fraction * fraction * fraction),
-                             mass_exponent - 3 * exponent);
-    };
-    double sum = contribution(mass(self), std::numbers::inv_pi);
+    double sum = mass(self) * std::numbers::inv_pi;
     grid.for_each_neighbor_of_slot(self, [&](LocalIndex slot, double distance_squared) {
-        sum += contribution(mass(slot), m4_weight_3d(Kokkos::sqrt(distance_squared) / h));
+        sum += mass(slot) * m4_weight_3d(Kokkos::sqrt(distance_squared) / h);
     });
-    return sum;
+    return sum / (h * h * h);
 }
 
 Result<Values> evaluate_density_3d(const Kokkos::Serial& exec, const CellGrid& grid) {

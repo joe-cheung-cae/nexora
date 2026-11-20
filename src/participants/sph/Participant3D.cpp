@@ -437,15 +437,10 @@ Snapshot3D Participant3D::integrate(FieldStamp stamp, double dt) const {
             [&](std::size_t row, std::size_t& errors) {
                 const auto slot = to_new(old_owned(row));
                 for (int axis = 0; axis < 3; ++axis) {
-                    const double ap = acceleration(row, axis);
-                    const double g = gravity_[axis];
-                    const double total = ap + g;
-                    // When two finite accelerations overflow on addition, the time-scaled
-                    // increment can still be representable.
-                    const double value = Kokkos::isfinite(total)
-                        ? Kokkos::fma(dt, total, double(v(row, axis)))
-                        : Kokkos::fma(2 * dt, 0.5 * ap + 0.5 * g, double(v(row, axis)));
-                    if (Kokkos::abs(value) <= std::numeric_limits<real>::max())
+                    const double value = Kokkos::fma(
+                        dt, acceleration(row, axis) + gravity_[axis], double(v(row, axis)));
+                    if (Kokkos::isfinite(value) &&
+                        Kokkos::abs(value) <= std::numeric_limits<real>::max())
                         velocity(slot, axis) = static_cast<real>(value);
                     else
                         ++errors;
@@ -464,10 +459,10 @@ Snapshot3D Participant3D::integrate(FieldStamp stamp, double dt) const {
             "sph.continuity.correct_density", policy,
             [&](std::size_t row, std::size_t& errors) {
                 const auto previous = old_row(to_old(new_owned(row)));
-                const double mean_rate = 0.5 * rate_n(previous) + 0.5 * rate_star(row);
-                const double value = Kokkos::fma(dt, mean_rate, double(rho(previous)));
-                if (value > 0 && value <= std::numeric_limits<real>::max() &&
-                    static_cast<real>(value) > 0)
+                const double value = Kokkos::fma(
+                    .5 * dt, rate_n(previous) + rate_star(row), double(rho(previous)));
+                if (Kokkos::isfinite(value) && value > 0 &&
+                    value <= std::numeric_limits<real>::max() && static_cast<real>(value) > 0)
                     corrected(row) = static_cast<real>(value);
                 else
                     ++errors;
@@ -595,8 +590,6 @@ Result<TrialReport> Participant3D::advance_trial(const TimeInterval& interval) {
             }
             return compute(std::move(geometry), stamp);
         }();
-        if (consume_fault(Fault::advance))
-            return Status{StatusCode::numerical_failure, "injected 3D SPH advance failure"};
         trial_.emplace(std::move(result));
         stage_ = Stage::advanced;
         return TrialReport{interval.end, true};
@@ -659,8 +652,6 @@ Status Participant3D::prepare_commit(const TimeInterval& interval) {
         candidate.fields_ = std::make_shared<Snapshot3D::Fields>(
             std::move(ticket), std::move(read), std::move(pressure_read), std::move(velocity_read),
             maximum_step);
-        if (consume_fault(Fault::prepare))
-            return {StatusCode::execution_failure, "injected 3D SPH prepare failure"};
         pending_.emplace(std::move(candidate));
         stage_ = Stage::precommitted;
         return {};
@@ -723,12 +714,6 @@ Result<Snapshot3D> Participant3D::trial_snapshot(const FieldStamp& expected) con
 bool Participant3D::matches(const TimeInterval& interval) const {
     return interval.begin == interval_.begin && interval.end == interval_.end &&
            interval.duration() == interval_.duration();
-}
-bool Participant3D::consume_fault(Fault fault) noexcept {
-    if (fault_ != fault)
-        return false;
-    fault_.reset();
-    return true;
 }
 void Participant3D::close_window() noexcept {
     pending_.reset();

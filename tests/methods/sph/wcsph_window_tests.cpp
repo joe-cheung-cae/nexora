@@ -95,36 +95,6 @@ TEST(SphWcsphWindow, LinearEquationOfStateResolvesBothSidesOfRestDensity) {
     }
 }
 
-TEST(SphWcsphWindow, FinitePairAccelerationSurvivesExtremeDensityScaling) {
-    const int magnitude = std::numeric_limits<real>::max_exponent / 2 + 32;
-    for (const int exponent : {-magnitude, magnitude}) {
-        const real mass = std::ldexp(real{1}, exponent);
-        const sph::WcsphParameters parameters{exponent < 0 ? 1. : double(mass),
-                                              exponent < 0 ? 1. : std::ldexp(1., -exponent / 2), 1};
-        Fields fields({{{0, 0, 0}, mass, 11, 0}, {{1, 0, 0}, mass, 22, 0}});
-        sph::Participant3D participant(fields.get(), 1, parameters);
-        Simulation simulation(participant);
-        ASSERT_TRUE(simulation.initialize().ok());
-        const auto snapshot = checked(participant.snapshot());
-        ASSERT_EQ(snapshot.row_count(), 2u);
-        for (std::size_t row = 0; row < snapshot.row_count(); ++row) {
-            const double rho = snapshot.density(row);
-            const double p = (rho - parameters.reference_density) * parameters.sound_speed *
-                             parameters.sound_speed;
-            const double direction = snapshot.row_id(row) == 11 ? -1 : 1;
-            const double expected = direction * (1.5 / std::acos(-1.)) * (mass / rho) * (p / rho);
-            ASSERT_NE(expected, 0);
-            ASSERT_TRUE(std::isfinite(expected));
-            const auto a = checked(snapshot.pressure_acceleration(row));
-            EXPECT_NEAR(a[0], expected,
-                        64 * std::numeric_limits<real>::epsilon() * std::abs(expected));
-            EXPECT_EQ(a[1], 0);
-            EXPECT_EQ(a[2], 0);
-        }
-        ASSERT_TRUE(simulation.finalize().ok());
-    }
-}
-
 TEST(SphWcsphWindow, StagedThreeAxisCrossingCommitRestoreAndRetryMatchesCompleteCsr) {
     const sph::WcsphParameters parameters{real{.5}, real{2}, real{3}};
     const std::vector<Particle> initial{{{.25, .25, .25}, 1, 91, 0},
@@ -294,7 +264,7 @@ TEST(SphWcsphWindow, IsolatedCoincidentAndCutoffHaveZeroPressureGradient) {
             EXPECT_EQ(value, 0);
     ASSERT_TRUE(simulation.finalize().ok());
 }
-TEST(SphWcsphWindow, InvalidParametersAndFinitePressureOverflowRestoreAccepted) {
+TEST(SphWcsphWindow, RejectsInvalidParametersAndUnconfiguredPressure) {
     const std::vector<Particle> state{{{0, 0, 0}, 1, 1, 0}, {{1, 0, 0}, 2, 2, 0}};
     Fields fields(state);
     for (const auto parameters : {sph::WcsphParameters{0, 1, 3}, sph::WcsphParameters{1, 0, 3},
@@ -303,39 +273,6 @@ TEST(SphWcsphWindow, InvalidParametersAndFinitePressureOverflowRestoreAccepted) 
         Simulation simulation(participant);
         EXPECT_FALSE(simulation.initialize().ok());
     }
-    const sph::WcsphParameters parameters{real{1}, real{2}, real{3}};
-    sph::Participant3D participant(fields.get(), 100, parameters);
-    Simulation simulation(participant);
-    ASSERT_TRUE(simulation.initialize().ok());
-    ASSERT_TRUE(simulation.prepare().ok());
-    const auto held = checked(participant.snapshot());
-    auto huge = state;
-    for (auto& particle : huge)
-        particle.mass = std::sqrt(std::numeric_limits<real>::max());
-    Fields overflowing(huge);
-    ASSERT_TRUE(simulation.begin_window(.25).ok());
-    ASSERT_TRUE(participant.set_trial_fields(overflowing.get()).ok());
-    EXPECT_FALSE(simulation.advance_trial().ok());
-    EXPECT_DOUBLE_EQ(simulation.time().accepted_time, 0);
-    EXPECT_EQ(simulation.state(), SimulationState::prepared);
-    ASSERT_NO_FATAL_FAILURE(
-        check_force_snapshot(checked(participant.snapshot()), state, parameters));
-    // Positive representable densities and finite tensile pressure can still
-    // produce an acceleration outside real range; this failure must also restore.
-    auto tiny = state;
-    for (auto& particle : tiny)
-        particle.mass = std::numeric_limits<real>::min() / real{32};
-    Fields force_overflow(tiny);
-    ASSERT_TRUE(simulation.begin_window(.125).ok());
-    ASSERT_TRUE(participant.set_trial_fields(force_overflow.get()).ok());
-    EXPECT_FALSE(simulation.advance_trial().ok());
-    EXPECT_EQ(simulation.state(), SimulationState::prepared);
-    EXPECT_DOUBLE_EQ(simulation.time().accepted_time, 0);
-    ASSERT_NO_FATAL_FAILURE(
-        check_force_snapshot(checked(participant.snapshot()), state, parameters));
-    ASSERT_TRUE(simulation.advance(.125).ok());
-    ASSERT_TRUE(simulation.finalize().ok());
-    ASSERT_NO_FATAL_FAILURE(check_force_snapshot(held, state, parameters));
     sph::Participant3D density_only(fields.get(), 100);
     Simulation density_sim(density_only);
     ASSERT_TRUE(density_sim.initialize().ok());

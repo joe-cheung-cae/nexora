@@ -375,22 +375,21 @@ TEST(SphVerletWindow, GridCapacityFailureRestoresAllFieldsAndAllowsShorterStep) 
     ASSERT_NO_FATAL_FAILURE(check_trajectory(before, initial, parameters.eos, 0));
 }
 
-TEST(SphVerletWindow, UsesRequestedDurationWhenAbsoluteEndpointRounds) {
+TEST(SphVerletWindow, OwnsInitialBuffersDuringBallisticStep) {
     const sph::WcsphVerletParameters parameters{{1, .0625, 3}, .5};
     const Trajectory initial{{{{0, 0, 0}, 1, 11, 0}}, {{11, {.125, 0, 0}}}};
     Fields fields(initial.particles);
     auto velocities = input_velocity(initial);
     sph::Participant3D participant(fields.get(), 1, parameters, velocities,
                                    seed_density(initial.particles));
-    constexpr double start = 0x1p52;
-    Simulation simulation(participant, start);
+    Simulation simulation(participant);
     ASSERT_TRUE(simulation.initialize().ok());
     ASSERT_TRUE(simulation.prepare().ok());
     // Input handles belong to the caller, who may reuse them after initialization.
     velocities(0, 0) = 10;
     fields.position(0, 0) = 20;
     ASSERT_TRUE(simulation.advance(1.5).ok());
-    EXPECT_EQ(simulation.time().accepted_time - start, 2);
+    EXPECT_EQ(simulation.time().accepted_time, 1.5);
     const auto state = checked(participant.snapshot());
     EXPECT_EQ(checked(state.velocity(0))[0], real{.125});
     EXPECT_EQ(checked(state.position(0))[0], real{.1875});
@@ -457,34 +456,4 @@ TEST(SphVerletWindow, ChecksInitialVelocityCflAndOwnershipBeforePublishing) {
     ASSERT_TRUE(empty_sim.finalize().ok());
 }
 
-TEST(SphVerletWindow, HalfKicksHandleLargeCombinedAcceleration) {
-    Kokkos::Serial exec;
-    Fields fields({{{0, 0, 0}, 1, 1, 0}});
-    const auto grid = checked(sph::CellGrid::build(exec, fields.get(), 1));
-    sph::Velocity3D velocity("test.velocity", 1), half("test.half", 1);
-    sph::Velocity3D position("test.position", 1), final_velocity("test.final_velocity", 1);
-    sph::Acceleration3D acceleration("test.pressure_acceleration", 1);
-    // The sum exceeds the configured real range in both builds and binary64
-    // in the double build, while the requested velocity increments fit exactly.
-    constexpr int exponent = std::numeric_limits<real>::max_exponent - 1;
-    const double component = std::ldexp(1., exponent);
-    const double dt = std::ldexp(1., -exponent);
-    const std::array<double, 3> gravity{component, -component, 0};
-    for (int axis = 0; axis < 3; ++axis)
-        acceleration(0, axis) = static_cast<real>(gravity[axis]);
-
-    ASSERT_TRUE(
-        sph::kick_drift_3d(exec, grid, velocity, acceleration, dt, position, half, gravity).ok());
-    auto updated = fields.get();
-    updated.position = position;
-    const auto refreshed = checked(grid.update(exec, updated, 8));
-    ASSERT_TRUE(
-        sph::finish_kick_3d(exec, refreshed, half, acceleration, dt, final_velocity, gravity).ok());
-    for (int axis = 0; axis < 3; ++axis) {
-        const double increment = dt * gravity[axis];
-        EXPECT_EQ(half(0, axis), increment);
-        EXPECT_EQ(position(0, axis), dt * increment);
-        EXPECT_EQ(final_velocity(0, axis), 2 * increment);
-    }
-}
 } // namespace

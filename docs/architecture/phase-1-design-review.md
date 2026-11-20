@@ -52,9 +52,9 @@ P1-07 的 [Serial CPU 实现和验证记录](../../validation/sph/serial.md) 包
 
 #### 3.2.1 Serial SPH 精简结果
 
-固定 CSR 在初始化时校验每条边是否位于闭支持域内。重排保留邻接关系。M₄ 算子按原 CSR 顺序计算每个 owned 行，单计自身项，ghost 只读。外段用减法余项求 `gap = 2 − |xᵢ − xⱼ|`，先乘质量，再乘三个 gap 因子。举例来说，binary64 下，位置为 2、质量为 1 的 owned 粒子与位置为 `2⁻⁵⁴`、质量为 `2¹⁶⁵` 的 ghost 得到密度 2。直接舍入距离会丢失 ghost 的 `4/3` 贡献。[密度算子](../../src/methods/sph/Density.cpp) · [边界回归](../../tests/methods/sph/sph_tests.cpp)
+固定 CSR 在初始化时用计算精度下的距离校验每条边是否位于闭支持域内。重排保留邻接关系。M₄ 算子按原 CSR 顺序计算每个 owned 行，单计自身项，ghost 只读。核权重由现行分段多项式直接求值，再乘邻居质量。[密度算子](../../src/methods/sph/Density.cpp) · [边界回归](../../tests/methods/sph/sph_tests.cpp)
 
-一次 Kokkos `parallel_reduce` 写入每行的 `real` 密度，并将该值累加到普通 `double` 诊断和。归约结果有限且落在 `real` 的范围内才转换并交给 participant。接近上限时，极小正项可能在加法中舍去，行顺序也可能影响重算能否成功。失败时恢复已提交状态。[Kokkos 归约语义](https://kokkos.org/kokkos-core-wiki/API/core/parallel-dispatch/parallel_reduce.html#semantics)
+一次 Kokkos `parallel_reduce` 写入每行的 `real` 密度，并将该值累加到普通 `double` 诊断和。归约结果有限且落在 `real` 的范围内才转换并交给 participant。失败时恢复已提交状态。[Kokkos 归约语义](https://kokkos.org/kokkos-core-wiki/API/core/parallel-dispatch/parallel_reduce.html#semantics)
 
 跨窗口读取持有完整 `Snapshot`，通过数量及按索引取值的接口读取布局和密度。副本共享快照记录与读授权，布局和密度各自持有载荷预算。重排单独预留临时空间；提交时如有读者保留 trial，参与者先为 accepted 密度分配并复制。Serial 四配置及两种精度的基准结果见验证记录。[快照接口](../../src/participants/sph/Participant.hpp) · [Serial 验证](../../validation/sph/serial.md)
 
@@ -79,9 +79,9 @@ P1-07 的 [Serial CPU 实现和验证记录](../../validation/sph/serial.md) 包
 | **V3 执行实例与拷贝** / 04,05 | CPU 与 CUDA 同 source；H2H/H2D/D2H/D2D；两个独立 execution instances；同实例数据链、跨实例交接、显式非默认 CUDA stream fixture | 检查实际结果与先后关系；同实例无逐 stage host wait；跨实例 fence 或获准 bridge 建依赖；producer 未完成不得交 MPI/SDK；host 不直接解引用 device pointer。内存复制只对已验证空间组合开放。 |
 | **V4 owner / 多消费者 / 关闭** / 04 | managed 末 handle 提前释放、unmanaged 真 owner 计数；两个读消费者，一快一慢；读写冲突、外部 resize、caller 退出、初始化中断、flight 预留失败、close | 生命周期记录证明最后访问后恰好一次释放；写授权不会由引用计数推断；有任何 reader 时不可复用 bank；无在途工作才能销毁 owner/stream/ScopeGuard；部分失败无漏释放或 UAF。通过受控同步/延迟安排强制覆盖在途状态。 |
 | **V5 reference CPU/CUDA 数值** / 05,06 | §3.1 固定公式/输入/精度；小样本与较大样本；同一 template CPU 和 CUDA 实机执行 | §3.1 原门槛全部通过；记录独立 oracle 与收敛表。OpenMP 若启用同验。不能以 CUDA smoke 或编译通过替代。 |
-| **V6-SPH 非规则邻域** / 07 | §3.2；邻域遍历+阶段算子+全局归约；CPU/CUDA，重排前后按 stable ID 比较；空/极端度数/边界样本 | CSR/ID 精确检查；按冻结公式与容差数值对照；错误位置/拓扑版本会重建或拒绝；重复 reduction 与并发写路径受控；不得用规则标量循环代替。 |
+| **V6-SPH 非规则邻域** / 07 | §3.2；邻域遍历+阶段算子+全局归约；CPU/CUDA，重排前后按 stable ID 比较；空邻域、长邻域和边界样本 | CSR/ID 精确检查；按冻结公式与容差数值对照；错误位置/拓扑版本会重建或拒绝；重复 reduction 与并发写路径受控；不得用规则标量循环代替。 |
 | **V6-FVM 通量与累积** / 08 | §3.3；cell→face flux→cell accumulation；边界面与非规则 CSR；CPU/CUDA，对照 independent scalar oracle | 每内部面唯一值/相反贡献；全局内部通量抵消、边界预算与单元结果满足既有容差；不更改 pressure/measure convention。单元独占 gather 与经批准累积策略分别验证。 |
-| **V7 数值失败、恢复与重放** / 06,07,08 | 注入 trial 数值失败、prepare_commit 失败、显式 restore；合法 retry；旧 accepted 输出仍有 reader；历史/控制/拓扑改变；重放与连续运行 | accepted 数组、历史、时间、步骤计数不受失败 trial 污染；尝试数可增加；缓存按 epoch/版本失效；新 trial 独立 storage；restore 失败进入 failed，禁止继续提交。设备致命失败只验证隔离进程退出/不发布，不要求设备恢复成功。 |
+| **V7 数值失败、恢复与重放** / 06,07,08 | trial 或 prepare_commit 失败、显式 restore、合法 retry、旧 accepted 输出仍有 reader、历史/控制/拓扑改变、重放与连续运行。SPH 通过实际的物理、几何和资源条件触发失败。其他模块可用故障注入。 | accepted 数组、历史、时间、步骤计数不受失败 trial 污染；尝试数可增加；缓存按 epoch/版本失效；新 trial 独立 storage；restore 失败进入 failed，禁止继续提交。设备致命失败只验证隔离进程退出/不发布，不要求设备恢复成功。 |
 | **V8 端到端性能** / 07,08,10 | reference 只作辅助；SPH/FVM 小/大规模、代表性度分布；包含 layout pack/unpack、host/device copy、allocation、同步、归约读回和窗口准备/提交 | 完整完成时间、吞吐、峰值 host/device memory、分配次数/bytes、复制量、转换成本、fence 次数/等待、预热/稳态分别报告；同公式/输入/容差下对比 CPU/CUDA；只有 kernel launch 时间无效。无既有数字时先建立基线，不声称 speedup 或编造百分比门槛。 |
 | **V9 capability / CLI** / 09 | 同一 fixture 的 validate/plan/run；未知/重复键、schema、NaN/Inf、非法 step/quantum、缺 device/未编译 space；built 但未 validated | 校验与装配一致、错误退出明确；plan 显式列布局转换、copy 和主机决策点；发布的支持矩阵只含实测组合；未知组合不 fallback。保留 inspect-build/version 的诊断意义，变更旧键需迁移说明。 |
 | **V10 架构与清理** / 10,11 | 默认 CPU、CUDA、MPI 选择图；include/target/source/export 正反例；全文与安装面扫描；公开 Kokkos 与私有 native types | checker 区分 schema/data；缺可选节点允许、启用后缺必需节点失败；越层、公共原生 CUDA/HIP/MPI 类型、旧 exec 链接失败；新包无旧别名，Kokkos 依赖真实传递。旧 native CUDA smoke 的通用计算用途删除。 |

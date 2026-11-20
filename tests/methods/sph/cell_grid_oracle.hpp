@@ -58,7 +58,8 @@ struct Oracle {
 };
 // Independent error-free TwoDiff: the rounded difference plus residual is
 // the exact component distance of the two binary64 source coordinates.
-// In particular, a rounded distance of 2 with a positive residual is outside.
+// Ordinary cutoff neighbors such as nextafter(2, 0) and 4 can subtract to 2
+// after rounding even though their exact distance exceeds the support radius.
 inline bool exact_component_support(real first, real second) {
     const double high = std::max(double(first), double(second));
     const double low = std::min(double(first), double(second));

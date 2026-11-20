@@ -5,7 +5,6 @@
 #include <cmath>
 #include <functional>
 #include <limits>
-#include <numbers>
 
 namespace nexora::sph {
 namespace {
@@ -19,218 +18,68 @@ template <class A, class B> bool overlaps(const A& a, const B& b) {
     return before(a.data(), b.data() + b.span()) && before(b.data(), a.data() + a.span());
 }
 
-// Normalized binary64 significand with an extended exponent. This is used when
-// an intermediate factor or partial sum cannot be kept in normal binary64.
-struct Scaled {
-    double significand{};
-    int exponent{};
-
-    static Scaled from(double value, int shift = 0) {
-        if (value == 0)
-            return {};
-        int e;
-        const double f = Kokkos::frexp(value, &e);
-        return {f, e + shift};
-    }
-
-    Scaled times(double value) const {
-        const auto factor = from(value);
-        return from(significand * factor.significand, exponent + factor.exponent);
-    }
-
-    Scaled plus(Scaled other) const {
-        if (significand == 0)
-            return other;
-        if (other.significand == 0)
-            return *this;
-        const int common = std::max(exponent, other.exponent);
-        return from(Kokkos::ldexp(significand, exponent - common) +
-                        Kokkos::ldexp(other.significand, other.exponent - common),
-                    common);
-    }
-
-    double value() const {
-        return Kokkos::ldexp(significand, exponent);
-    }
-};
-
 bool fits_real(double value) {
     return Kokkos::isfinite(value) && Kokkos::abs(value) <= std::numeric_limits<real>::max();
 }
 
-// expm1 retains pressure perturbations near equilibrium. Use the logarithmic
-// scale only if an intermediate exponent/scale overflows or underflows.
-double tait_pressure(double rho, const WcsphParameters& p, double scale) {
-    if (rho == p.reference_density)
-        return 0;
+// log1p and expm1 retain small pressure perturbations near equilibrium.
+double tait_pressure(double rho, const WcsphParameters& p, double bulk_modulus) {
     const double difference = rho - p.reference_density;
-    const double ratio = rho / p.reference_density;
-    double log_ratio;
-    if (Kokkos::abs(difference) <= .5 * p.reference_density)
-        log_ratio = Kokkos::log1p(difference / p.reference_density);
-    else if (std::isnormal(ratio))
-        log_ratio = Kokkos::log(ratio);
-    else
-        log_ratio = Kokkos::log(rho) - Kokkos::log(p.reference_density);
-    const double exponent = p.gamma * log_ratio;
-    const double delta = Kokkos::expm1(exponent);
-    if (std::isnormal(scale) && std::isnormal(delta))
-        return scale * delta;
-    const double log_bulk = Kokkos::log(p.reference_density) + 2 * Kokkos::log(p.sound_speed);
-    // expm1(z)/z tends to one, including when gamma*log_ratio rounds to zero.
-    const double log_magnitude =
-        Kokkos::abs(exponent) < std::numeric_limits<double>::epsilon()
-            ? log_bulk + Kokkos::log(Kokkos::abs(log_ratio))
-            : log_bulk - Kokkos::log(p.gamma) +
-                  (Kokkos::isinf(delta) ? exponent : Kokkos::log(Kokkos::abs(delta)));
-    return Kokkos::copysign(Kokkos::exp(log_magnitude), log_ratio);
+    const double log_ratio = Kokkos::abs(difference) <= .5 * p.reference_density
+                                 ? Kokkos::log1p(difference / p.reference_density)
+                                 : Kokkos::log(rho / p.reference_density);
+    return bulk_modulus * Kokkos::expm1(p.gamma * log_ratio);
 }
 
-// The scaled bulk modulus keeps the inverse defined even if rho0*c*c/gamma
-// overflows or underflows on the way to a representable density.
-double inverse_tait(double pressure, const WcsphParameters& p, Scaled scale) {
-    if (pressure == 0)
-        return p.reference_density;
-    const auto parts = Scaled::from(pressure);
-    const auto relative =
-        Scaled::from(parts.significand / scale.significand, parts.exponent - scale.exponent);
-    const double ratio = relative.value();
-    double log_density_ratio;
-    if (ratio < -.5) {
-        // Subtract the unrounded numerator and denominator before dividing;
-        // pressure / scale can round to -1 near the inverse domain boundary.
-        const auto remainder = scale.plus(parts);
-        if (remainder.significand <= 0)
-            return std::numeric_limits<double>::quiet_NaN();
-        log_density_ratio = (Kokkos::log(remainder.significand / scale.significand) +
-                             (remainder.exponent - scale.exponent) * std::numbers::ln2) /
-                            p.gamma;
-    } else if (Kokkos::abs(ratio) < std::numeric_limits<double>::epsilon()) {
-        const auto gamma = Scaled::from(p.gamma);
-        log_density_ratio = Scaled::from(relative.significand / gamma.significand,
-                                         relative.exponent - gamma.exponent)
-                                .value();
-    } else if (Kokkos::isinf(ratio)) {
-        log_density_ratio =
-            (Kokkos::log(relative.significand) + relative.exponent * std::numbers::ln2) / p.gamma;
-    } else {
-        log_density_ratio = Kokkos::log1p(ratio) / p.gamma;
-    }
-    const double multiplier = Kokkos::exp(log_density_ratio);
-    if (std::isnormal(multiplier))
-        return p.reference_density * multiplier;
-    return Kokkos::exp(Kokkos::log(p.reference_density) + log_density_ratio);
+double inverse_tait(double pressure, const WcsphParameters& p, double bulk_modulus) {
+    return p.reference_density * Kokkos::exp(Kokkos::log1p(pressure / bulk_modulus) / p.gamma);
 }
 
 double wall_pressure(const CellGrid& grid, LocalIndex wall, const std::array<double, 3>& gravity,
                      const Kokkos::View<LocalIndex*, Kokkos::HostSpace>& fluid_row,
                      const Values::const_type& density, const Values& pressure) {
-    Scaled numerator{};
+    double numerator = 0;
     double weights = 0;
     const auto& fields = grid.fields();
+    const double h = grid.smoothing_length();
     grid.for_each_neighbor_of_slot(wall, [&](LocalIndex f, double d2) {
         if (fields.ghost(f))
             return;
         // The common h^-3 normalization cancels in the weighted wall average.
-        const double w = m4_weight_3d(Kokkos::sqrt(d2) / grid.smoothing_length());
-        if (w == 0)
-            return;
+        const double w = m4_weight_3d(Kokkos::sqrt(d2) / h);
         const auto row = fluid_row(f);
-        Scaled head{};
+        double head = 0;
         for (int axis = 0; axis < 3; ++axis) {
             const double dx = double(fields.position(wall, axis)) - fields.position(f, axis);
-            head = head.plus(Scaled::from(gravity[axis]).times(dx));
+            head += gravity[axis] * dx;
         }
-        const auto sample = head.times(density(row)).plus(Scaled::from(pressure(row)));
-        numerator = numerator.plus(sample.times(w));
+        numerator += (pressure(row) + density(row) * head) * w;
         weights += w;
     });
-    if (weights <= 0)
-        return std::numeric_limits<double>::quiet_NaN();
-    return Kokkos::ldexp(numerator.significand / weights, numerator.exponent);
+    return numerator / weights;
 }
 
-bool contributes(const CellGrid& grid, LocalIndex i, LocalIndex j, double d2) {
-    const double support = grid.support_radius();
-    if (d2 == support * support)
-        return false;
-    if (d2 > 0)
-        return true;
-    // Two distinct subnormal coordinates may have a squared separation rounded to zero.
-    const auto& x = grid.fields().position;
-    return x(i, 0) != x(j, 0) || x(i, 1) != x(j, 1) || x(i, 2) != x(j, 2);
+bool contributes(double distance_squared, double support_squared) {
+    return distance_squared > 0 && distance_squared < support_squared;
 }
 
 std::array<double, 3>
 acceleration_at_slot(const CellGrid& grid, LocalIndex i,
                      const Kokkos::View<const double*, Kokkos::HostSpace>& force_coefficient,
-                     const Kokkos::View<const int*, Kokkos::HostSpace>& force_exponent) {
+                     double support_squared, double inverse_h5) {
     const auto& position = grid.fields().position;
     const auto& mass = grid.fields().mass;
-
     const double h = grid.smoothing_length();
-    int h_exponent;
-    const double f = Kokkos::frexp(h, &h_exponent);
-    const double fraction5 = f * f * f * f * f;
-    const auto each_pair = [&](auto visit) {
-        grid.for_each_neighbor_of_slot(i, [&](LocalIndex j, double d2) {
-            if (contributes(grid, i, j, d2))
-                visit(j, m4_negative_radial_derivative_over_q_3d(Kokkos::sqrt(d2) / h));
-        });
-    };
-    const auto separation = [&](LocalIndex j, int axis) {
-        return double(position(i, axis)) - double(position(j, axis));
-    };
     std::array<double, 3> a{};
-    bool scaled = force_exponent(i) != 0;
-    if (!scaled)
-        each_pair([&](LocalIndex j, double gradient) {
-            if (scaled)
-                return;
-            if (force_exponent(j) != 0) {
-                scaled = true;
-                return;
-            }
-            const double sum = force_coefficient(i) + force_coefficient(j);
-            if (sum == 0)
-                return;
-            const double physical_gradient =
-                h == 1 ? gradient : Kokkos::ldexp(gradient / fraction5, -5 * h_exponent);
-            const double weighted = sum * physical_gradient;
-            const double pair = weighted * double(mass(j));
-            if (!std::isnormal(physical_gradient) || !std::isnormal(weighted) ||
-                !std::isnormal(pair)) {
-                scaled = true;
-                return;
-            }
-            for (int axis = 0; axis < 3; ++axis) {
-                const double dx = separation(j, axis);
-                if (dx == 0)
-                    continue;
-                const double term = pair * dx;
-                a[axis] += term;
-                if (!std::isnormal(term) || !Kokkos::isfinite(a[axis]))
-                    scaled = true;
-            }
-        });
-    if (scaled) {
-        // Reevaluate the complete row in its original order. Term and accumulator
-        // exponents stay separate until the final three components are narrowed.
-        Scaled total[3]{};
-        const auto source = [&](LocalIndex slot) {
-            return Scaled::from(force_coefficient(slot), force_exponent(slot));
-        };
-        const auto self = source(i);
-        each_pair([&](LocalIndex j, double gradient) {
-            auto pair = self.plus(source(j)).times(gradient).times(mass(j));
-            if (h != 1)
-                pair = Scaled::from(pair.significand / fraction5, pair.exponent - 5 * h_exponent);
-            for (int axis = 0; axis < 3; ++axis)
-                total[axis] = total[axis].plus(pair.times(separation(j, axis)));
-        });
+    grid.for_each_neighbor_of_slot(i, [&](LocalIndex j, double d2) {
+        if (!contributes(d2, support_squared))
+            return;
+        const double gradient = m4_negative_radial_derivative_over_q_3d(Kokkos::sqrt(d2) / h);
+        const double pair =
+            (force_coefficient(i) + force_coefficient(j)) * (gradient * inverse_h5) * mass(j);
         for (int axis = 0; axis < 3; ++axis)
-            a[axis] = total[axis].value();
-    }
+            a[axis] += pair * (double(position(i, axis)) - position(j, axis));
+    });
     return a;
 }
 
@@ -238,7 +87,7 @@ acceleration_at_slot(const CellGrid& grid, LocalIndex i,
 
 std::size_t pressure_workspace_bytes_per_source(bool has_ghosts, bool fixed_walls) {
     const auto per_ghost = sizeof(std::uint8_t) + (fixed_walls ? sizeof(LocalIndex) : 0);
-    return sizeof(double) + sizeof(int) + (has_ghosts ? per_ghost : 0);
+    return sizeof(double) + (has_ghosts ? per_ghost : 0);
 }
 
 Status WcsphParameters::validate() const {
@@ -271,21 +120,17 @@ Status evaluate_pressure_3d(const Kokkos::Serial& exec, const CellGrid& grid,
         return {};
     const auto n = grid.fields().ids.extent(0);
     const auto& ghost = grid.fields().ghost;
-    // Split exponents once so an intermediate ratio cannot spoil a representable bulk scale.
-    int er, ec, eg;
-    const double r = Kokkos::frexp(parameters.reference_density, &er);
-    const double c = Kokkos::frexp(parameters.sound_speed, &ec);
-    const double g = Kokkos::frexp(parameters.gamma, &eg);
-    const auto bulk_scale = Scaled::from((r / g) * c * c, er + 2 * ec - eg);
-    const double scale = bulk_scale.value();
+    const double h = grid.smoothing_length();
+    const double support = grid.support_radius();
+    const double support_squared = support * support;
+    const double inverse_h5 = 1 / (h * h * h * h * h);
+    const double bulk_modulus =
+        parameters.reference_density * parameters.sound_speed * parameters.sound_speed /
+        parameters.gamma;
     try {
         Kokkos::View<double*, Kokkos::HostSpace> coefficient(
             Kokkos::view_alloc(exec, Kokkos::WithoutInitializing,
                                "sph.pressure_over_density_squared"),
-            n);
-        Kokkos::View<int*, Kokkos::HostSpace> exponent(
-            Kokkos::view_alloc(exec, Kokkos::WithoutInitializing,
-                               "sph.pressure.coefficient_exponent"),
             n);
         Kokkos::View<std::uint8_t*, Kokkos::HostSpace> needed;
         Kokkos::View<LocalIndex*, Kokkos::HostSpace> fluid_row;
@@ -302,39 +147,19 @@ Status evaluate_pressure_3d(const Kokkos::Serial& exec, const CellGrid& grid,
                 if (wall_gravity)
                     fluid_row(i) = static_cast<LocalIndex>(row);
                 grid.for_each_neighbor_of_slot(i, [&](LocalIndex j, double d2) {
-                    if (ghost(j) && contributes(grid, i, j, d2))
+                    if (ghost(j) && contributes(d2, support_squared))
                         needed(j) = 1;
                 });
             });
         }
-        const auto store_coefficient = [&](LocalIndex slot, double rho, real p) {
-            // Keep ordinary coefficients directly readable in the force hot path.
-            // Preserve tiny/huge quotients in scaled form until the mass and
-            // displacement factors are included.
-            const double first = double(p) / rho;
-            const double ratio = first / rho;
-            if (p == 0 || (std::isnormal(first) && std::isnormal(ratio))) {
-                coefficient(slot) = ratio;
-                exponent(slot) = 0;
-            } else {
-                const auto pressure_parts = Scaled::from(p);
-                const auto density_parts = Scaled::from(rho);
-                const auto scaled =
-                    Scaled::from(pressure_parts.significand /
-                                     (density_parts.significand * density_parts.significand),
-                                 pressure_parts.exponent - 2 * density_parts.exponent);
-                coefficient(slot) = scaled.significand;
-                exponent(slot) = scaled.exponent;
-            }
-        };
         const auto prepare_source = [&](LocalIndex slot, double rho, real& p) {
             if (!Kokkos::isfinite(rho) || rho <= 0)
                 return false;
-            const double raw = tait_pressure(rho, parameters, scale);
+            const double raw = tait_pressure(rho, parameters, bulk_modulus);
             if (!fits_real(raw))
                 return false;
             p = static_cast<real>(raw);
-            store_coefficient(slot, rho, p);
+            coefficient(slot) = double(p) / (rho * rho);
             return true;
         };
         std::size_t invalid{};
@@ -363,12 +188,13 @@ Status evaluate_pressure_3d(const Kokkos::Serial& exec, const CellGrid& grid,
                             return;
                         }
                         const real p = static_cast<real>(raw);
-                        const double rho = inverse_tait(p, parameters, bulk_scale);
+                        const double rho = inverse_tait(p, parameters, bulk_modulus);
                         if (!fits_real(rho) || static_cast<real>(rho) <= 0) {
                             ++errors;
                             return;
                         }
-                        store_coefficient(j, static_cast<real>(rho), p);
+                        const double wall_density = static_cast<real>(rho);
+                        coefficient(j) = double(p) / (wall_density * wall_density);
                         return;
                     }
                     const double rho = density_at_slot_3d(grid, j);
@@ -384,12 +210,12 @@ Status evaluate_pressure_3d(const Kokkos::Serial& exec, const CellGrid& grid,
                                        "exceeds real range"};
         }
         const decltype(coefficient)::const_type force_coefficient = coefficient;
-        const decltype(exponent)::const_type force_exponent = exponent;
         Kokkos::parallel_reduce(
             "sph.pressure.acceleration", owned,
             [&](std::size_t row, std::size_t& errors) {
                 const auto a =
-                    acceleration_at_slot(grid, rows(row), force_coefficient, force_exponent);
+                    acceleration_at_slot(grid, rows(row), force_coefficient, support_squared,
+                                         inverse_h5);
                 for (int axis = 0; axis < 3; axis++) {
                     if (fits_real(a[axis]))
                         acceleration(row, axis) = static_cast<real>(a[axis]);

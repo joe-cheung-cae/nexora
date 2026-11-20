@@ -51,19 +51,6 @@ Status check_step(const CellGrid& grid, double dt, const std::array<double, 3>& 
 bool fits_real(double value) {
     return Kokkos::isfinite(value) && Kokkos::abs(value) <= std::numeric_limits<real>::max();
 }
-
-double half_kick(double dt, double pressure_acceleration, double gravity, double velocity) {
-    const double acceleration = pressure_acceleration + gravity;
-    if (Kokkos::isinf(acceleration) && Kokkos::isfinite(pressure_acceleration)) {
-        // The sum overflowed. Halve each finite acceleration before adding them.
-        return Kokkos::fma(dt, .5 * pressure_acceleration + .5 * gravity, velocity);
-    }
-    // Scaling a subnormal time step by 1/2 can lose a bit before multiplication.
-    if (dt < 2 * std::numeric_limits<double>::min() &&
-        Kokkos::abs(acceleration) >= 2 * std::numeric_limits<double>::min())
-        return Kokkos::fma(dt, .5 * acceleration, velocity);
-    return Kokkos::fma(.5 * dt, acceleration, velocity);
-}
 } // namespace
 
 Status continuity_rate_3d(const Kokkos::Serial& exec, const CellGrid& grid,
@@ -74,10 +61,7 @@ Status continuity_rate_3d(const Kokkos::Serial& exec, const CellGrid& grid,
         overlaps(rate, velocity) || overlaps(rate, sources.mass) || overlaps(rate, sources.position))
         return {StatusCode::invalid_argument, "continuity fields have invalid extents, storage or output overlap"};
     const double h = grid.smoothing_length();
-    int exponent;
-    const double f = Kokkos::frexp(h, &exponent);
-    const double f5 = f * f * f * f * f;
-    const double scale = Kokkos::ldexp(1 / f5, -5 * exponent);
+    const double inverse_h5 = 1 / (h * h * h * h * h);
     std::size_t invalid{};
     Kokkos::parallel_reduce(
         "sph.continuity.rate", Policy(exec, 0, owned.extent(0)),
@@ -95,9 +79,7 @@ Status continuity_rate_3d(const Kokkos::Serial& exec, const CellGrid& grid,
                     const double dx = double(sources.position(j, axis)) - sources.position(i, axis);
                     dot += (double(velocity(i, axis)) - vj) * dx;
                 }
-                const double term = (dot * sources.mass(j)) * gradient;
-                sum += std::isnormal(scale) ? term * scale
-                                            : Kokkos::ldexp(term / f5, -5 * exponent);
+                sum += (dot * sources.mass(j)) * gradient * inverse_h5;
             });
             rate(row) = sum;
             errors += !Kokkos::isfinite(sum);
@@ -153,7 +135,8 @@ Status kick_drift_3d(const Kokkos::Serial& exec, const CellGrid& accepted,
             const auto slot = owned(i);
             for (int axis = 0; axis < 3; ++axis) {
                 const double kicked =
-                    half_kick(dt, acceleration(i, axis), gravity[axis], velocity(i, axis));
+                    Kokkos::fma(.5 * dt, acceleration(i, axis) + gravity[axis],
+                                double(velocity(i, axis)));
                 if (!fits_real(kicked)) {
                     ++errors;
                     continue;
@@ -196,8 +179,9 @@ Status finish_kick_3d(const Kokkos::Serial& exec, const CellGrid& refreshed,
         "sph.verlet.finish_kick", Policy(exec, 0, n),
         [&](std::size_t i, std::size_t& errors) {
             for (int axis = 0; axis < 3; ++axis) {
-                const double kicked = half_kick(dt, refreshed_acceleration(i, axis), gravity[axis],
-                                                half_velocity(old_slot(owned(i)), axis));
+                const double kicked = Kokkos::fma(
+                    .5 * dt, refreshed_acceleration(i, axis) + gravity[axis],
+                    double(half_velocity(old_slot(owned(i)), axis)));
                 if (fits_real(kicked))
                     velocity(i, axis) = static_cast<real>(kicked);
                 else
@@ -223,59 +207,29 @@ Result<double> cfl_step_3d(const Kokkos::Serial& exec, const Velocity3D::const_t
     if (n && !velocity.data())
         return Status{StatusCode::invalid_argument, "WCSPH accepted velocity has no storage"};
     const Policy rows(exec, 0, n);
-    // Scale both terms in c0+vmax by the largest input magnitude. Thus neither
-    // the squared Euclidean norm nor the sum needs to fit unscaled binary64.
-    double scale = sound_speed;
-    if (n) {
-        double largest{};
-        Kokkos::parallel_reduce(
-            "sph.verlet.velocity_scale", rows,
-            [&](std::size_t i, double& maximum) {
-                for (int axis = 0; axis < 3; ++axis) {
-                    const double v = velocity(i, axis);
-                    if (!Kokkos::isfinite(v))
-                        maximum = std::numeric_limits<double>::infinity();
-                    else if (Kokkos::abs(v) > maximum)
-                        maximum = Kokkos::abs(v);
-                }
-            },
-            Kokkos::Max<double>(largest));
-        if (!std::isfinite(largest))
-            return Status{StatusCode::numerical_failure, "WCSPH accepted velocity must be finite"};
-        scale = std::max(scale, largest);
-    }
     double vmax = 0;
     if (n) {
         double largest_square{};
         Kokkos::parallel_reduce(
             "sph.verlet.maximum_speed", rows,
             [&](std::size_t i, double& maximum) {
-                const double x = double(velocity(i, 0)) / scale;
-                const double y = double(velocity(i, 1)) / scale;
-                const double z = double(velocity(i, 2)) / scale;
-                const double square = Kokkos::fma(z, z, Kokkos::fma(y, y, x * x));
-                maximum = std::max(maximum, square);
+                const double x = velocity(i, 0);
+                const double y = velocity(i, 1);
+                const double z = velocity(i, 2);
+                const double square = x * x + y * y + z * z;
+                if (!Kokkos::isfinite(square))
+                    maximum = std::numeric_limits<double>::infinity();
+                else
+                    maximum = std::max(maximum, square);
             },
             Kokkos::Max<double>(largest_square));
+        if (!std::isfinite(largest_square))
+            return Status{StatusCode::numerical_failure, "WCSPH accepted velocity must be finite"};
         vmax = Kokkos::sqrt(largest_square);
     }
-    int cfl_exp, scale_exp;
-    const double cfl_fraction = Kokkos::frexp(cfl_coefficient, &cfl_exp);
-    const double scale_fraction = Kokkos::frexp(scale, &scale_exp);
-    int h_exp;
-    const double h_fraction = Kokkos::frexp(smoothing_length, &h_exp);
-    cfl_exp += h_exp;
-    const double normalized =
-        (cfl_fraction * h_fraction) / (scale_fraction * (sound_speed / scale + vmax));
-    // A bound just below denorm_min can round up to denorm_min even though no
-    // positive double step fits. Check the exponent before the final rounding.
-    int normalized_exp;
-    Kokkos::frexp(normalized, &normalized_exp);
-    if (cfl_exp - scale_exp + normalized_exp <
-        std::numeric_limits<double>::min_exponent - std::numeric_limits<double>::digits + 1)
-        return Status{StatusCode::numerical_failure,
-                      "WCSPH CFL bound is below a representable positive step"};
-    const double step = Kokkos::ldexp(normalized, cfl_exp - scale_exp);
-    return std::min(step, std::numeric_limits<double>::max());
+    const double step = cfl_coefficient * smoothing_length / (sound_speed + vmax);
+    if (!std::isfinite(step) || step <= 0)
+        return Status{StatusCode::numerical_failure, "invalid WCSPH CFL step"};
+    return step;
 }
 } // namespace nexora::sph

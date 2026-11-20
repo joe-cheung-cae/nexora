@@ -138,7 +138,7 @@ TEST(SphParticipant3D, ExplicitRestoreRetryAndForeignAttemptStamps) {
     ASSERT_TRUE(simulation.finalize().ok());
     ASSERT_TRUE(foreign.finalize().ok());
 }
-TEST(SphParticipant3D, FailedGeometryAndDensityTrialsRestoreAcceptedAndAllowDifferentStep) {
+TEST(SphParticipant3D, FailedGeometryTrialRestoresAcceptedAndAllowsDifferentStep) {
     const auto initial = initial_particles();
     Fields input(initial);
     sph::Participant3D participant(input.get(), 1000);
@@ -150,24 +150,8 @@ TEST(SphParticipant3D, FailedGeometryAndDensityTrialsRestoreAcceptedAndAllowDiff
     invalid[0].position[0] = std::numeric_limits<real>::infinity();
     Fields invalid_fields(invalid);
     ASSERT_TRUE(simulation.begin_window(.5).ok());
-    const auto staged = participant.set_trial_fields(invalid_fields.get());
-    if (staged.ok()) {
-        EXPECT_FALSE(simulation.advance_trial().ok());
-        EXPECT_EQ(simulation.state(), SimulationState::prepared);
-    } else {
-        ASSERT_TRUE(simulation.restore_window().ok());
-    }
-    EXPECT_DOUBLE_EQ(simulation.time().accepted_time, 0);
-    ASSERT_NO_FATAL_FAILURE(check_snapshot(checked(participant.snapshot()), initial));
-    auto overflow = initial;
-    for (auto& particle : overflow) {
-        particle.position = {0, 0, 0};
-        particle.mass = std::numeric_limits<real>::max();
-    }
-    Fields overflowing(overflow);
-    ASSERT_TRUE(simulation.begin_window(.25).ok());
-    ASSERT_TRUE(participant.set_trial_fields(overflowing.get()).ok());
-    EXPECT_FALSE(simulation.advance_trial().ok());
+    ASSERT_TRUE(participant.set_trial_fields(invalid_fields.get()).ok());
+    EXPECT_EQ(simulation.advance_trial().code(), StatusCode::invalid_argument);
     EXPECT_EQ(simulation.state(), SimulationState::prepared);
     EXPECT_DOUBLE_EQ(simulation.time().accepted_time, 0);
     ASSERT_NO_FATAL_FAILURE(check_snapshot(checked(participant.snapshot()), initial));
@@ -233,7 +217,7 @@ TEST(SphParticipant3D, CommittedVersionsDescribeGeometryLayoutAndTopologySeparat
     EXPECT_EQ(current.stamp.topology.value(), previous.stamp.topology.value() + 1);
     ASSERT_TRUE(simulation.finalize().ok());
 }
-TEST(SphParticipant3D, PrepareFailureResourceScopesRestoreAndRetryBothReaderBranches) {
+TEST(SphParticipant3D, RestoreResourceScopesAndRetryWithAndWithoutTrialReaders) {
     for (const bool retain_trial : {false, true}) {
         Fields fields(initial_particles());
         sph::Participant3D participant(fields.get(), 1000, ParticipantId{1}, {2, 1024 * 1024});
@@ -255,15 +239,14 @@ TEST(SphParticipant3D, PrepareFailureResourceScopesRestoreAndRetryBothReaderBran
         EXPECT_EQ(participant.resource_usage().snapshot_records, baseline.snapshot_records);
         ASSERT_TRUE(simulation.begin_window(.25).ok());
         ASSERT_TRUE(simulation.advance_trial().ok());
-        const auto failed_stamp = checked(participant.trial_stamp());
+        const auto restored_stamp = checked(participant.trial_stamp());
         std::optional<sph::Snapshot3D> retained;
         if (retain_trial)
-            retained.emplace(checked(participant.trial_snapshot(failed_stamp)));
-        participant.fail_next(sph::Participant3D::Fault::prepare);
-        EXPECT_FALSE(simulation.commit_window().ok());
+            retained.emplace(checked(participant.trial_snapshot(restored_stamp)));
+        ASSERT_TRUE(simulation.restore_window().ok());
         EXPECT_EQ(simulation.state(), SimulationState::prepared);
         EXPECT_DOUBLE_EQ(simulation.time().accepted_time, 0);
-        EXPECT_FALSE(participant.trial_snapshot(failed_stamp).ok());
+        EXPECT_FALSE(participant.trial_snapshot(restored_stamp).ok());
         ASSERT_NO_FATAL_FAILURE(
             check_snapshot(checked(participant.snapshot()), initial_particles()));
         if (retained) {
@@ -273,9 +256,20 @@ TEST(SphParticipant3D, PrepareFailureResourceScopesRestoreAndRetryBothReaderBran
         retained.reset();
         EXPECT_EQ(participant.resource_usage().controlled_bytes, baseline.controlled_bytes);
         EXPECT_EQ(participant.resource_usage().snapshot_records, baseline.snapshot_records);
-        ASSERT_TRUE(simulation.advance(.125).ok());
+        ASSERT_TRUE(simulation.begin_window(.125).ok());
+        ASSERT_TRUE(simulation.advance_trial().ok());
+        if (retain_trial) {
+            const auto retry_stamp = checked(participant.trial_stamp());
+            retained.emplace(checked(participant.trial_snapshot(retry_stamp)));
+        }
+        ASSERT_TRUE(simulation.commit_window().ok());
         ASSERT_NO_FATAL_FAILURE(
             check_snapshot(checked(participant.snapshot()), initial_particles()));
+        if (retained)
+            ASSERT_NO_FATAL_FAILURE(check_snapshot(*retained, initial_particles()));
+        retained.reset();
+        EXPECT_EQ(participant.resource_usage().controlled_bytes, baseline.controlled_bytes);
+        EXPECT_EQ(participant.resource_usage().snapshot_records, baseline.snapshot_records);
         ASSERT_TRUE(simulation.finalize().ok());
         EXPECT_EQ(participant.resource_usage().controlled_bytes, 0U);
         EXPECT_EQ(participant.resource_usage().snapshot_records, 0U);

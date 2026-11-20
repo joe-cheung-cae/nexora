@@ -12,15 +12,11 @@ using Policy = Kokkos::RangePolicy<Kokkos::Serial, Kokkos::IndexType<std::size_t
 constexpr real normalization = real{2} / real{3};
 
 KOKKOS_INLINE_FUNCTION real contribution(real x, real y, real mass) {
-    const real difference = x - y;
-    const real q = Kokkos::abs(difference);
-    // Keep the compensated outer polynomial off the inner branch's hot path.
+    const real q = Kokkos::abs(x - y);
     if (q <= real{1}) [[likely]]
         return mass * (normalization * (real{1} + q * q * (real{0.75} * q - real{1.5})));
-    const real gap = outer_support_gap(x, y, difference);
-    // Include the mass before cubing the gap so an underflowed weight cannot
-    // discard a representable contribution.
-    return mass * gap * gap * gap * (normalization * real{0.25});
+    const real gap = real{2} - q;
+    return mass * ((normalization * real{0.25}) * gap * gap * gap);
 }
 
 } // namespace

@@ -304,8 +304,6 @@ Result<TrialReport> Participant::advance_trial(const TimeInterval& interval) {
                                      geometry.adjacency.indices(), geometry.self};
             sum = require(evaluate_density(*exec_, input, write.view()));
         }
-        if (consume_fault(Fault::advance))
-            return Status{StatusCode::numerical_failure, "injected SPH trial failure after density evaluation"};
         auto candidate = layout_snapshot(accepted_->geometry_);
         candidate.stamp = issuer.stamp();
         candidate.density_ = std::make_shared<Snapshot::Density>(trial_budget_, values);
@@ -348,8 +346,6 @@ Status Participant::prepare_commit(const TimeInterval& interval) {
         auto grant = bind_read(published.density_->values, density_field(FieldAccess::read), stamp);
         published.stamp = grant.stamp();
         published.read_grant_ = std::make_shared<decltype(grant)>(std::move(grant));
-        if (consume_fault(Fault::prepare))
-            return {StatusCode::execution_failure, "injected SPH prepare failure before publication"};
         pending_.emplace(std::move(published));
         stage_ = Stage::precommitted;
         return {};
@@ -545,12 +541,6 @@ bool Participant::matches(const TimeInterval& interval) const noexcept {
            interval.duration() == interval_.duration();
 }
 
-bool Participant::consume_fault(Fault fault) noexcept {
-    if (fault_ != fault)
-        return false;
-    fault_.reset();
-    return true;
-}
 
 void Participant::close_window() noexcept {
     pending_.reset();
