@@ -119,10 +119,11 @@ SPH_LEAF_SOURCES = {
 SPH_CELL_GRID_TEST = Path("tests/methods/sph/cell_grid_tests.cpp")
 SPH_PRESSURE_TEST = SPH_CELL_GRID_TEST.with_name("wcsph_window_tests.cpp")
 SPH_VERLET_TEST = SPH_CELL_GRID_TEST.with_name("verlet_window_tests.cpp")
+SPH_CONTINUITY_TEST = SPH_CELL_GRID_TEST.with_name("continuity_tests.cpp")
 SPH_PRESSURE_ORACLE = SPH_CELL_GRID_TEST.with_name("wcsph_oracle.hpp")
 SPH_WINDOW_TESTS = {SPH_CELL_GRID_TEST.with_name("participant_3d_tests.cpp"),
                     SPH_CELL_GRID_TEST.with_name("adami_wall_tests.cpp"),
-                    SPH_PRESSURE_TEST, SPH_VERLET_TEST}
+                    SPH_PRESSURE_TEST, SPH_VERLET_TEST, SPH_CONTINUITY_TEST}
 SPH_GRID_ORACLE = SPH_CELL_GRID_TEST.with_name("cell_grid_oracle.hpp")
 SPH_FIXTURE_HEADER = "sph_fixture.hpp"
 DATA_PREINIT_TEST = Path("tests/data/preinitialization_tests.cpp")
@@ -240,6 +241,7 @@ def check_internal_include(relative: Path, scope: str, header: str) -> list[str]
         if (location[:3] == SPH_PARTICIPANT_DIR or relative in SPH_LEAF_SOURCES.values()
                 or (parts[0] == "methods"
                     and (location[:3] == SPH_METHOD_DIR or relative in {SPH_CELL_GRID_TEST, SPH_GRID_ORACLE}))
+                or (relative == SPH_CONTINUITY_TEST and parts == ["methods", "sph", "Verlet3D.hpp"])
                 or (relative in {*SPH_WINDOW_TESTS, SPH_PRESSURE_ORACLE}
                     and parts == ["participants", "sph", "Participant3D.hpp"])):
             return []

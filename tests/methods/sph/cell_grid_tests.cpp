@@ -212,6 +212,68 @@ TEST(SphCellGrid, SquaredDistanceContractAtDiagonalAndNegativeSubnormal) {
     const auto grid = checked(sph::CellGrid::build(exec, fields.get(), 1000));
     ASSERT_NO_FATAL_FAILURE(compare(grid, particles, exec));
 }
+TEST(SphCellGrid, CaseSupportControlsCellsPhysicalDistanceAndUpdates) {
+    Kokkos::Serial exec;
+    const real tiny = std::numeric_limits<real>::denorm_min();
+    Fields fields({{{-1.5, 0, 0}, 1, 1, 0}, {{0, 0, 0}, 1, 2, 1}, {{tiny, 0, 0}, 1, 3, 1}});
+    const auto grid = checked(sph::CellGrid::build(exec, fields.get(), 2, {}, .75));
+    EXPECT_EQ(grid.smoothing_length(), .75);
+    EXPECT_EQ(grid.support_radius(), 1.5);
+    EXPECT_EQ(grid.cell_begin().extent(0), 3U);
+    std::vector<std::uint64_t> ids;
+    grid.for_each_neighbor(0, [&](LocalIndex slot, double distance_squared) {
+        ids.push_back(grid.fields().ids(slot));
+        EXPECT_EQ(distance_squared, 2.25);
+    });
+    EXPECT_EQ(ids, (std::vector<std::uint64_t>{2}));
+    fields.position(2, 0) = .25;
+    const auto next = checked(grid.update(exec, fields.get(), 2));
+    EXPECT_EQ(next.smoothing_length(), .75);
+    EXPECT_EQ(grid.cell_begin().data(), next.cell_begin().data());
+    fields.position(2, 0) = 1.5;
+    EXPECT_FALSE(grid.update(exec, fields.get(), 2).ok());
+    const auto rebuilt = checked(grid.update(exec, fields.get(), 3));
+    EXPECT_EQ(rebuilt.support_radius(), 1.5);
+    EXPECT_EQ(rebuilt.cell_begin().extent(0), 4U);
+}
+
+TEST(SphCellGrid, NonbinaryCellWidthUsesExactFloorOnRoundedQuotient) {
+    Kokkos::Serial exec;
+    Fields fields({{{0, 0, 0}, 1, 1, 0}, {{1, 0, 0}, 1, 2, 1}});
+    // The double width 0.2 exceeds 1/5, although 1/width rounds to five.
+    const auto grid = checked(sph::CellGrid::build(exec, fields.get(), 5, {}, .1));
+    EXPECT_EQ(grid.cell_begin().extent(0), 6U);
+    fields.position(1, 0) = -1;
+    EXPECT_FALSE(sph::CellGrid::build(exec, fields.get(), 5, {}, .1).ok());
+    if constexpr (std::numeric_limits<real>::digits == 53) {
+        fields.position(0, 0) = real{0x1p60};
+        fields.position(1, 0) = std::nextafter(fields.position(0, 0),
+                                               std::numeric_limits<real>::infinity());
+        // At width 1.5 the exact floor indices differ by 171. At this magnitude
+        // rounding each absolute index to double would lose its low bits.
+        const auto wide = checked(sph::CellGrid::build(exec, fields.get(), 172, {}, .75));
+        EXPECT_EQ(wide.cell_begin().extent(0), 173U);
+    }
+}
+
+TEST(SphCellGrid, ValidatesCaseSupportAndItsSignedBinRange) {
+    Kokkos::Serial exec;
+    Fields fields({{{0, 0, 0}, 1, 1, 0}});
+    for (const double h : {0., -1., std::numeric_limits<double>::quiet_NaN(),
+                           std::numeric_limits<double>::infinity(),
+                           std::numeric_limits<double>::denorm_min(),
+                           std::numeric_limits<double>::max()})
+        EXPECT_FALSE(sph::CellGrid::build(exec, fields.get(), 1, {}, h).ok());
+    constexpr double h = .75;
+    const real limit = real{1.5} * real{0x1p63};
+    for (const real x : {-limit, std::nextafter(limit, real{0})}) {
+        fields.position(0, 0) = x;
+        EXPECT_TRUE(sph::CellGrid::build(exec, fields.get(), 1, {}, h).ok());
+    }
+    fields.position(0, 0) = limit;
+    EXPECT_FALSE(sph::CellGrid::build(exec, fields.get(), 1, {}, h).ok());
+}
+
 TEST(SphCellGrid, InvalidPhysicalFieldsAndAbsoluteCoordinateLimits) {
     Kokkos::Serial exec;
     Fields fields({{{0, 0, 0}, 1, 1, 0}});

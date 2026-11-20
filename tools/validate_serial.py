@@ -536,6 +536,8 @@ def verify_precision(args, profile, precision):
         "nexora_sph_tests.SphVerletWindow.NoninitialRestoreAndSmallerRetryPreserveHeldSnapshots",
         "nexora_sph_tests.SphAdamiWall.GravityOnlyMatchesFreeFall",
         "nexora_sph_tests.SphAdamiWall.FixedSourcesMatchIndependentWallForcesAcrossRestore",
+        "nexora_sph_tests.SphContinuity.SmoothCoupledPairHasSecondOrderDensityError",
+        "nexora_sph_tests.SphContinuity.NonpositiveAndOverflowingTrialDensityRestoreAndRetry",
         "nexora_data_uninitialized_tests.DataPreinitialization.FieldIssuerRequiresInitializedRuntime",
         "nexora_data_uninitialized_tests.DataPreinitialization.ExternalFieldRequiresInitializedRuntime",
         "nexora_reference_uninitialized_tests.ReferenceUninitialized.RejectUninitializedRuntime",

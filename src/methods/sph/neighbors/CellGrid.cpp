@@ -1,5 +1,4 @@
 #include "CellGrid.hpp"
-#include "methods/sph/Density.hpp"
 
 #include <Kokkos_Sort.hpp>
 #include <algorithm>
@@ -30,24 +29,60 @@ struct PackedValues {
         mass(slot) = input.mass(i);
     }
 };
-
 } // namespace
 
 bool CellGrid::components_within_support(LocalIndex self, LocalIndex neighbor) const {
-    for (int axis = 0; axis < 3; ++axis)
-        if (!within_support(fields_.position(self, axis), fields_.position(neighbor, axis)))
+    for (int axis = 0; axis < 3; ++axis) {
+        const double x = fields_.position(self, axis);
+        const double y = fields_.position(neighbor, axis);
+        const double hi = std::max(x, y), neg_lo = -std::min(x, y);
+        const double distance = hi + neg_lo;
+        if (distance > support_radius())
             return false;
+        if (distance == support_radius()) {
+            // At a rounded tie recover the exact sign of the subtraction residual.
+            const double residual = (std::max(hi, neg_lo) - distance) + std::min(hi, neg_lo);
+            if (residual > 0)
+                return false;
+        }
+    }
     return true;
 }
 
 Result<CellGrid> CellGrid::build(const Kokkos::Serial& exec, const ParticleFields3D& input,
-                                 std::size_t max_cells, const AdmitStorage& admit) {
-    return prepare(exec, input, max_cells, nullptr, admit);
+                                 std::size_t max_cells, const AdmitStorage& admit,
+                                 double smoothing_length) {
+    return prepare(exec, input, max_cells, nullptr, admit, smoothing_length);
 }
 
 Result<CellGrid> CellGrid::update(const Kokkos::Serial& exec, const ParticleFields3D& input,
                                   std::size_t max_cells, const AdmitStorage& admit) const {
-    return prepare(exec, input, max_cells, this, admit);
+    return prepare(exec, input, max_cells, this, admit, smoothing_length_);
+}
+
+std::int64_t CellGrid::absolute_bin(double x) const {
+    const double width = support_radius();
+    if (width == 2)
+        return x < 0 && x > -2 ? -1 : static_cast<std::int64_t>(std::floor(x * .5));
+
+    // Division may round up to the next integer. The fused residual distinguishes
+    // that case, including a negative subnormal quotient rounded to zero.
+    const auto floor_ratio = [](double value, double divisor) {
+        const double estimate = std::floor(value / divisor);
+        return static_cast<std::int64_t>(estimate) -
+               (std::fma(-estimate, divisor, value) < 0);
+    };
+    if (std::abs(x) < 0x1p52 * width)
+        return floor_ratio(x, width);
+
+    // Split wide indices so each quotient fits exactly in double. fmod gives the
+    // signed remainder, so use a truncating block index and floor the final offset.
+    constexpr std::int64_t block = 2048;
+    const double block_width = block * width;
+    const double magnitude = std::abs(x);
+    const auto blocks = floor_ratio(magnitude, block_width);
+    const auto offset = floor_ratio(std::fmod(x, block_width), width);
+    return (x < 0 ? -blocks : blocks) * block + offset;
 }
 
 std::size_t CellGrid::cell_of(const ParticleFields3D& fields, std::size_t i) const {
@@ -132,7 +167,7 @@ Result<bool> CellGrid::try_reuse(const Kokkos::Serial& exec, const ParticleField
 
 Result<CellGrid> CellGrid::prepare(const Kokkos::Serial& exec, const ParticleFields3D& input,
                                    std::size_t max_cells, const CellGrid* previous,
-                                   const AdmitStorage& admit) {
+                                   const AdmitStorage& admit, double smoothing_length) {
     if (!Kokkos::is_initialized() || Kokkos::is_finalized())
         return Status{StatusCode::invalid_state, "3D SPH grid requires active Kokkos"};
     const auto n = input.position.extent(0);
@@ -147,6 +182,12 @@ Result<CellGrid> CellGrid::prepare(const Kokkos::Serial& exec, const ParticleFie
         return Status{StatusCode::invalid_argument, "3D SPH input has a null particle field"};
 
     CellGrid grid;
+    grid.smoothing_length_ = smoothing_length;
+    const double radius = grid.support_radius();
+    grid.radius_squared_ = radius * radius;
+    if (!(smoothing_length > 0) || !std::isnormal(grid.radius_squared_))
+        return Status{StatusCode::invalid_argument,
+                      "3D SPH requires positive smoothing length with normal finite squared support"};
     grid.origin_.fill(std::numeric_limits<std::int64_t>::max());
     std::array<std::int64_t, 3> largest;
     largest.fill(std::numeric_limits<std::int64_t>::min());
@@ -162,10 +203,10 @@ Result<CellGrid> CellGrid::prepare(const Kokkos::Serial& exec, const ParticleFie
             const double x = input.position(i, axis);
             if (!std::isfinite(x)) {
                 invalid_field = true;
-            } else if (x < -0x1p64 || x >= 0x1p64) {
+            } else if (x < -0x1p63 * radius || x >= 0x1p63 * radius) {
                 unsupported_bin = true;
             } else {
-                const auto bin = absolute_bin(x);
+                const auto bin = grid.absolute_bin(x);
                 grid.origin_[axis] = std::min(grid.origin_[axis], bin);
                 largest[axis] = std::max(largest[axis], bin);
             }

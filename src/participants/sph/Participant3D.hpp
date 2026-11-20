@@ -24,6 +24,10 @@ class Snapshot3D {
         const auto& grid = geometry_->grid;
         return grid.fields().ids(grid.owned_slots()(row));
     }
+    real mass(std::size_t row) const {
+        const auto& grid = geometry_->grid;
+        return grid.fields().mass(grid.owned_slots()(row));
+    }
     real density(std::size_t row) const;
     Result<real> pressure(std::size_t row) const;
     Result<std::array<real, 3>> pressure_acceleration(std::size_t row) const;
@@ -60,14 +64,22 @@ class Participant3D final : public ParticipantIF {
     // Each stage must include the full support of those ghosts.
     Participant3D(ParticleFields3D initial, std::size_t max_cells, WcsphParameters parameters,
                   ParticipantId id = ParticipantId{1}, ResourceLimits limits = {});
-    // Initial velocities follow input order. This mode integrates owned particles internally.
+    // Initial-only kernel-summation diagnostics. Advancing requires an explicit density.
     Participant3D(ParticleFields3D initial, std::size_t max_cells, WcsphVerletParameters parameters,
                   Velocity3D::const_type initial_velocity, ParticipantId id = ParticipantId{1},
                   ResourceLimits limits = {});
-    // Walls are local stationary sources. The fluid input must contain owned particles only.
+    // Initial-only fixed-wall diagnostic. The fluid input must contain owned particles only.
     Participant3D(ParticleFields3D fluid, std::size_t max_cells, WcsphVerletParameters parameters,
                   Velocity3D::const_type initial_velocity, FixedWallParticles3D walls,
                   ParticipantId id = ParticipantId{1}, ResourceLimits limits = {});
+    // Explicit initial densities follow the fluid input order and evolve with continuity.
+    Participant3D(ParticleFields3D fluid, std::size_t max_cells, WcsphVerletParameters parameters,
+                  Velocity3D::const_type initial_velocity, Values::const_type initial_density,
+                  ParticipantId id = ParticipantId{1}, ResourceLimits limits = {});
+    Participant3D(ParticleFields3D fluid, std::size_t max_cells, WcsphVerletParameters parameters,
+                  Velocity3D::const_type initial_velocity, Values::const_type initial_density,
+                  FixedWallParticles3D walls, ParticipantId id = ParticipantId{1},
+                  ResourceLimits limits = {});
     Participant3D(const Participant3D&) = delete;
     Participant3D& operator=(const Participant3D&) = delete;
 
@@ -117,7 +129,8 @@ class Participant3D final : public ParticipantIF {
         finalized
     };
     Snapshot3D compute(std::shared_ptr<const Geometry3D> geometry, FieldStamp stamp,
-                       const Velocity3D::const_type& input_velocity = {}, double dt = 0) const;
+                       const Velocity3D::const_type& input_velocity = {}, double dt = 0,
+                       const Values::const_type* owned_density = nullptr) const;
     Snapshot3D integrate(FieldStamp stamp, double dt) const;
     Result<Snapshot3D> issue(const Snapshot3D&) const;
     bool matches(const TimeInterval& interval) const;
@@ -130,9 +143,11 @@ class Participant3D final : public ParticipantIF {
     detail::ResourceBudget budget_;
     std::optional<WcsphParameters> pressure_parameters_;
     std::optional<double> verlet_cfl_;
+    double smoothing_length_{1};
     std::array<double, 3> gravity_{};
     std::optional<FixedWallParticles3D> fixed_walls_;
     Velocity3D::const_type initial_velocity_;
+    std::optional<Values::const_type> initial_density_;
     std::optional<Kokkos::Serial> exec_;
     std::optional<StagedFields3D> staged_;
     std::optional<Snapshot3D> accepted_, trial_, pending_;

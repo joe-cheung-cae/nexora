@@ -24,6 +24,7 @@ Result<StagedFields3D> copy_stage_3d(const Kokkos::Serial&, const ParticleFields
                                      const detail::ResourceBudget&);
 Result<std::shared_ptr<const Geometry3D>>
 prepare_geometry_3d(const Kokkos::Serial&, const ParticleFields3D&, std::size_t max_cells,
-                    const detail::ResourceBudget&, const Geometry3D* previous = nullptr);
+                    const detail::ResourceBudget&, double smoothing_length,
+                    const Geometry3D* previous = nullptr);
 
 } // namespace nexora::sph

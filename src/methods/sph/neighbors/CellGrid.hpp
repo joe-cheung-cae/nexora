@@ -19,7 +19,7 @@ struct ParticleFields3D {
     Kokkos::View<const std::uint8_t*, Kokkos::HostSpace> ghost;
 };
 
-// Immutable sorted snapshot of one nonperiodic geometry stage, with h=1 and R=2.
+// Immutable sorted snapshot of one nonperiodic geometry stage, with a fixed per-case support radius R=2h.
 class CellGrid {
   public:
     using Indices = Kokkos::View<const LocalIndex*, Kokkos::HostSpace>;
@@ -28,11 +28,15 @@ class CellGrid {
     // is allocated or published. A rejected route ends the operation.
     using AdmitStorage = std::function<Status(StorageChange, std::size_t owned, std::size_t cells)>;
     static Result<CellGrid> build(const Kokkos::Serial&, const ParticleFields3D&,
-                                  std::size_t max_cells, const AdmitStorage& admit = {});
+                                  std::size_t max_cells, const AdmitStorage& admit = {},
+                                  double smoothing_length = 1.0);
     // Return a fresh field snapshot. Share cell_begin when each ID retains its cell
     // and ownership. Input rows may be reordered between calls.
     Result<CellGrid> update(const Kokkos::Serial&, const ParticleFields3D&, std::size_t max_cells,
                             const AdmitStorage& admit = {}) const;
+
+    double smoothing_length() const { return smoothing_length_; }
+    double support_radius() const { return 2 * smoothing_length_; }
 
     const ParticleFields3D& fields() const {
         return fields_;
@@ -81,7 +85,7 @@ class CellGrid {
                     const double d2 = Kokkos::fma(dz, dz, Kokkos::fma(dy, dy, dx * dx));
                     // A component just outside R can round to R on subtraction.
                     // Only a squared-distance tie can admit that candidate.
-                    if (d2 < 4.0 || (d2 == 4.0 && components_within_support(self, j)))
+                    if (d2 < radius_squared_ || (d2 == radius_squared_ && components_within_support(self, j)))
                         visit(j, d2);
                 }
             }
@@ -92,20 +96,19 @@ class CellGrid {
     CellGrid() = default;
     static Result<CellGrid> prepare(const Kokkos::Serial&, const ParticleFields3D&,
                                     std::size_t max_cells, const CellGrid* previous,
-                                    const AdmitStorage&);
+                                    const AdmitStorage&, double smoothing_length);
     Result<bool> try_reuse(const Kokkos::Serial&, const ParticleFields3D&, const CellGrid& previous,
                            const AdmitStorage&);
     std::size_t cell_of(const ParticleFields3D&, std::size_t i) const;
     bool components_within_support(LocalIndex self, LocalIndex neighbor) const;
-    static std::int64_t absolute_bin(double x) {
-        // Halving the smallest negative subnormal can round to negative zero.
-        return x < 0 && x > -2 ? -1 : static_cast<std::int64_t>(Kokkos::floor(x * .5));
-    }
+    std::int64_t absolute_bin(double x) const;
     static std::size_t relative_bin(std::int64_t bin, std::int64_t origin) {
         // The nonnegative difference may exceed INT64_MAX across a signed origin.
         return static_cast<std::uint64_t>(bin) - static_cast<std::uint64_t>(origin);
     }
 
+    double smoothing_length_ = 1;
+    double radius_squared_ = 4;
     ParticleFields3D fields_;
     Indices owned_slots_, cell_begin_, sorted_to_input_, input_to_sorted_;
     std::array<std::int64_t, 3> origin_{};

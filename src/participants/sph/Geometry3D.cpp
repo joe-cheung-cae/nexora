@@ -64,11 +64,10 @@ Result<StagedFields3D> copy_stage_3d(const Kokkos::Serial& exec, const ParticleF
     }
 }
 
-Result<std::shared_ptr<const Geometry3D>> prepare_geometry_3d(const Kokkos::Serial& exec,
-                                                              const ParticleFields3D& input,
-                                                              std::size_t max_cells,
-                                                              const detail::ResourceBudget& budget,
-                                                              const Geometry3D* previous) {
+Result<std::shared_ptr<const Geometry3D>>
+prepare_geometry_3d(const Kokkos::Serial& exec, const ParticleFields3D& input,
+                    std::size_t max_cells, const detail::ResourceBudget& budget,
+                    double smoothing_length, const Geometry3D* previous) {
     try {
         detail::ResourceBudget::Ticket values, cells, permutations;
         const auto n = input.ids.extent(0);
@@ -102,7 +101,7 @@ Result<std::shared_ptr<const Geometry3D>> prepare_geometry_3d(const Kokkos::Seri
             return {};
         };
         auto grid = previous ? previous->grid.update(exec, input, max_cells, admit)
-                             : CellGrid::build(exec, input, max_cells, admit);
+                             : CellGrid::build(exec, input, max_cells, admit, smoothing_length);
         if (!grid.ok())
             return grid.status();
         Geometry3D candidate{std::move(values), std::move(cells), std::move(permutations),

@@ -10,6 +10,7 @@ using Velocities = std::map<std::uint64_t, std::array<real, 3>>;
 struct Trajectory {
     std::vector<Particle> particles;
     Velocities velocity;
+    std::map<std::uint64_t, long double> density{};
 };
 sph::Velocity3D input_velocity(const Trajectory& state) {
     sph::Velocity3D result("test.initial_velocity", state.particles.size());
@@ -18,23 +19,60 @@ sph::Velocity3D input_velocity(const Trajectory& state) {
             result(i, k) = state.velocity.at(state.particles[i].id)[k];
     return result;
 }
+sph::Values seed_density(const std::vector<Particle>& particles) {
+    const auto sum = explicit_csr(particles);
+    sph::Values density("test.initial_density", particles.size());
+    for (std::size_t i = 0; i < particles.size(); ++i)
+        density(i) = static_cast<real>(sum.density.at(particles[i].id));
+    return density;
+}
+long double density_rate(const Particle& particle, const std::vector<Particle>& cloud,
+                         const Velocities& velocity) {
+    long double sum{};
+    for (const auto& other : cloud) {
+        std::array<long double, 3> delta;
+        long double dot{};
+        for (int k = 0; k < 3; ++k) {
+            delta[k] = static_cast<long double>(particle.position[k]) - other.position[k];
+            dot +=
+                (static_cast<long double>(velocity.at(particle.id)[k]) - velocity.at(other.id)[k]) *
+                delta[k];
+        }
+        const long double r = std::hypot(delta[0], delta[1], delta[2]);
+        if (r > 0 && r < 2) {
+            const auto radial = r < 1 ? (2.25L * r - 3) : -.75L * (2 - r) * (2 - r) / r;
+            sum += other.mass * radial * dot / std::acos(-1.L);
+        }
+    }
+    return sum;
+}
 Trajectory explicit_verlet(const Trajectory& accepted, sph::WcsphParameters eos, double dt) {
     // All forces originate in the independent all-pairs CSR oracle. Match the
     // public real state boundaries at each half-kick/drift/final-kick, not the
     // production cell ordering or numerical kernels.
-    const auto old_force = force_oracle(accepted.particles, eos);
+    const auto old_force = force_oracle(accepted.particles, eos, accepted.density);
     Trajectory next = accepted;
-    Velocities half;
+    Velocities half, predictor;
     for (auto& particle : next.particles) {
         for (int k = 0; k < 3; ++k) {
             const real acceleration = static_cast<real>(old_force.acceleration.at(particle.id)[k]);
+            predictor[particle.id][k] = static_cast<real>(
+                std::fma(dt, double(acceleration), double(accepted.velocity.at(particle.id)[k])));
             half[particle.id][k] = static_cast<real>(std::fma(
                 dt / 2, double(acceleration), double(accepted.velocity.at(particle.id)[k])));
             particle.position[k] = static_cast<real>(
                 std::fma(dt, double(half.at(particle.id)[k]), double(particle.position[k])));
         }
     }
-    const auto refreshed = force_oracle(next.particles, eos);
+    for (std::size_t i = 0; i < next.particles.size(); ++i) {
+        const auto id = next.particles[i].id;
+        const auto before =
+            density_rate(accepted.particles[i], accepted.particles, accepted.velocity);
+        const auto after = density_rate(next.particles[i], next.particles, predictor);
+        next.density[id] = static_cast<real>(static_cast<real>(old_force.csr.density.at(id)) +
+                                             dt * .5L * (before + after));
+    }
+    const auto refreshed = force_oracle(next.particles, eos, next.density);
     for (const auto& particle : next.particles)
         for (int k = 0; k < 3; ++k)
             next.velocity[particle.id][k] = static_cast<real>(std::fma(
@@ -52,7 +90,7 @@ void check_trajectory(const sph::Snapshot3D& snapshot, const Trajectory& expecte
     // Check fields against the oracle at the observed geometry, avoiding force
     // cancellation bounds that pretend accumulated trajectory roundoff is zero.
     auto observed = expected.particles;
-    const auto independent_force = force_oracle(expected.particles, eos);
+    const auto independent_force = force_oracle(expected.particles, eos, expected.density);
     const long double tolerance = 256 * (steps + 1) * std::numeric_limits<real>::epsilon();
     std::vector<std::uint64_t> seen;
     for (std::size_t row = 0; row < snapshot.row_count(); ++row) {
@@ -104,7 +142,7 @@ void check_trajectory(const sph::Snapshot3D& snapshot, const Trajectory& expecte
     ASSERT_EQ(snapshot.row_count(), expected.particles.size());
     std::sort(seen.begin(), seen.end());
     EXPECT_EQ(std::adjacent_find(seen.begin(), seen.end()), seen.end());
-    ASSERT_NO_FATAL_FAILURE(check_force_snapshot(snapshot, observed, eos));
+    ASSERT_NO_FATAL_FAILURE(check_force_snapshot(snapshot, observed, eos, expected.density));
     // Neighbor identity must also match the independently evolved geometry.
     const auto csr = explicit_csr(expected.particles);
     for (std::size_t row = 0; row < snapshot.row_count(); ++row) {
@@ -144,7 +182,8 @@ TEST(SphVerletWindow, ConnectedThreeDimensionalCloudChangesNeighborsAcrossSteps)
 
     Fields fields(expected.particles);
     const auto velocity = input_velocity(expected);
-    sph::Participant3D participant(fields.get(), 1000, parameters, velocity);
+    sph::Participant3D participant(fields.get(), 1000, parameters, velocity,
+                                   seed_density(expected.particles));
     Simulation simulation(participant);
     ASSERT_TRUE(simulation.initialize().ok());
     ASSERT_TRUE(simulation.prepare().ok());
@@ -170,7 +209,8 @@ TEST(SphVerletWindow, UniformVelocityCrossesCellsAndStrictCfl) {
                         {{99, {4, 1, -2}}, {11, {4, 1, -2}}}};
     Fields fields(expected.particles);
     auto velocity = input_velocity(expected);
-    sph::Participant3D participant(fields.get(), 10000, parameters, velocity);
+    sph::Participant3D participant(fields.get(), 10000, parameters, velocity,
+                                   seed_density(expected.particles));
     Simulation simulation(participant);
     ASSERT_TRUE(simulation.initialize().ok());
     ASSERT_TRUE(simulation.prepare().ok());
@@ -208,7 +248,8 @@ TEST(SphVerletWindow, UnequalMassTrajectoryMatchesIndependentCsrAndMomentum) {
     auto expected = pair_state();
     Fields fields(expected.particles);
     auto velocity = input_velocity(expected);
-    sph::Participant3D participant(fields.get(), 1000, parameters, velocity);
+    sph::Participant3D participant(fields.get(), 1000, parameters, velocity,
+                                   seed_density(expected.particles));
     Simulation simulation(participant);
     ASSERT_TRUE(simulation.initialize().ok());
     ASSERT_TRUE(simulation.prepare().ok());
@@ -270,7 +311,8 @@ TEST(SphVerletWindow, NoninitialRestoreAndSmallerRetryPreserveHeldSnapshots) {
     const auto initial = pair_state();
     Fields fields(initial.particles);
     auto velocity = input_velocity(initial);
-    sph::Participant3D participant(fields.get(), 1000, parameters, velocity);
+    sph::Participant3D participant(fields.get(), 1000, parameters, velocity,
+                                   seed_density(initial.particles));
     Simulation simulation(participant);
     ASSERT_TRUE(simulation.initialize().ok());
     ASSERT_TRUE(simulation.prepare().ok());
@@ -305,7 +347,8 @@ TEST(SphVerletWindow, GridCapacityFailureRestoresAllFieldsAndAllowsShorterStep) 
     const Trajectory initial{{{{.125, 0, 0}, 1, 11, 0}, {{3.875, 0, 0}, 1, 22, 0}},
                              {{11, {-.5, 0, 0}}, {22, {.5, 0, 0}}}};
     Fields fields(initial.particles);
-    sph::Participant3D participant(fields.get(), 2, parameters, input_velocity(initial));
+    sph::Participant3D participant(fields.get(), 2, parameters, input_velocity(initial),
+                                   seed_density(initial.particles));
     Simulation simulation(participant);
     ASSERT_TRUE(simulation.initialize().ok());
     ASSERT_TRUE(simulation.prepare().ok());
@@ -337,7 +380,8 @@ TEST(SphVerletWindow, UsesRequestedDurationWhenAbsoluteEndpointRounds) {
     const Trajectory initial{{{{0, 0, 0}, 1, 11, 0}}, {{11, {.125, 0, 0}}}};
     Fields fields(initial.particles);
     auto velocities = input_velocity(initial);
-    sph::Participant3D participant(fields.get(), 1, parameters, velocities);
+    sph::Participant3D participant(fields.get(), 1, parameters, velocities,
+                                   seed_density(initial.particles));
     constexpr double start = 0x1p52;
     Simulation simulation(participant, start);
     ASSERT_TRUE(simulation.initialize().ok());
@@ -383,7 +427,17 @@ TEST(SphVerletWindow, ChecksInitialVelocityCflAndOwnershipBeforePublishing) {
     ASSERT_TRUE(staged.initialize(0).ok());
     EXPECT_EQ(checked(staged.snapshot()).velocity(0).status().code(), StatusCode::unsupported);
     ASSERT_TRUE(staged.finalize().ok());
-    sph::Participant3D integrated(fields.get(), 1, parameters, velocity);
+    sph::Participant3D diagnostic(fields.get(), 1, parameters, velocity);
+    Simulation diagnostic_sim(diagnostic);
+    ASSERT_TRUE(diagnostic_sim.initialize().ok());
+    ASSERT_TRUE(diagnostic_sim.prepare().ok());
+    EXPECT_GT(checked(diagnostic.snapshot()).density(0), 0);
+    EXPECT_EQ(diagnostic_sim.begin_window(.125).code(), StatusCode::unsupported);
+    EXPECT_EQ(diagnostic_sim.time().accepted_steps, 0u);
+    EXPECT_TRUE(diagnostic_sim.finalize().ok());
+
+    sph::Participant3D integrated(fields.get(), 1, parameters, velocity,
+                                  seed_density({{{0, 0, 0}, 1, 1, 0}}));
     Simulation simulation(integrated);
     ASSERT_TRUE(simulation.initialize().ok());
     ASSERT_TRUE(simulation.prepare().ok());
@@ -393,7 +447,7 @@ TEST(SphVerletWindow, ChecksInitialVelocityCflAndOwnershipBeforePublishing) {
     ASSERT_TRUE(simulation.commit_window().ok());
     ASSERT_TRUE(simulation.finalize().ok());
 
-    sph::Participant3D empty(Fields({}).get(), 0, parameters, {});
+    sph::Participant3D empty(Fields({}).get(), 0, parameters, {}, sph::Values("empty.density", 0));
     Simulation empty_sim(empty);
     ASSERT_TRUE(empty_sim.initialize().ok());
     ASSERT_TRUE(empty_sim.prepare().ok());
@@ -401,5 +455,36 @@ TEST(SphVerletWindow, ChecksInitialVelocityCflAndOwnershipBeforePublishing) {
     ASSERT_TRUE(empty_sim.advance(.5).ok());
     EXPECT_EQ(checked(empty.snapshot()).row_count(), 0u);
     ASSERT_TRUE(empty_sim.finalize().ok());
+}
+
+TEST(SphVerletWindow, HalfKicksHandleLargeCombinedAcceleration) {
+    Kokkos::Serial exec;
+    Fields fields({{{0, 0, 0}, 1, 1, 0}});
+    const auto grid = checked(sph::CellGrid::build(exec, fields.get(), 1));
+    sph::Velocity3D velocity("test.velocity", 1), half("test.half", 1);
+    sph::Velocity3D position("test.position", 1), final_velocity("test.final_velocity", 1);
+    sph::Acceleration3D acceleration("test.pressure_acceleration", 1);
+    // The sum exceeds the configured real range in both builds and binary64
+    // in the double build, while the requested velocity increments fit exactly.
+    constexpr int exponent = std::numeric_limits<real>::max_exponent - 1;
+    const double component = std::ldexp(1., exponent);
+    const double dt = std::ldexp(1., -exponent);
+    const std::array<double, 3> gravity{component, -component, 0};
+    for (int axis = 0; axis < 3; ++axis)
+        acceleration(0, axis) = static_cast<real>(gravity[axis]);
+
+    ASSERT_TRUE(
+        sph::kick_drift_3d(exec, grid, velocity, acceleration, dt, position, half, gravity).ok());
+    auto updated = fields.get();
+    updated.position = position;
+    const auto refreshed = checked(grid.update(exec, updated, 8));
+    ASSERT_TRUE(
+        sph::finish_kick_3d(exec, refreshed, half, acceleration, dt, final_velocity, gravity).ok());
+    for (int axis = 0; axis < 3; ++axis) {
+        const double increment = dt * gravity[axis];
+        EXPECT_EQ(half(0, axis), increment);
+        EXPECT_EQ(position(0, axis), dt * increment);
+        EXPECT_EQ(final_velocity(0, axis), 2 * increment);
+    }
 }
 } // namespace

@@ -9,13 +9,15 @@ struct ForceOracle {
     std::map<std::uint64_t, long double> pressure, pressure_scale;
     std::map<std::uint64_t, std::array<long double, 3>> acceleration, acceleration_scale;
 };
-inline ForceOracle force_oracle(const std::vector<Particle>& input,
-                                sph::WcsphParameters parameters) {
+inline ForceOracle force_oracle(const std::vector<Particle>& input, sph::WcsphParameters parameters,
+                                const std::map<std::uint64_t, long double>& density = {}) {
     auto all_local = input;
     for (auto& particle : all_local)
         particle.ghost = 0;
     ForceOracle result;
     result.csr = explicit_csr(all_local); // Ghost density needs its complete local CSR too.
+    if (!density.empty())
+        result.csr.density = density;
     const long double pi = std::acos(-1.0L);
     const long double rho0 = parameters.reference_density, c = parameters.sound_speed;
     const long double gamma = parameters.gamma, prefactor = rho0 * c * c / gamma;
@@ -66,8 +68,9 @@ inline ForceOracle force_oracle(const std::vector<Particle>& input,
 }
 inline void check_force_snapshot(const sph::Snapshot3D& snapshot,
                                  const std::vector<Particle>& input,
-                                 sph::WcsphParameters parameters) {
-    const auto oracle = force_oracle(input, parameters);
+                                 sph::WcsphParameters parameters,
+                                 const std::map<std::uint64_t, long double>& density = {}) {
+    const auto oracle = force_oracle(input, parameters, density);
     ASSERT_EQ(snapshot.row_count(), oracle.acceleration.size());
     std::vector<std::uint64_t> seen;
     for (std::size_t row = 0; row < snapshot.row_count(); ++row) {

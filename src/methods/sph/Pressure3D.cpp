@@ -92,8 +92,8 @@ double inverse_tait(double pressure, const WcsphParameters& p, Scaled scale) {
     if (pressure == 0)
         return p.reference_density;
     const auto parts = Scaled::from(pressure);
-    const auto relative = Scaled::from(parts.significand / scale.significand,
-                                       parts.exponent - scale.exponent);
+    const auto relative =
+        Scaled::from(parts.significand / scale.significand, parts.exponent - scale.exponent);
     const double ratio = relative.value();
     double log_density_ratio;
     if (ratio < -.5) {
@@ -103,14 +103,16 @@ double inverse_tait(double pressure, const WcsphParameters& p, Scaled scale) {
         if (remainder.significand <= 0)
             return std::numeric_limits<double>::quiet_NaN();
         log_density_ratio = (Kokkos::log(remainder.significand / scale.significand) +
-                             (remainder.exponent - scale.exponent) * std::numbers::ln2) / p.gamma;
+                             (remainder.exponent - scale.exponent) * std::numbers::ln2) /
+                            p.gamma;
     } else if (Kokkos::abs(ratio) < std::numeric_limits<double>::epsilon()) {
         const auto gamma = Scaled::from(p.gamma);
         log_density_ratio = Scaled::from(relative.significand / gamma.significand,
-                                          relative.exponent - gamma.exponent).value();
+                                         relative.exponent - gamma.exponent)
+                                .value();
     } else if (Kokkos::isinf(ratio)) {
-        log_density_ratio = (Kokkos::log(relative.significand) +
-                             relative.exponent * std::numbers::ln2) / p.gamma;
+        log_density_ratio =
+            (Kokkos::log(relative.significand) + relative.exponent * std::numbers::ln2) / p.gamma;
     } else {
         log_density_ratio = Kokkos::log1p(ratio) / p.gamma;
     }
@@ -129,7 +131,8 @@ double wall_pressure(const CellGrid& grid, LocalIndex wall, const std::array<dou
     grid.for_each_neighbor_of_slot(wall, [&](LocalIndex f, double d2) {
         if (fields.ghost(f))
             return;
-        const double w = weight_3d(d2);
+        // The common h^-3 normalization cancels in the weighted wall average.
+        const double w = m4_weight_3d(Kokkos::sqrt(d2) / grid.smoothing_length());
         if (w == 0)
             return;
         const auto row = fluid_row(f);
@@ -148,22 +151,14 @@ double wall_pressure(const CellGrid& grid, LocalIndex wall, const std::array<dou
 }
 
 bool contributes(const CellGrid& grid, LocalIndex i, LocalIndex j, double d2) {
-    if (d2 == 4)
+    const double support = grid.support_radius();
+    if (d2 == support * support)
         return false;
     if (d2 > 0)
         return true;
     // Two distinct subnormal coordinates may have a squared separation rounded to zero.
     const auto& x = grid.fields().position;
     return x(i, 0) != x(j, 0) || x(i, 1) != x(j, 1) || x(i, 2) != x(j, 2);
-}
-
-// -W'(q)/q with h=1; its first branch includes the finite q->0 limit.
-double gradient_factor(double d2) {
-    const double q = Kokkos::sqrt(d2);
-    if (q < 1)
-        return std::numbers::inv_pi * (3 - 2.25 * q);
-    const double tail = 2 - q;
-    return (.75 * std::numbers::inv_pi) * (tail * tail / q);
 }
 
 std::array<double, 3>
@@ -173,10 +168,14 @@ acceleration_at_slot(const CellGrid& grid, LocalIndex i,
     const auto& position = grid.fields().position;
     const auto& mass = grid.fields().mass;
 
+    const double h = grid.smoothing_length();
+    int h_exponent;
+    const double f = Kokkos::frexp(h, &h_exponent);
+    const double fraction5 = f * f * f * f * f;
     const auto each_pair = [&](auto visit) {
         grid.for_each_neighbor_of_slot(i, [&](LocalIndex j, double d2) {
             if (contributes(grid, i, j, d2))
-                visit(j, gradient_factor(d2));
+                visit(j, m4_negative_radial_derivative_over_q_3d(Kokkos::sqrt(d2) / h));
         });
     };
     const auto separation = [&](LocalIndex j, int axis) {
@@ -195,9 +194,12 @@ acceleration_at_slot(const CellGrid& grid, LocalIndex i,
             const double sum = force_coefficient(i) + force_coefficient(j);
             if (sum == 0)
                 return;
-            const double weighted = sum * gradient;
+            const double physical_gradient =
+                h == 1 ? gradient : Kokkos::ldexp(gradient / fraction5, -5 * h_exponent);
+            const double weighted = sum * physical_gradient;
             const double pair = weighted * double(mass(j));
-            if (!std::isnormal(weighted) || !std::isnormal(pair)) {
+            if (!std::isnormal(physical_gradient) || !std::isnormal(weighted) ||
+                !std::isnormal(pair)) {
                 scaled = true;
                 return;
             }
@@ -220,7 +222,9 @@ acceleration_at_slot(const CellGrid& grid, LocalIndex i,
         };
         const auto self = source(i);
         each_pair([&](LocalIndex j, double gradient) {
-            const auto pair = self.plus(source(j)).times(gradient).times(mass(j));
+            auto pair = self.plus(source(j)).times(gradient).times(mass(j));
+            if (h != 1)
+                pair = Scaled::from(pair.significand / fraction5, pair.exponent - 5 * h_exponent);
             for (int axis = 0; axis < 3; ++axis)
                 total[axis] = total[axis].plus(pair.times(separation(j, axis)));
         });
@@ -352,8 +356,8 @@ Status evaluate_pressure_3d(const Kokkos::Serial& exec, const CellGrid& grid,
                         return;
                     const auto j = static_cast<LocalIndex>(slot);
                     if (wall_gravity) {
-                        const double raw = wall_pressure(grid, j, *wall_gravity, fluid_row,
-                                                         density, pressure);
+                        const double raw =
+                            wall_pressure(grid, j, *wall_gravity, fluid_row, density, pressure);
                         if (!fits_real(raw)) {
                             ++errors;
                             return;
@@ -376,7 +380,8 @@ Status evaluate_pressure_3d(const Kokkos::Serial& exec, const CellGrid& grid,
             if (invalid)
                 return {StatusCode::numerical_failure,
                         wall_gravity ? "invalid Adami wall pressure or inverse Tait density"
-                                     : "invalid reconstructed ghost WCSPH density or pressure exceeds real range"};
+                                     : "invalid reconstructed ghost WCSPH density or pressure "
+                                       "exceeds real range"};
         }
         const decltype(coefficient)::const_type force_coefficient = coefficient;
         const decltype(exponent)::const_type force_exponent = exponent;

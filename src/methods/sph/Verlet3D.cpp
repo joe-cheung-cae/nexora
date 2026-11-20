@@ -9,6 +9,12 @@ namespace nexora::sph {
 namespace {
 using Policy = Kokkos::RangePolicy<Kokkos::Serial, Kokkos::IndexType<std::size_t>>;
 
+Status validate_length(double h) {
+    if (!std::isfinite(h) || h <= 0)
+        return {StatusCode::invalid_argument, "WCSPH smoothing length must be finite and positive"};
+    return {};
+}
+
 Status validate_cfl(double cfl) {
     if (!std::isfinite(cfl) || cfl <= 0 || cfl > 1)
         return {StatusCode::invalid_argument, "WCSPH CFL safety factor must be in (0,1]"};
@@ -18,7 +24,7 @@ Status validate_cfl(double cfl) {
 template <class A, class B> bool overlaps(const A& a, const B& b) {
     if (!a.span() || !b.span())
         return false;
-    const auto before = std::less<const real*>{};
+    const auto before = std::less<const void*>{};
     return before(a.data(), b.data() + b.span()) && before(b.data(), a.data() + a.span());
 }
 
@@ -46,7 +52,12 @@ bool fits_real(double value) {
     return Kokkos::isfinite(value) && Kokkos::abs(value) <= std::numeric_limits<real>::max();
 }
 
-double half_kick(double dt, double acceleration, double velocity) {
+double half_kick(double dt, double pressure_acceleration, double gravity, double velocity) {
+    const double acceleration = pressure_acceleration + gravity;
+    if (Kokkos::isinf(acceleration) && Kokkos::isfinite(pressure_acceleration)) {
+        // The sum overflowed. Halve each finite acceleration before adding them.
+        return Kokkos::fma(dt, .5 * pressure_acceleration + .5 * gravity, velocity);
+    }
     // Scaling a subnormal time step by 1/2 can lose a bit before multiplication.
     if (dt < 2 * std::numeric_limits<double>::min() &&
         Kokkos::abs(acceleration) >= 2 * std::numeric_limits<double>::min())
@@ -55,10 +66,53 @@ double half_kick(double dt, double acceleration, double velocity) {
 }
 } // namespace
 
+Status continuity_rate_3d(const Kokkos::Serial& exec, const CellGrid& grid,
+                          const Velocity3D::const_type& velocity, const DensityRate3D& rate) {
+    const auto& sources = grid.fields();
+    const auto owned = grid.owned_slots();
+    if (!valid_fields(sources.ids.extent(0), velocity) || !valid_fields(owned.extent(0), rate) ||
+        overlaps(rate, velocity) || overlaps(rate, sources.mass) || overlaps(rate, sources.position))
+        return {StatusCode::invalid_argument, "continuity fields have invalid extents, storage or output overlap"};
+    const double h = grid.smoothing_length();
+    int exponent;
+    const double f = Kokkos::frexp(h, &exponent);
+    const double f5 = f * f * f * f * f;
+    const double scale = Kokkos::ldexp(1 / f5, -5 * exponent);
+    std::size_t invalid{};
+    Kokkos::parallel_reduce(
+        "sph.continuity.rate", Policy(exec, 0, owned.extent(0)),
+        [&](std::size_t row, std::size_t& errors) {
+            const auto i = owned(row);
+            double sum = 0;
+            grid.for_each_neighbor(row, [&](LocalIndex j, double d2) {
+                const double gradient =
+                    m4_negative_radial_derivative_over_q_3d(Kokkos::sqrt(d2) / h);
+                if (gradient == 0)
+                    return;
+                double dot = 0;
+                for (int axis = 0; axis < 3; ++axis) {
+                    const double vj = sources.ghost(j) ? 0 : velocity(j, axis);
+                    const double dx = double(sources.position(j, axis)) - sources.position(i, axis);
+                    dot += (double(velocity(i, axis)) - vj) * dx;
+                }
+                const double term = (dot * sources.mass(j)) * gradient;
+                sum += std::isnormal(scale) ? term * scale
+                                            : Kokkos::ldexp(term / f5, -5 * exponent);
+            });
+            rate(row) = sum;
+            errors += !Kokkos::isfinite(sum);
+        }, invalid);
+    if (invalid)
+        return {StatusCode::numerical_failure, "nonfinite SPH continuity rate"};
+    return {};
+}
+
 Status WcsphVerletParameters::validate() const {
     if (auto status = eos.validate(); !status.ok())
         return status;
     if (auto status = validate_gravity(gravity); !status.ok())
+        return status;
+    if (auto status = validate_length(smoothing_length); !status.ok())
         return status;
     return validate_cfl(cfl);
 }
@@ -99,7 +153,7 @@ Status kick_drift_3d(const Kokkos::Serial& exec, const CellGrid& accepted,
             const auto slot = owned(i);
             for (int axis = 0; axis < 3; ++axis) {
                 const double kicked =
-                    half_kick(dt, acceleration(i, axis) + gravity[axis], velocity(i, axis));
+                    half_kick(dt, acceleration(i, axis), gravity[axis], velocity(i, axis));
                 if (!fits_real(kicked)) {
                     ++errors;
                     continue;
@@ -132,8 +186,8 @@ Status finish_kick_3d(const Kokkos::Serial& exec, const CellGrid& refreshed,
     const auto owned = refreshed.owned_slots();
     const auto n = owned.extent(0);
     if (!valid_fields(old_slot.extent(0), half_velocity) ||
-        !valid_fields(n, refreshed_acceleration, velocity) ||
-        overlaps(velocity, half_velocity) || overlaps(velocity, refreshed_acceleration) ||
+        !valid_fields(n, refreshed_acceleration, velocity) || overlaps(velocity, half_velocity) ||
+        overlaps(velocity, refreshed_acceleration) ||
         overlaps(velocity, refreshed.fields().position))
         return {StatusCode::invalid_argument,
                 "Verlet final kick fields have invalid extents, storage or output overlap"};
@@ -142,7 +196,7 @@ Status finish_kick_3d(const Kokkos::Serial& exec, const CellGrid& refreshed,
         "sph.verlet.finish_kick", Policy(exec, 0, n),
         [&](std::size_t i, std::size_t& errors) {
             for (int axis = 0; axis < 3; ++axis) {
-                const double kicked = half_kick(dt, refreshed_acceleration(i, axis) + gravity[axis],
+                const double kicked = half_kick(dt, refreshed_acceleration(i, axis), gravity[axis],
                                                 half_velocity(old_slot(owned(i)), axis));
                 if (fits_real(kicked))
                     velocity(i, axis) = static_cast<real>(kicked);
@@ -157,7 +211,9 @@ Status finish_kick_3d(const Kokkos::Serial& exec, const CellGrid& refreshed,
 }
 
 Result<double> cfl_step_3d(const Kokkos::Serial& exec, const Velocity3D::const_type& velocity,
-                           double sound_speed, double cfl_coefficient) {
+                           double sound_speed, double cfl_coefficient, double smoothing_length) {
+    if (auto s = validate_length(smoothing_length); !s.ok())
+        return s;
     if (auto s = validate_cfl(cfl_coefficient); !s.ok())
         return s;
     if (!std::isfinite(sound_speed) || sound_speed <= 0)
@@ -206,7 +262,11 @@ Result<double> cfl_step_3d(const Kokkos::Serial& exec, const Velocity3D::const_t
     int cfl_exp, scale_exp;
     const double cfl_fraction = Kokkos::frexp(cfl_coefficient, &cfl_exp);
     const double scale_fraction = Kokkos::frexp(scale, &scale_exp);
-    const double normalized = cfl_fraction / (scale_fraction * (sound_speed / scale + vmax));
+    int h_exp;
+    const double h_fraction = Kokkos::frexp(smoothing_length, &h_exp);
+    cfl_exp += h_exp;
+    const double normalized =
+        (cfl_fraction * h_fraction) / (scale_fraction * (sound_speed / scale + vmax));
     // A bound just below denorm_min can round up to denorm_min even though no
     // positive double step fits. Check the exponent before the final rounding.
     int normalized_exp;
