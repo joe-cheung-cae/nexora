@@ -115,6 +115,8 @@ SPH_LEAF_SOURCES = {
     "nexora_sph_tests": Path("tests/methods/sph/sph_tests.cpp"),
     "nexora_sph_benchmark": Path("benchmarks/sph/sph_benchmark.cpp"),
 }
+SPH_CELL_GRID_TEST = Path("tests/methods/sph/cell_grid_tests.cpp")
+SPH_GRID_ORACLE = SPH_CELL_GRID_TEST.with_name("cell_grid_oracle.hpp")
 SPH_FIXTURE_HEADER = "sph_fixture.hpp"
 DATA_PREINIT_TEST = Path("tests/data/preinitialization_tests.cpp")
 KOKKOS_VIEW_PROBE_CONSUMERS = {Path("tests/kokkos/kokkos_tests.cpp"),
@@ -168,6 +170,7 @@ def check_kokkos_header(relative: Path, scope: str, module: str, header: str) ->
             or (scope == "src" and relative.parts[:3] == ("src", "methods", "reference"))
             or relative.parts[:3] in {SPH_METHOD_DIR, SPH_PARTICIPANT_DIR}
             or relative in SPH_LEAF_SOURCES.values()
+            or relative in {SPH_CELL_GRID_TEST, SPH_GRID_ORACLE}
             or relative in STRUCTURE_STATE_SOURCES
             or (scope == "tests" and relative.parts[:2] in {
                 ("tests", "kokkos"), ("tests", "reference")})
@@ -198,6 +201,10 @@ def check_internal_include(relative: Path, scope: str, header: str) -> list[str]
         if relative in SPH_LEAF_SOURCES.values():
             return []
         return [f"{relative}: {header} is private to the SPH test and benchmark"]
+    if parts[-1] == SPH_GRID_ORACLE.name:
+        if relative in {SPH_CELL_GRID_TEST}:
+            return []
+        return [f"{relative}: {header} is private to the 3D SPH regression tests"]
     if parts[-1] == "ResourceBudget.hpp":
         if "/".join(parts) == RESOURCE_BUDGET_HEADER and relative in RESOURCE_BUDGET_CONSUMERS:
             return []
@@ -220,7 +227,8 @@ def check_internal_include(relative: Path, scope: str, header: str) -> list[str]
         return [f"{relative}: internal include {header} is not a known module path"]
     if parts[1] == "sph":
         if (location[:3] == SPH_PARTICIPANT_DIR or relative in SPH_LEAF_SOURCES.values()
-                or (parts[0] == "methods" and location[:3] == SPH_METHOD_DIR)):
+                or (parts[0] == "methods"
+                    and (location[:3] == SPH_METHOD_DIR or relative in {SPH_CELL_GRID_TEST, SPH_GRID_ORACLE}))):
             return []
         return [f"{relative}: forbidden internal include {header} from this module"]
 
@@ -474,15 +482,24 @@ def policy_self_test() -> list[str]:
         failures.append("checker self-test failed to allow reference tests to include internals")
     sph_method = Path("src/methods/sph/Density.hpp")
     sph_participant = Path("src/participants/sph/Participant.hpp")
-    for path in (sph_method, sph_participant, *SPH_LEAF_SOURCES.values()):
+    for path in (sph_participant, SPH_GRID_ORACLE, REFERENCE_COMMAND_SOURCE):
+        if not check_internal_include(path, path.parts[0], SPH_GRID_ORACLE.name):
+            failures.append(f"checker self-test failed to keep the 3D test oracle out of {path}")
+    for path in (sph_method, sph_participant, SPH_CELL_GRID_TEST, *SPH_LEAF_SOURCES.values()):
         scope = path.parts[0]
         if check_kokkos_header(path, scope, path.parts[1], "Kokkos_Core.hpp"):
             failures.append(f"checker self-test failed to allow Kokkos in {path}")
         if check_internal_include(path, scope, "methods/sph/Density.hpp"):
             failures.append(f"checker self-test failed to allow the SPH method in {path}")
-    for path in (sph_method, REFERENCE_COMMAND_SOURCE, Path("tests/reference/reference_tests.cpp")):
+    for path in (sph_method, SPH_CELL_GRID_TEST, REFERENCE_COMMAND_SOURCE,
+                 Path("tests/reference/reference_tests.cpp")):
         if not check_internal_include(path, path.parts[0], "participants/sph/Participant.hpp"):
             failures.append(f"checker self-test failed to reject the SPH participant in {path}")
+    cell_grid_header = "methods/sph/neighbors/CellGrid.hpp"
+    if check_internal_include(SPH_CELL_GRID_TEST, "tests", cell_grid_header):
+        failures.append("checker self-test failed to allow the SPH cell-grid test to include internals")
+    if not check_internal_include(Path("tests/package/consumer/kokkos.cpp"), "tests", cell_grid_header):
+        failures.append("checker self-test failed to reject private SPH grid headers in the installed consumer")
     if not check_internal_include(REFERENCE_COMMAND_SOURCE, "apps", "./methods/sph/Density.hpp"):
         failures.append("checker self-test failed to reject an alternate SPH method include in the CLI")
     for path in (sph_participant, *SPH_LEAF_SOURCES.values()):

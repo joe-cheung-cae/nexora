@@ -525,6 +525,8 @@ def verify_precision(args, profile, precision):
         "nexora_reference_tests.Reference.EulerConvergence",
         "nexora_reference_tests.Reference.NonDyadicStepMatchesEulerOracle",
         "nexora_sph_tests.Sph.FrozenLayoutAndReorder",
+        "nexora_sph_tests.SphCellGrid.ThreeDimensionalShuffledStableIdsAndGhosts",
+        "nexora_sph_tests.SphCellGrid.CrossStepReuseAndRebuildMatchesExplicitCsr",
         "nexora_data_uninitialized_tests.DataPreinitialization.FieldIssuerRequiresInitializedRuntime",
         "nexora_data_uninitialized_tests.DataPreinitialization.ExternalFieldRequiresInitializedRuntime",
         "nexora_reference_uninitialized_tests.ReferenceUninitialized.RejectUninitializedRuntime",

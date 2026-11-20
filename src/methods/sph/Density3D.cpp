@@ -1,0 +1,59 @@
+#include "Density3D.hpp"
+
+#include <limits>
+#include <new>
+#include <numbers>
+
+namespace nexora::sph {
+double density_at_slot_3d(const CellGrid& grid, LocalIndex self) {
+    const auto& mass = grid.fields().mass;
+    double sum = mass(self) * std::numbers::inv_pi;
+    grid.for_each_neighbor_of_slot(self, [&](LocalIndex slot, double distance_squared) {
+        sum += mass(slot) * weight_3d(distance_squared);
+    });
+    return sum;
+}
+
+Result<Values> evaluate_density_3d(const Kokkos::Serial& exec, const CellGrid& grid) {
+    try {
+        Values density(Kokkos::view_alloc(exec, Kokkos::WithoutInitializing, "sph.grid.density"),
+                       grid.owned_slots().extent(0));
+        if (auto status = evaluate_density_3d(exec, grid, density); !status.ok())
+            return status;
+        return density;
+    } catch (const std::bad_alloc&) {
+        return Status{StatusCode::resource_exhausted, "cannot allocate 3D SPH density"};
+    } catch (const std::exception&) {
+        return Status{StatusCode::execution_failure, "cannot construct 3D SPH density"};
+    }
+}
+
+Status evaluate_density_3d(const Kokkos::Serial& exec, const CellGrid& grid,
+                           const Values& density) {
+    const auto rows = grid.owned_slots();
+    if (rows.extent(0) != density.extent(0))
+        return {StatusCode::invalid_argument, "3D SPH density must have one value per owned row"};
+    using Policy = Kokkos::RangePolicy<Kokkos::Serial, Kokkos::IndexType<std::size_t>>;
+    try {
+        std::size_t invalid = 0;
+        Kokkos::parallel_reduce(
+            "sph.grid.density_3d", Policy(exec, 0, rows.extent(0)),
+            KOKKOS_LAMBDA(std::size_t row, std::size_t& failures) {
+                const double sum = density_at_slot_3d(grid, rows(row));
+                if (Kokkos::isfinite(sum) && sum <= std::numeric_limits<real>::max())
+                    density(row) = static_cast<real>(sum);
+                else
+                    ++failures;
+            },
+            invalid);
+        if (invalid != 0)
+            return Status{StatusCode::numerical_failure, "3D SPH density exceeds real range"};
+        return {};
+    } catch (const std::bad_alloc&) {
+        return Status{StatusCode::resource_exhausted, "cannot allocate 3D SPH density"};
+    } catch (const std::exception&) {
+        return Status{StatusCode::execution_failure, "cannot evaluate 3D SPH density"};
+    }
+}
+
+} // namespace nexora::sph
