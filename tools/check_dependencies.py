@@ -110,12 +110,19 @@ RESOURCE_BUDGET_HEADER = "participants/ResourceBudget.hpp"
 RESOURCE_BUDGET_CONSUMERS = {
     Path("src/participants/reference/Participant.hpp"),
     Path(*SPH_PARTICIPANT_DIR) / "Participant.hpp",
+    Path(*SPH_PARTICIPANT_DIR) / "Geometry3D.hpp",
 }
 SPH_LEAF_SOURCES = {
     "nexora_sph_tests": Path("tests/methods/sph/sph_tests.cpp"),
     "nexora_sph_benchmark": Path("benchmarks/sph/sph_benchmark.cpp"),
 }
 SPH_CELL_GRID_TEST = Path("tests/methods/sph/cell_grid_tests.cpp")
+SPH_PRESSURE_TEST = SPH_CELL_GRID_TEST.with_name("wcsph_window_tests.cpp")
+SPH_VERLET_TEST = SPH_CELL_GRID_TEST.with_name("verlet_window_tests.cpp")
+SPH_PRESSURE_ORACLE = SPH_CELL_GRID_TEST.with_name("wcsph_oracle.hpp")
+SPH_WINDOW_TESTS = {SPH_CELL_GRID_TEST.with_name("participant_3d_tests.cpp"),
+                    SPH_CELL_GRID_TEST.with_name("adami_wall_tests.cpp"),
+                    SPH_PRESSURE_TEST, SPH_VERLET_TEST}
 SPH_GRID_ORACLE = SPH_CELL_GRID_TEST.with_name("cell_grid_oracle.hpp")
 SPH_FIXTURE_HEADER = "sph_fixture.hpp"
 DATA_PREINIT_TEST = Path("tests/data/preinitialization_tests.cpp")
@@ -170,7 +177,7 @@ def check_kokkos_header(relative: Path, scope: str, module: str, header: str) ->
             or (scope == "src" and relative.parts[:3] == ("src", "methods", "reference"))
             or relative.parts[:3] in {SPH_METHOD_DIR, SPH_PARTICIPANT_DIR}
             or relative in SPH_LEAF_SOURCES.values()
-            or relative in {SPH_CELL_GRID_TEST, SPH_GRID_ORACLE}
+            or relative in {SPH_CELL_GRID_TEST, SPH_GRID_ORACLE, *SPH_WINDOW_TESTS}
             or relative in STRUCTURE_STATE_SOURCES
             or (scope == "tests" and relative.parts[:2] in {
                 ("tests", "kokkos"), ("tests", "reference")})
@@ -201,8 +208,12 @@ def check_internal_include(relative: Path, scope: str, header: str) -> list[str]
         if relative in SPH_LEAF_SOURCES.values():
             return []
         return [f"{relative}: {header} is private to the SPH test and benchmark"]
+    if parts[-1] == SPH_PRESSURE_ORACLE.name:
+        if relative in {SPH_PRESSURE_TEST, SPH_VERLET_TEST}:
+            return []
+        return [f"{relative}: {header} is private to the WCSPH window regressions"]
     if parts[-1] == SPH_GRID_ORACLE.name:
-        if relative in {SPH_CELL_GRID_TEST}:
+        if relative in {SPH_CELL_GRID_TEST, SPH_PRESSURE_ORACLE, *SPH_WINDOW_TESTS}:
             return []
         return [f"{relative}: {header} is private to the 3D SPH regression tests"]
     if parts[-1] == "ResourceBudget.hpp":
@@ -228,7 +239,9 @@ def check_internal_include(relative: Path, scope: str, header: str) -> list[str]
     if parts[1] == "sph":
         if (location[:3] == SPH_PARTICIPANT_DIR or relative in SPH_LEAF_SOURCES.values()
                 or (parts[0] == "methods"
-                    and (location[:3] == SPH_METHOD_DIR or relative in {SPH_CELL_GRID_TEST, SPH_GRID_ORACLE}))):
+                    and (location[:3] == SPH_METHOD_DIR or relative in {SPH_CELL_GRID_TEST, SPH_GRID_ORACLE}))
+                or (relative in {*SPH_WINDOW_TESTS, SPH_PRESSURE_ORACLE}
+                    and parts == ["participants", "sph", "Participant3D.hpp"])):
             return []
         return [f"{relative}: forbidden internal include {header} from this module"]
 
@@ -482,9 +495,14 @@ def policy_self_test() -> list[str]:
         failures.append("checker self-test failed to allow reference tests to include internals")
     sph_method = Path("src/methods/sph/Density.hpp")
     sph_participant = Path("src/participants/sph/Participant.hpp")
+    for path in SPH_WINDOW_TESTS:
+        if check_internal_include(path, "tests", "participants/sph/Participant3D.hpp"):
+            failures.append(f"checker self-test failed to allow the 3D SPH window test in {path}")
     for path in (sph_participant, SPH_GRID_ORACLE, REFERENCE_COMMAND_SOURCE):
         if not check_internal_include(path, path.parts[0], SPH_GRID_ORACLE.name):
             failures.append(f"checker self-test failed to keep the 3D test oracle out of {path}")
+        if not check_internal_include(path, path.parts[0], SPH_PRESSURE_ORACLE.name):
+            failures.append(f"checker self-test failed to keep the WCSPH test oracle out of {path}")
     for path in (sph_method, sph_participant, SPH_CELL_GRID_TEST, *SPH_LEAF_SOURCES.values()):
         scope = path.parts[0]
         if check_kokkos_header(path, scope, path.parts[1], "Kokkos_Core.hpp"):
