@@ -68,6 +68,7 @@ SPECIAL_TEST_LINKS = {
     "nexora_reference_transport_tests": {KOKKOS_TEST_MAIN, *REFERENCE_TEST_LINKS},
     "nexora_reference_resource_tests": {KOKKOS_TEST_MAIN, *REFERENCE_TEST_LINKS},
     "nexora_sph_tests": {KOKKOS_TEST_MAIN, *SPH_LEAF_LINKS},
+    "nexora_sph_tank_trajectory": SPH_LEAF_LINKS,
     "nexora_transport_tests": {KOKKOS_TEST_MAIN, "nexora_data"},
     "nexora_transport_receive_tests": {KOKKOS_TEST_MAIN, "nexora_data"},
     "nexora_serial_irregular_measurement": {"nexora_participants_reference", "nexora_data"},
@@ -119,11 +120,15 @@ SPH_LEAF_SOURCES = {
 SPH_CELL_GRID_TEST = Path("tests/methods/sph/cell_grid_tests.cpp")
 SPH_PRESSURE_TEST = SPH_CELL_GRID_TEST.with_name("wcsph_window_tests.cpp")
 SPH_VERLET_TEST = SPH_CELL_GRID_TEST.with_name("verlet_window_tests.cpp")
+SPH_HYDROSTATIC_INITIAL_TEST = SPH_CELL_GRID_TEST.with_name("hydrostatic_initial_tests.cpp")
 SPH_CONTINUITY_TEST = SPH_CELL_GRID_TEST.with_name("continuity_tests.cpp")
+SPH_TANK_FIXTURE = SPH_CELL_GRID_TEST.with_name("hydrostatic_tank_fixture.hpp")
+SPH_TANK_TRAJECTORY = SPH_CELL_GRID_TEST.with_name("hydrostatic_trajectory.cpp")
 SPH_PRESSURE_ORACLE = SPH_CELL_GRID_TEST.with_name("wcsph_oracle.hpp")
 SPH_WINDOW_TESTS = {SPH_CELL_GRID_TEST.with_name("participant_3d_tests.cpp"),
                     SPH_CELL_GRID_TEST.with_name("adami_wall_tests.cpp"),
-                    SPH_PRESSURE_TEST, SPH_VERLET_TEST, SPH_CONTINUITY_TEST}
+                    SPH_CELL_GRID_TEST.with_name("hydrostatic_tank_tests.cpp"),
+                    SPH_PRESSURE_TEST, SPH_VERLET_TEST, SPH_HYDROSTATIC_INITIAL_TEST, SPH_CONTINUITY_TEST}
 SPH_GRID_ORACLE = SPH_CELL_GRID_TEST.with_name("cell_grid_oracle.hpp")
 SPH_FIXTURE_HEADER = "sph_fixture.hpp"
 DATA_PREINIT_TEST = Path("tests/data/preinitialization_tests.cpp")
@@ -132,6 +137,7 @@ KOKKOS_VIEW_PROBE_CONSUMERS = {Path("tests/kokkos/kokkos_tests.cpp"),
 # These test-tree sources are also compiled by standalone programs.
 STANDALONE_TEST_SOURCES = {
     SERIAL_IRREGULAR_MEASUREMENT, STRUCTURE_FIXTURE, Path("tests/kokkos/view_probe.hpp"),
+    SPH_TANK_TRAJECTORY, SPH_TANK_FIXTURE,
     Path("tests/reference/cli_oracle.cpp"), Path("tests/methods/sph") / SPH_FIXTURE_HEADER,
 }
 PRIVATE_DATA_HEADERS = {
@@ -178,7 +184,7 @@ def check_kokkos_header(relative: Path, scope: str, module: str, header: str) ->
             or (scope == "src" and relative.parts[:3] == ("src", "methods", "reference"))
             or relative.parts[:3] in {SPH_METHOD_DIR, SPH_PARTICIPANT_DIR}
             or relative in SPH_LEAF_SOURCES.values()
-            or relative in {SPH_CELL_GRID_TEST, SPH_GRID_ORACLE, *SPH_WINDOW_TESTS}
+            or relative in {SPH_CELL_GRID_TEST, SPH_GRID_ORACLE, SPH_TANK_TRAJECTORY, *SPH_WINDOW_TESTS}
             or relative in STRUCTURE_STATE_SOURCES
             or (scope == "tests" and relative.parts[:2] in {
                 ("tests", "kokkos"), ("tests", "reference")})
@@ -214,7 +220,7 @@ def check_internal_include(relative: Path, scope: str, header: str) -> list[str]
             return []
         return [f"{relative}: {header} is private to the WCSPH window regressions"]
     if parts[-1] == SPH_GRID_ORACLE.name:
-        if relative in {SPH_CELL_GRID_TEST, SPH_PRESSURE_ORACLE, *SPH_WINDOW_TESTS}:
+        if relative in {SPH_CELL_GRID_TEST, SPH_PRESSURE_ORACLE, SPH_TANK_TRAJECTORY, SPH_TANK_FIXTURE, *SPH_WINDOW_TESTS}:
             return []
         return [f"{relative}: {header} is private to the 3D SPH regression tests"]
     if parts[-1] == "ResourceBudget.hpp":
@@ -241,8 +247,11 @@ def check_internal_include(relative: Path, scope: str, header: str) -> list[str]
         if (location[:3] == SPH_PARTICIPANT_DIR or relative in SPH_LEAF_SOURCES.values()
                 or (parts[0] == "methods"
                     and (location[:3] == SPH_METHOD_DIR or relative in {SPH_CELL_GRID_TEST, SPH_GRID_ORACLE}))
+                or (relative == SPH_HYDROSTATIC_INITIAL_TEST
+                    and parts == ["methods", "sph", "Density3D.hpp"])
+                or (relative == SPH_TANK_FIXTURE and parts == ["methods", "sph", "Pressure3D.hpp"])
                 or (relative == SPH_CONTINUITY_TEST and parts == ["methods", "sph", "Verlet3D.hpp"])
-                or (relative in {*SPH_WINDOW_TESTS, SPH_PRESSURE_ORACLE}
+                or (relative in {*SPH_WINDOW_TESTS, SPH_PRESSURE_ORACLE, SPH_TANK_TRAJECTORY}
                     and parts == ["participants", "sph", "Participant3D.hpp"])):
             return []
         return [f"{relative}: forbidden internal include {header} from this module"]

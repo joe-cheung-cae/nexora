@@ -29,7 +29,7 @@ if(private_headers)
 endif()
 file(GLOB_RECURSE sph_artifacts "${scratch}/relocated/*")
 list(FILTER sph_artifacts INCLUDE REGEX
-    "/(lib)?nexora_(methods_sph|participants_sph|sph_tests|sph_benchmark)([.][^/]*)?$")
+    "/(lib)?nexora_(methods_sph|participants_sph|sph_tests|sph_benchmark|sph_tank_trajectory)([.][^/]*)?$")
 if(sph_artifacts)
     message(FATAL_ERROR "Internal SPH artifacts leaked into the installation: ${sph_artifacts}")
 endif()
