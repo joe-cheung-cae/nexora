@@ -3,7 +3,7 @@
 #include <nexora/core/Result.hpp>
 #include <nexora/core/Types.hpp>
 
-namespace nexora::sph {
+namespace nexora::sph_fixture {
 using Values = Kokkos::View<real*, Kokkos::HostSpace>;
 
 // Fixed-graph validation includes the exact support boundary at distance 2.
@@ -23,4 +23,4 @@ struct DensityInput {
 // the supplied instance before publication or discard. The owned diagnostic uses
 // ordinary double accumulation, then checks its rounded finite value against real range.
 Result<real> evaluate_density(const Kokkos::Serial&, const DensityInput&, const Values& output);
-} // namespace nexora::sph
+} // namespace nexora::sph_fixture

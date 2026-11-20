@@ -11,7 +11,7 @@
 #include <span>
 #include <vector>
 
-namespace nexora::sph {
+namespace nexora::sph_fixture {
 
 struct Config {
     std::vector<GlobalEntityId> row_ids, column_ids;
@@ -123,4 +123,4 @@ class Participant final : public ParticipantIF {
     std::uint64_t attempt_{};
 };
 
-} // namespace nexora::sph
+} // namespace nexora::sph_fixture

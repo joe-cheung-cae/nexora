@@ -5,20 +5,22 @@
 <a id="simulation-window"></a>
 ## Simulation 窗口
 
-`Simulation simulation(participant)` 使用已有的 `ParticipantIF`。初始化时，`Participant3D` 从初始字段建立首份独立格索引，并计算所有 owned 粒子的初始密度。从这一步起，accepted 快照可按稳定 ID 读取邻居和密度。[参与者接口](../../src/participants/sph/Participant3D.hpp)
+`Participant3D` 初始化时从流体和可选固定壁建立独立的格索引。显式给出的初始密度按稳定 ID 对齐到流体行。省略初始密度时，只能读取初态的核求和诊断。时间积分由 `Simulation` 通过 `ParticipantIF` 协调。[参与者接口](../../src/participants/sph/Participant3D.hpp)
 
 | 操作 | 可观察的状态 |
 |---|---|
-| `simulation.begin_window(dt)` 后调用 `participant.set_trial_fields(end_fields)` | 将终点坐标、质量、稳定 ID 和 ghost 标记复制到本次 attempt。提供者可在返回后释放或修改自己的缓冲。省略输入时沿用 accepted 几何。 |
-| `simulation.advance_trial()` | 有新字段时从 accepted 格索引更新，按本步坐标重新判距。密度通过写 lease 写入独立候选分配，完成后可用 `trial_stamp()` 和 `trial_snapshot(stamp)` 读取。此时 `snapshot()` 仍返回原 accepted 状态。 |
-| `simulation.commit_window()` | 在预提交阶段准备只读 accepted 密度绑定。有读者保留 trial 时另复制密度。几何、密度和版本一起发布，Simulation 随后推进时钟。 |
-| `simulation.restore_window()`，或 `advance_trial()/commit_window()` 失败 | 丢弃候选和本次输入，accepted stamp、时钟与数值保持原值。重试可重新提供终点字段，使用新的 attempt。先前签发的快照仍可读，旧 stamp 无法再取得当前 trial。 |
+| `simulation.begin_window(dt)` | 按 accepted 速度得到的声学 CFL 检查步长，并开启一次试算。 |
+| `simulation.advance_trial()` | Velocity Verlet 从 accepted 状态漂移至候选位置。格表按新位置复用或重建，连续性方程更新流体密度，随后更新 Tait 压力、加速度和速度。`trial_snapshot(stamp)` 可读本次候选，`snapshot()` 返回已提交状态。 |
+| `simulation.commit_window()` | 预提交为仍有 trial 读者的字段建立独立副本。几何、流体场与下步 CFL 上限一并发布，时钟随后推进。 |
+| `simulation.restore_window()` 或试算失败 | 释放候选并保留 accepted 及其时钟。重试获得新的 attempt。已签发的快照继续可读。 |
 
-`topology` 跟踪稳定 ID 集合和 ownership，`geometry` 跟踪按 ID 对齐的坐标或成员变化，`layout` 跟踪槽位顺序、owned 行和输入映射。质量单独变化仍会重算密度。快照仅提供按行读密度和按稳定 ID 枚举邻居。快照可保留到 participant 关闭之后，应用须在 Kokkos 结束前释放它们。[窗口实现](../../src/participants/sph/Participant3D.cpp)
+几何层按稳定 ID 比较粒子。`topology` 跟踪成员与 ownership，`geometry` 跟踪成员及坐标，`layout` 跟踪槽位、owned 行和输入映射。独立构型可直接更新格表并重算核密度。积分期间粒子成员、质量与 ownership 固定。[几何与版本测试](../../tests/methods/sph/cell_grid_tests.cpp)
 
-默认预算为 64 份外部快照记录和 256 MiB 受控载荷。预算覆盖 staged 输入、快照保留的格索引和粒子字段，以及密度和预提交副本。共享格表和映射按同一分配计一次。建格排序、身份匹配的临时工作区和 Kokkos 分配开销另计，`max_cells` 继续限定稠密格数。[几何状态与预算](../../src/participants/sph/Geometry3D.cpp)
+默认预算为 64 份外部快照记录和 256 MiB 受控载荷。固定壁初始化的合并缓冲、快照持有的格表与字段、积分工作区及预提交副本均按生命周期占用额度。共享格表和映射按同一分配计一次。`max_cells` 单独限定稠密格数。应用在 Kokkos 关闭前释放快照。[几何状态与预算](../../src/participants/sph/Geometry3D.cpp) · [积分工作区](wcsph-integration-workspace-serial.md)
 
-### 窗口验证结果
+### 历史窗口验证结果
+
+以下数据来自当时允许外供窗口终点字段的实现。现行静态构型对照直接调用网格和算子，事务回归在内部积分路径执行。[积分窗口测试](../../tests/methods/sph/verlet_window_tests.cpp)
 
 在 Apple M2 Pro、macOS 27.2.1 arm64（26B131）上，使用 AppleClang 21.0.0.21000401、C++20、CMake 4.4.3、Ninja 1.13.2、Kokkos 5.2.2 Serial 和 GoogleTest 1.17.0 实跑。四组离线验证从 `2026-11-20T08:20:45+08:00` 持续至 `2026-11-20T08:22:01+08:00`，均从空构建目录开始，依赖检查和测试退出 0，零跳过。
 
@@ -27,7 +29,7 @@
 | Debug / Release float，各组 | 7/7 | 17/17 | 99/99 | 1/1、3/3 |
 | Debug / Release double，各组 | 7/7 | 17/17 | 100/100 | 1/1、3/3 |
 
-- 27 粒子回放算例包含 20 个 owned 和 7 个 ghost。先提交一次格内移动，再让一个 owned 与一个 ghost 跨三个轴交换位置并打乱输入顺序。每次读取初始、试算、提交、恢复或重试快照时，都从对应的原始粒子字段全扫描建立显式 CSR，对每个 owned ID 精确比对邻居集合，并用独立 M₄ 公式核对密度。显式恢复保留上一已提交的 stamp 与时钟。相同步长和字段重试后，逐行密度与被撤销的 trial 逐位一致，旧 attempt 的 stamp 被拒绝。[窗口回归](../../tests/methods/sph/participant_3d_tests.cpp) · [独立 CSR](../../tests/methods/sph/cell_grid_oracle.hpp)
+- 27 粒子回放算例包含 20 个 owned 和 7 个 ghost。先提交一次格内移动，再让一个 owned 与一个 ghost 跨三个轴交换位置并打乱输入顺序。每次读取初始、试算、提交、恢复或重试快照时，都从对应的原始粒子字段全扫描建立显式 CSR，对每个 owned ID 精确比对邻居集合，并用独立 M₄ 公式核对密度。显式恢复保留上一已提交的 stamp 与时钟。相同步长和字段重试后，逐行密度与被撤销的 trial 逐位一致，旧 attempt 的 stamp 被拒绝。[现行几何回归](../../tests/methods/sph/cell_grid_tests.cpp) · [独立 CSR](../../tests/methods/sph/cell_grid_oracle.hpp)
 - `2026-11-20T08:22:10+08:00` 在 Release double 的上述回放中用 Kokkos Tools 观测到初建、格内复用、越格重建、重试再次重建。回滚后的重试从上次成功提交的格索引重新出发。
 - 另验几何非法和密度溢出时自动恢复、缩短步长重试、预提交失败时有无 trial 读者两条路径、跨实例 stamp 拒绝、资源额度回收、空输入和纯 ghost。保留的快照在回滚、后续提交和 participant 关闭后仍可按对应阶段复核。
 
@@ -101,9 +103,9 @@ done
 已有构建可单独运行三维用例。
 
 ```sh
-ctest --test-dir build/sph-002-rerun/release-double -R 'Sph(CellGrid|Participant3D)\.' --output-on-failure
+ctest --test-dir build/sph-002-rerun/release-double --no-tests=error -R 'Sph(CellGrid|Geometry3D|VerletWindow)[.]' --output-on-failure
 ```
 
 ## 接入边界
 
-三维密度既可通过方法接口调用，也可由 `Simulation` 管理单进程 Serial 试算、提交和恢复。WCSPH 在同一试算格表上计算压力加速度。终点位置可由调用方提供，或在全 owned 模式由 Velocity Verlet 从初始状态推进。MPI halo、持久 checkpoint 和其他执行空间待各自接入与验证。[压力窗口](wcsph-pressure-serial.md) · [多步积分](wcsph-verlet-serial.md) · [P1-07 一维固定 CSR](serial.md)
+静态构型的核密度与 WCSPH 压力直接在同一格表求值。三维时间积分由 Velocity Verlet 生成候选位置，在两端格表上求连续性密度变化率。MPI halo、持久 checkpoint 和其他执行空间待各自接入与验证。[压力窗口](wcsph-pressure-serial.md) · [多步积分](wcsph-verlet-serial.md) · [P1-07 一维固定 CSR](serial.md)

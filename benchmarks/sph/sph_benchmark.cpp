@@ -1,7 +1,7 @@
 #include <Kokkos_Core.hpp>
+#include <fixed_csr/Participant.hpp>
+#include <fixed_csr/sph_fixture.hpp>
 #include <nexora/simulation/Simulation.hpp>
-#include <participants/sph/Participant.hpp>
-#include <sph_fixture.hpp>
 
 #include <algorithm>
 #include <array>
@@ -24,10 +24,10 @@
 namespace {
 
 using namespace nexora;
-using sph::Config;
-using sph::Participant;
-using sph::Snapshot;
 namespace fixture = sph_fixture;
+using fixture::Config;
+using fixture::Participant;
+using fixture::Snapshot;
 using Clock = std::chrono::steady_clock;
 using Milliseconds = std::chrono::duration<double, std::milli>;
 

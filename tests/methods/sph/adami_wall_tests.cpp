@@ -9,6 +9,45 @@ namespace {
 using namespace nexora;
 using namespace sph_test;
 
+TEST(SphAdamiWall, InitialAdamiFieldsAndAcousticBoundScaleWithSmoothingLength) {
+    struct Initial {
+        double density, pressure, acceleration;
+    };
+    std::array<Initial, 2> reference{};
+    for (const real h : {real(1), real(.5), real(2)}) {
+        const real volume = h * h * h;
+        Fields fluid({{{0, 0, 0}, volume, 10, 0}, {{real(.75) * h, 0, 0}, 2 * volume, 20, 0}});
+        Fields wall({{{real(-.5) * h, 0, 0}, volume, 30, 1}});
+        const sph::FixedWallParticles3D boundary{wall.position, wall.mass, wall.ids};
+        sph::Velocity3D velocity("test.h_scaled_velocity", 2);
+        velocity(0, 0) = 1;
+        const sph::WcsphVerletParameters parameters{{.5, 3, 1}, .25, {-.125 / h, 0, 0}, h};
+        sph::Values density("test.scaled_physical_density", 2);
+        density(0) = fluid.mass(0) / volume;
+        density(1) = fluid.mass(1) / volume;
+        sph::Participant3D participant(fluid.get(), 100, parameters, velocity, density, boundary);
+        Simulation simulation(participant);
+        ASSERT_TRUE(simulation.initialize().ok());
+        const auto snapshot = checked(participant.snapshot());
+        ASSERT_EQ(snapshot.row_count(), reference.size());
+        EXPECT_EQ(participant.time_constraint(0).maximum_step, .25 * h / 4);
+        for (std::size_t row = 0; row < reference.size(); ++row) {
+            const auto i = snapshot.row_id(row) == 10 ? 0 : 1;
+            const Initial observed{snapshot.density(row), checked(snapshot.pressure(row)),
+                                   h * checked(snapshot.pressure_acceleration(row))[0]};
+            if (h == 1) {
+                reference[i] = observed;
+                EXPECT_NE(observed.acceleration, 0);
+            } else {
+                EXPECT_EQ(observed.density, reference[i].density);
+                EXPECT_EQ(observed.pressure, reference[i].pressure);
+                EXPECT_EQ(observed.acceleration, reference[i].acceleration);
+            }
+        }
+        ASSERT_TRUE(simulation.finalize().ok());
+    }
+}
+
 TEST(SphAdamiWall, GravityOnlyMatchesFreeFall) {
     Fields fluid({{{0, 0, 0}, 1, 41, 0}});
     sph::Velocity3D velocity("wall_test.initial_velocity", 1);

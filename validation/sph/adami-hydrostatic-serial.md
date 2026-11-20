@@ -6,16 +6,16 @@
 
 ## 算法与状态
 
-调用者提供全 owned 流体初态、按输入行排列的初速，以及另一组固定壁粒子的位置、质量和稳定 ID。ID 在两组间唯一。积分模式可按算例指定固定平滑长度 `h`，默认值为 1 m。以下参数显式指定本历史 SI 算例的长度。
+当前积分入口接收全 owned 流体初态、按输入流体行排列的初速和初始密度，以及另一组固定壁粒子的位置、质量和稳定 ID。ID 在两组间唯一。积分模式可按算例指定固定平滑长度 `h`，默认值为 1 m。以下参数显式指定本历史 SI 算例的长度。
 
 ```cpp
 sph::WcsphVerletParameters parameters{{1000., 80., 7.}, 0.5, {0., 0., -9.81}, 1.0};
 sph::FixedWallParticles3D walls{wall_positions, wall_masses, wall_ids};
-sph::Participant3D water(fluid_fields, 10000, parameters, initial_velocity, walls);
+sph::Participant3D water(fluid_fields, 10000, parameters, initial_velocity, initial_density, walls);
 Simulation simulation(water);
 ```
 
-1. 初始化将两组粒子复制到同一 `cellBegin` 格索引中。固定壁源参与邻域求和，只有流体拥有速度和积分结果行。流体密度按三维 M₄ 核计算，质量求和包括支持半径 `2h` 内的壁源。流体表压由 Tait 方程给出，保留负值。
+1. 初始化将两组粒子复制到同一 `cellBegin` 格索引中。固定壁源参与邻域求和，只有流体拥有速度和积分结果行。当前积分按稳定 ID 携带流体密度，以流体和零速度壁源的连续性密度率推进。省略初始密度的构造可检查初态三维 M₄ 核求和诊断，求和包括支持半径 `2h` 内的壁源。本文历史轨迹在每个新位置重做密度求和。流体表压由 Tait 方程给出，保留负值。
 2. 每次力评估都从本阶段的流体密度、表压重算参与受力的壁源。对固定壁粒子 $b$，用核权重 $W_{bf}$ 计算
 
    $$
@@ -24,7 +24,7 @@ Simulation simulation(water);
    \rho_b=\rho_0(1+p_b/B)^{1/\gamma},\quad B=\rho_0 c_0^2/\gamma .
    $$
 
-   仅流体向壁面外推。干壁不参与受力。若所需壁压无法反解出正密度，试算返回数值失败。外供几何模式中用于 halo 的普通 ghost 继续遵循其完整邻域密度重构契约。[Adami、Hu 与 Adams](https://doi.org/10.1016/j.jcp.2012.05.005) · [公式及重力符号](https://pysph.readthedocs.io/en/1.0a1/reference/equations.html) · [压力算子](../../src/methods/sph/Pressure3D.cpp)
+   仅流体向壁面外推。干壁不参与受力。若所需壁压无法反解出正密度，试算返回数值失败。独立压力算子处理普通 ghost 时，从该阶段包含完整支撑域的粒子源重构 ghost 密度。[Adami、Hu 与 Adams](https://doi.org/10.1016/j.jcp.2012.05.005) · [公式及重力符号](https://pysph.readthedocs.io/en/1.0a1/reference/equations.html) · [压力算子](../../src/methods/sph/Pressure3D.cpp)
 3. 对流体使用既有对称压力梯度，壁源贡献使用 $p_b/\rho_b^2$。两次 Velocity Verlet 半步均使用 $\mathbf a_p+\mathbf g$。壁源坐标在漂移时原样保留，流体跨格后按置换找回同一粒子的半步速度。快照中的 `pressure_acceleration` 以 m/s² 单独提供压力项。声学 CFL 仍使用已提交的流体速度。[Verlet 算子](../../src/methods/sph/Verlet3D.cpp) · [窗口与字段归属](../../src/participants/sph/Participant3D.cpp)
 
 格表和壁面工作区位于本机 Kokkos HostSpace，由同步 Serial 执行。每个阶段的壁压、逆状态方程和力系数使用临时工作区。提交或回滚作用于整份候选几何及流体状态，旧快照继续持有自己的存储。本次覆盖静止壁的无黏压力作用，MPI 壁源交换、设备执行、持久重启和壁面切向剪切仍无此项实测。
@@ -83,9 +83,16 @@ Release float 重复计算时，校准组终点压力 RMS 为 1.833 kPa，RMS �
 
 本机 `results/wcsph-adami-20261120T102200/comparison/` 保存各组 JUnit、工具链与配置日志、`tank-{debug,release}-{float,double}.xml`，以及本次工作树的 145 项源码及验证输入摘要 `source-sha256.txt`。制作摘要时 HEAD 为 `3bd6d08b5910bae1a02e46e71f65339960396ebe`，清单的 SHA-256 为 `84d91ba148af0061c68f0f2de9935857deebc0fa6d9be122a8c3a75edacb7874`。双轨迹 Debug 水箱在并发验证时曾超过通用单测的 30 s 限制，CTest 对该用例单设 180 s。
 
-固定壁回归使用三轴自由落体解析解核对两次重力半步。另一项从独立全扫描计算流体密度、重力修正壁压、逆 Tait 壁密度和逐流体压力力值，覆盖跨格、未润湿壁源、输入缓冲改写、保留快照、回滚和缩步重试。无正壁密度的试算必须失败并允许从原状态重试。[壁面回归](../../tests/methods/sph/adami_wall_tests.cpp)
+固定壁回归使用三轴自由落体解析解核对两次重力半步。另一项读出当前流体密度，独立全扫描计算 Tait 表压、重力修正壁压、逆 Tait 壁密度和逐流体压力力值，覆盖跨格、未润湿壁源、输入缓冲改写、保留快照、回滚和缩步重试。无正壁密度的试算必须失败并允许从原状态重试。[壁面回归](../../tests/methods/sph/adami_wall_tests.cpp)
 
-水箱回归要求两组完整推进且字段有限。对校准组还检查初态相对压头 RMS 误差低于 $10^{-4}$，全程压力 RMS 峰值低于 0.25 倍压头，RMS 速度峰值及单粒子最大速度分别低于 $0.2\sqrt{gH}$ 和 $0.5\sqrt{gH}$，终点六层平均表压随高度递减，五面均有正净距且穿越次数为零。这些门限用于该粗分辨率算例的回归。常规组是负对照，完成推进不代表通过静水验收。
+历史水箱回归要求两组完整推进且字段有限。对校准组还检查初态相对压头 RMS 误差低于 $10^{-4}$，全程压力 RMS 峰值低于 0.25 倍压头，RMS 速度峰值及单粒子最大速度分别低于 $0.2\sqrt{gH}$ 和 $0.5\sqrt{gH}$，终点六层平均表压随高度递减，五面均有正净距且穿越次数为零。这些门限用于该粗分辨率算例的回归。常规组是负对照，完成推进不代表通过静水验收。
+
+当前工作树的固定壁算子、连续性积分与静水初态测试，可在已配置的 Serial 测试构建中执行。三档轨迹驱动的构建和运行见[连续性轨迹复跑](hydrostatic-continuity-repair.md#下载与复跑)。
+
+```sh
+cmake --build --preset cpu-debug --target nexora_sph_tests
+ctest --preset cpu-debug --no-tests=error -R 'Sph(AdamiWall|Continuity|HydrostaticInitial)\.' --output-on-failure
+```
 
 历史质量拟合驱动已退出当前构建。重放本文时，先根据修复报告恢复历史求和密度版本，再在该版本的仓库根目录执行以下命令。[历史版本复跑](hydrostatic-continuity-repair.md)
 

@@ -35,6 +35,8 @@
 | `data_schema`、`data` | INTERFACE `data_schema → core`；STATIC `data → data_schema, Kokkos::kokkos`。 [data CMake](../../src/data/CMakeLists.txt) | 已移除 `data → exec_api`。CPU 外部借用、本地 pack 及按稳定 ID 接收解包已实现，设备异步交接仍待实施。 |
 | `participant_api`、`simulation` | INTERFACE `participant_api → data_schema`；STATIC `simulation → participant_api`。两者均已导出。 [simulation CMake](../../src/simulation/CMakeLists.txt) | 保留生命周期边界。Kokkos 状态及算子实例放进实际方法/参与者实现。 |
 | `methods_reference`、`participants_reference` | 步骤 2 新增内部 STATIC 目标。`methods_reference → data, Kokkos::kokkos`；`participants_reference → participant_api, methods_reference, data`。不导出、不安装。 [方法 CMake](../../src/methods/reference/CMakeLists.txt) [参与者 CMake](../../src/participants/reference/CMakeLists.txt) | 只实现本次 Serial 状态闭环；其他设备、公共安装 API 和完整数据契约分别验收。 |
+| `methods_sph`、`participants_sph` | 内部三维 SPH 目标。`methods_sph → core, Kokkos::kokkos`。`participants_sph → participant_api, methods_sph, data, Kokkos::kokkos`。[方法 CMake](../../src/methods/sph/CMakeLists.txt) · [参与者 CMake](../../src/participants/sph/CMakeLists.txt) | 保留三维格索引、算子与 WCSPH 积分窗口。 |
+| `sph_fixed_csr_fixture` | 一维固定 CSR 验证目标，直接链接 `participant_api`、`data` 和 `Kokkos::kokkos`。一维测试和显式 benchmark 链接此夹具。[夹具 CMake](../../validation/sph/fixed_csr/CMakeLists.txt) | 源码归入验证目录。关闭测试时仍可显式构建 benchmark。 |
 | `nexora` CLI | `nexora` 直接链接 core、simulation、内部 `participants_reference` 和 Kokkos，以版本化 case 装配 Serial Reference。可选私有 `MPI::MPI_C` 用于独立探针。 [CLI CMake](../../apps/nexora/CMakeLists.txt) · [case 格式与验证](reference-case.md) | 后续设备组合按各自的实机验收与能力清单装配。 |
 | 原草案 `exec_cuda`、`reference_contract`、`reference_cpu`、`reference_cuda` | 均无 CMake 声明或实现。 | 取消 backend 专属执行目标。参考参与者与算子签名继续按职责组织，同一算子模板实例化所选 Kokkos execution space；内部目标只随实际使用者增加。 |
 | 测试和安装消费 | 旧 exec 测试与消费已删除；保留字段、生命周期、schema、simulation 与 Kokkos 安装消费测试。 | 干净安装与独立消费及现行正反例按实际执行结果记录；不以旧测试证明新路径。 |
@@ -115,9 +117,9 @@ P3、P4、P5 的单方法可以在 P1 字段契约确定后分别准备设计，
 <a id="sph-cell-begin"></a>
 #### SPH-002 三维动态邻域、密度与 WCSPH 压力
 
-**已实现的 Serial 窗口。** `sph::Participant3D` 持有 accepted 和 trial 的格索引、字段、密度及版本。窗口试算按稳定 ID 检查本次输入，格归属、成员与 ownership 相同就复用 `cellBegin`，任一变化即重建。三维 M₄ 核按试算坐标判距与累加。提交发布整份候选快照，恢复保留原 accepted 状态。提交、恢复及重试均按 owned ID 对照独立显式 CSR。[源码与验证记录](../../validation/sph/cell-begin-serial.md#simulation-window)
+**静态几何与算子。** `CellGrid` 按稳定 ID 检查更新后的粒子状态，格归属、成员与 ownership 相同就复用 `cellBegin`，任一变化即重建。`prepare_geometry_3d` 管理几何版本和预算。三维 M₄ 密度直接按当前格表上的坐标判距与累加。压力算子接收 `WcsphParameters{reference_density, sound_speed, gamma}` 和当前几何的 owned 密度，计算 Tait 表压及对称压力加速度。参与受力的普通 ghost 从完整本地支撑域重算同阶段密度。静态验证按 owned ID 对照独立显式 CSR。[格索引与验证](../../validation/sph/cell-begin-serial.md) · [压力公式与 ghost 输入约定](../../validation/sph/wcsph-pressure-serial.md)
 
-传入 `WcsphParameters{reference_density, sound_speed, gamma}` 可启用 Tait 表压及对称压力加速度。外供终点模式中，每个参与受力的 ghost 从完整本地支撑域重算同阶段密度。全 owned、单进程 Serial 的时间积分模式另接收初始速度、CFL 安全系数和固定的算例平滑长度 `h`（默认 1 m）。格宽和核支持半径均为 `2h`，核值和核梯度分别按 `h⁻³`、`h⁻⁴` 缩放，声学 CFL 随 `h` 缩放。每个窗口从 accepted 加速度出发，半步更新速度并移动粒子，在更新后的格表用预测速度再求一次密度变化率。两端变化率校正流体密度后重算压力力，再完成速度更新和下一步 CFL 估计。[压力公式与 ghost 输入约定](../../validation/sph/wcsph-pressure-serial.md) · [Velocity Verlet 与 CFL 验证](../../validation/sph/wcsph-verlet-serial.md)
+**Serial 积分窗口。** `sph::Participant3D` 使用全 owned 的初始流体字段、初始速度、初始密度和 CFL 安全系数推进。算例平滑长度 `h` 固定，默认 1 m。格宽和核支持半径均为 `2h`，核值和核梯度分别按 `h⁻³`、`h⁻⁴` 缩放，声学 CFL 随 `h` 缩放。每个窗口从 accepted 加速度出发，半步更新速度并移动粒子，在更新后的格表用预测速度再求一次密度变化率。两端变化率校正流体密度后重算压力加速度，再完成速度更新和下一步 CFL 估计。提交发布整份候选快照，恢复保留原 accepted 状态、时钟和 CFL 上限。[Velocity Verlet 与 CFL 验证](../../validation/sph/wcsph-verlet-serial.md)
 
 积分模式还可接收恒定重力与单独的固定壁粒子集。壁源随流体进入同一邻域索引，每次力评估从当前流体外推壁压，再反解 Tait 壁密度。积分和字段发布只遍历流体行。静水箱壁层统一取 ceil(2h/壁粒距)，完整包覆实体壁与底角，顶部对大气开放。现行推进需要显式物理密度，几何初态的核求和另作诊断。三档算例均保持物理质量，用推进后的压力、速度和穿墙检验静水平衡。[修复与实测](../../validation/sph/hydrostatic-continuity-repair.md) 原来的两种质量分布与轨迹对照属于历史实验。[现行初态验收](../../validation/sph/hydrostatic-initial-resolution.md) · [历史 Adami 固定壁实验](../../validation/sph/adami-hydrostatic-serial.md)
 
@@ -125,7 +127,7 @@ P3、P4、P5 的单方法可以在 P1 字段契约确定后分别准备设计，
 2. **在密度核内直接遍历。** 固定支持半径 `R`、格宽为 `R`、x 为最快变化的格编号时，三维内部目标周围最多 27 格。沿每个合法的 `(y,z)` 合并相邻 x 格，非周期边界先裁剪，每行最多扫描 9 个连续区间。对当前阶段坐标现场检查支持域并累加，只写 owned 目标的试算密度。ghost 可作只读源。以粒子身份识别自身，自身项只加一次，同位置的不同 ID 仍分别参与筛选。
 3. **跨阶段检查有效性。** 压力与相互作用阶段可复用仍有效的格索引，并读取该阶段的坐标和物理字段。积分更新位置后检查格归属，粒子仍在原格时可复用区间并重新判距，越格时更新置换、相关字段和格边界。成员、ghost 集合、布局或网格参数变化时须重新校验绑定。试算重排与索引更新受窗口发布和回滚约束，恢复后按 accepted 版本复用或重建索引。
 
-显式 CSR 保留作回归对照，也是固定几何下高复用压力计算的候选优化。[P1-07 一维冻结算例](../../validation/baselines/sph-density-1d-v1.md)继续按原行列顺序、闭支持域（含零权重边）、自身单计和原容差核对固定 CSR、逐 ID 密度及 owned 和。
+显式 CSR 保留作三维回归对照，也是固定几何下高复用压力计算的候选优化。一维验证夹具继续按原行列顺序、闭支持域（含零权重边）、自身单计和原容差核对固定 CSR、逐 ID 密度及 owned 和。[P1-07 一维冻结算例](../../validation/baselines/sph-density-1d-v1.md) · [夹具源码](../../validation/sph/fixed_csr/)
 
 **CPU 选型依据。** 独立的 Kokkos 5.2.2 实验于 `2026-11-19T15:42:18+08:00` 至 `2026-11-19T15:47:42+08:00` 在 Apple M2 Pro 上运行。下表取 OpenMP 8 线程、FP64、固定几何的三维密度核，含 262,144 个粒子、229,376 个 owned 目标及 3,895,709 条非自身有向边。三种方法的六种启动顺序各重复三次。累计耗时从格索引与字段重排开始，包含可选建表，至最后一遍密度核完成。各列为 18 轮中位数，峰值 RSS 按单方法独立进程测量。
 

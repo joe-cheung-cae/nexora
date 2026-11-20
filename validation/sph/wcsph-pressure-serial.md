@@ -1,10 +1,10 @@
-# WCSPH 三维压力窗口的 Serial 验证
+# WCSPH 三维压力算子的 Serial 验证
 
-在单进程 Kokkos Serial 上，`sph::Participant3D(initial, max_cells, WcsphParameters{rho0, c0, gamma})` 启用压力计算。三个参数均由调用方显式给出，必须有限且为正。原有双参数构造继续提供密度窗口。本文验证外供终点模式，其中坐标与质量由调用方传入。全 owned 的积分模式复用本页的压力算子。[参与者接口](../../src/participants/sph/Participant3D.hpp) · [格索引与试算输入约定](cell-begin-serial.md#simulation-window) · [Velocity Verlet 积分验证](wcsph-verlet-serial.md)
+单进程 Kokkos Serial 上，对给定的 `CellGrid` 调用 `evaluate_density_3d` 求 owned 行密度，再把密度与 `WcsphParameters{rho0, c0, gamma}` 传给 `evaluate_pressure_3d` 求同一构型的表压和压力加速度。三个参数须有限且为正。三维时间积分用同一压力算子处理连续性方程更新的密度。[压力接口](../../src/methods/sph/Pressure3D.hpp) · [格索引](cell-begin-serial.md) · [Velocity Verlet](wcsph-verlet-serial.md)
 
 ## 由密度到压力加速度
 
-1. 对每个 owned 粒子，用试算坐标和已有三维 M₄ 核计算密度，自身质量项计一次。沿用固定光滑长度 `h = 1`、支撑半径 `R = 2` 和非周期边界。
+1. 对每个 owned 粒子，用给定构型的坐标和三维 M₄ 核计算密度，自身质量项计一次。沿用固定光滑长度 `h = 1`、支撑半径 `R = 2` 和非周期边界。
 2. 从本步密度求 Tait 表压。参考密度为 $\rho_0$，参考声速为 $c_0$，指数为 $\gamma$。$\rho_i=\rho_0$ 时表压为零，低于参考密度时保留负表压。[Becker 与 Teschner，式 7](https://cg.informatik.uni-freiburg.de/publications/2007_SCA_SPH.pdf)
 
    $$
@@ -21,22 +21,25 @@
 
 **Ghost 输入必须覆盖参与受力的 ghost 自身的完整支撑域。** 每个对 owned 目标有非零梯度贡献的 ghost，会用当前格表中的全部本地源重算自身密度和表压。例如，距目标 `2.5` 的粒子可影响距目标 `1.25` 的 ghost，进而改变目标的加速度。按距离从 owned 集合选源时，覆盖至 `2R` 是充分条件。本阶段只发布 owned 行，MPI halo 交换待另行验证。
 
-## 快照与回归
+## 算子回归
 
-`snapshot.pressure(row)` 读取 Pa 表压，`snapshot.pressure_acceleration(row)` 读取笛卡尔系的三个加速度分量（m/s²）。每个启用压力的字段组占用每个 owned 行五个 `real`，包括密度。方法的临时数组按源粒子数线性增长，含 ghost 时另计标记字节。试算成功后释放工作区。若读者持有 trial，预提交会为全部输出复制独立存储；成功后格索引和三种输出一起成为 accepted。恢复或失败保留原 accepted 时钟与字段，已签发的旧快照可在 Kokkos 生命周期内继续读取。
+压力算子按格表的 owned 行顺序写入调用方提供的标量压力和三分量加速度数组。普通 ghost 只作源。该算例使用完整的本地支撑域，按同阶段密度重构普通 ghost 压力；固定壁积分时，壁压按 Adami 外推。[算子回归](../../tests/methods/sph/pressure_3d_tests.cpp) · [固定壁](adami-hydrostatic-serial.md)
 
-独立对照先全粒子两两扫描并构造显式 CSR，按稳定 ID 建行，再从这些行计算参考密度、Tait 压力及三个力分量。生产算子直接遍历格表。邻居 ID 集合要求完全相等。压力绝对误差限为 `64 ε × B[(ρ/ρ₀)^γ + 1]`，其中 `B = ρ₀ c₀² / γ`、`ε = epsilon(real)`。每个加速度分量用逐邻居绝对贡献的对应压力尺度之和乘 `256 ε`，可检查力相互抵消的情形。密度使用既有的逐行舍入界。[独立 CSR](../../tests/methods/sph/cell_grid_oracle.hpp) · [WCSPH 窗口测试](../../tests/methods/sph/wcsph_window_tests.cpp)
+独立对照先全粒子两两扫描并构造显式 CSR，按稳定 ID 建行，再从这些行计算参考密度、Tait 压力及三个力分量。生产算子直接遍历格表。邻居 ID 集合要求完全相等。压力绝对误差限为 `64 ε × B[(ρ/ρ₀)^γ + 1]`，其中 `B = ρ₀ c₀² / γ`、`ε = epsilon(real)`。每个加速度分量用逐邻居绝对贡献的对应压力尺度之和乘 `256 ε`，可检查力相互抵消的情形。密度使用既有的逐行舍入界。[独立 CSR](../../tests/methods/sph/cell_grid_oracle.hpp) · [压力参考](../../tests/methods/sph/wcsph_oracle.hpp)
 
 | 检查 | 判据 |
 |---|---|
-| 原格内移动并改质量，随后三轴跨格且输入反序 | 对初始、试算、提交、显式回滚、缩短窗口后的重试以及仍保留的旧快照，逐 owned ID 检查邻居、密度、压力和三个加速度分量。相同终点输入在新 attempt 下重算得到相等的字段值。 |
-| 27 粒子三维算例改变 ownership、成员及输入顺序 | 初始有 18 个 owned 目标。切换归属并替换一个源后，提交的 10 个 owned 行及保留的 18 个旧行均按稳定 ID 与各自的 CSR 核对。 |
+| 格内位移、质量变化与三轴跨格重排 | 在各构型上按稳定 ID 对照独立 CSR 的邻居、核密度、压力和三个加速度分量。 |
+| 修改 ownership、成员和输入顺序 | 新旧构型的 owned 行分别按各自的稳定 ID 与 CSR 核对。 |
 | 两个质量不等的粒子 | 正压相斥、负压相吸，力方向符合解析解，质量加权加速度之和在舍入误差内为零。 |
 | 远端源、重合、支撑边界、孤立及空目标 | 改变间接源质量只经 ghost 改变目标压力加速度；重合、边界和孤立情形的加速度为零；空输入和纯 ghost 均产生零个 owned 行。 |
 | 参考密度 | 检查零表压及参考密度两侧相邻 double 值的压差。 |
-| 预提交预算不足 | 保留 trial 导致复制预算不足时，accepted 与已签发 trial 均可读。释放读者后可用同一时窗重试，结束后预算归零。 |
 
-## 离线执行结果
+积分路径另核对试算与提交、非初始步恢复重试、快照保活与预算。[积分窗口回归](../../tests/methods/sph/verlet_window_tests.cpp)
+
+## 历史外供窗口实测
+
+以下数据记录原外供窗口通过压力算子时的执行情况。
 
 `2026-11-20T08:49:53+08:00` 至 `2026-11-20T08:51:00+08:00`，在 Apple M2 Pro、macOS 27.2.1 arm64（26B131）运行。工具链为 AppleClang 21.0.0.21000401、C++20、CMake 4.4.3、Ninja 1.13.2、Kokkos 5.2.2 Serial、GoogleTest 1.17.0。四个独立目录均完成禁网检查、配置、构建、依赖检查、常规测试和迁移安装包验证，退出码均为 0，零跳过。
 
@@ -63,5 +66,5 @@ for config in Debug Release; do
     --work-dir "build/$run" --logs "results/$run/$config" \
     --jobs 4 --precisions float double --require-network-blocked || exit 1
 done
-ctest --test-dir "build/$run/release-double" -R 'SphWcsphWindow\.' --output-on-failure
+ctest --test-dir "build/$run/release-double" --no-tests=error -R 'SphWcsphOperators[.]' --output-on-failure
 ```

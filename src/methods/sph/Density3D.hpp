@@ -1,11 +1,12 @@
 #pragma once
 
-#include "Density.hpp"
 #include "neighbors/CellGrid.hpp"
 
 #include <numbers>
 
 namespace nexora::sph {
+
+using Values = Kokkos::View<real*, Kokkos::HostSpace>;
 
 // Dimensionless 3D M4 weight. The physical kernel is this weight divided by h cubed.
 KOKKOS_INLINE_FUNCTION double m4_weight_3d(double q) {

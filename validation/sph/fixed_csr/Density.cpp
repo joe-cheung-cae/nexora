@@ -1,10 +1,10 @@
-#include "Density.hpp"
+#include <fixed_csr/Density.hpp>
 
 #include <cmath>
 #include <cstddef>
 #include <limits>
 
-namespace nexora::sph {
+namespace nexora::sph_fixture {
 namespace {
 using Policy = Kokkos::RangePolicy<Kokkos::Serial, Kokkos::IndexType<std::size_t>>;
 
@@ -48,4 +48,4 @@ Result<real> evaluate_density(const Kokkos::Serial& exec, const DensityInput& in
         return Status{StatusCode::numerical_failure, "SPH trial density or owned sum exceeds real range"};
     return static_cast<real>(sum);
 }
-} // namespace nexora::sph
+} // namespace nexora::sph_fixture

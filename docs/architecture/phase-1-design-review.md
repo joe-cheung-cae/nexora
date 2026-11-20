@@ -1,6 +1,6 @@
 # Nexora Phase 1：Kokkos 基础与代表性切片评审
 
-修订时间 `2026-11-19T11:40:57+08:00`。**当前已实现 Serial CPU 基础与 Reference 同步窗口，包括字段权限、本地传输、最小历史恢复和预算。P1-07 的 Serial CPU 代表性切片通过审查修复后的回归验收。完整 Phase 1 仍开放。**
+修订时间 `2026-11-20T19:20:01+08:00`。**当前已实现 Serial CPU 基础与 Reference 同步窗口，包括字段权限、本地传输、最小历史恢复和预算。P1-07 的 Serial CPU 代表性切片通过审查修复后的回归验收。完整 Phase 1 仍开放。**
 
 唯一架构入口：[overview](overview.md)。关键类型和生命周期：[kokkos-design](kokkos-design.md)。当前源码、旧类型/target 处置及归档逐项映射：[migration-roadmap](migration-roadmap.md)。依赖版本和离线过程：[build-and-validation](build-and-validation.md)。
 
@@ -24,7 +24,7 @@ P1 直接交付 Kokkos 默认 CPU 和可选 CUDA 的**同一算子源码**、typ
 | **P1-04 lease、外部 owner 与交换快照** | `include/nexora/data/{FieldAccess,TransportView}.hpp`、`src/data/`、`tests/data/`、`tests/interop/`；`nexora::data`，必要私有 `nexora_interop_cuda` | 前置 P1-03；CUDA 部分集成 P1-05。整 allocation 权限仲裁、managed/unmanaged、可观察外部 owner、进程内 consumer-complete、显式 pack/staging。只实现 P1 本地 TransportView fixture，MPI request 在 P2。 | V3/V4 低层子项；提前释放 caller、多读者、写冲突、关闭、部分失败均可观察；正确复制/转换与保活，不新建 allocator/queue/event。窗口恢复 V7 在 P1-06 之后验收。 |
 | **P1-05 typed 算子与 execution 实例** | `src/methods/reference/{Relaxation,Instantiations}.hpp/.cpp`、`tests/methods/`、必要 `src/interop/cuda/` 私有实现；`nexora_methods_reference` | 前置 P1-02/03；与 P1-04 联调。同一 template source 实例化 Serial/OpenMP（选中时）/Cuda；每次 dispatch 显式 exec 实例；仅在必要边界 fence。 | V3/V5；CPU/CUDA 同输入数值；非默认实例、跨实例交接和外部 stream fixture；拒绝未构建组合；原生类型仅私有互操作。 |
 | **P1-06 参考参与者与窗口事务** | `src/participants/reference/`、`include/nexora/participant/`、`src/simulation/`、`tests/simulation/`；`nexora_participants_reference`、`participant_api/simulation` | 前置 P1-03/04/05 及 P1-01b reference 基准。独立 accepted/trial、历史与控制、缓存键、恢复/重放、快照背压；保持高层同步接口，不对 Simulation 加设备模板。 | V5/V7 的 reference 子项；真实 Kokkos 数组上的失败/恢复/重试，与已接受状态/时钟一致；旧 dummy 的失败语义继续覆盖。SPH/FVM 的 V7 在对应 07/08 集成后汇总。 |
-| **P1-07 SPH 代表性切片** | `src/methods/sph/` 的 State/NeighborTraversal/Reduction；`tests/methods/sph/`、`validation/sph/`、`benchmarks/sph/`；`nexora_methods_sph` | 前置 P1-01b 对应数学基准、P1-03、P1-04、P1-05、P1-06。固定 CSR 非规则邻域、稳定 ID、粒子场，获准阶段公式/归约；不一次接入完整 SPH solver。 | V6-SPH/V8；零/长邻域、重排、版本失效、CPU/CUDA、历史回放与含转换的端到端耗时；不能只提交规则 SAXPY 结果。 |
+| **P1-07 SPH 代表性切片** | `validation/sph/fixed_csr/`、`tests/methods/sph/`、`benchmarks/sph/`，共用 `nexora_sph_fixed_csr_fixture`。 | 前置 P1-01b 对应数学基准、P1-03、P1-04、P1-05、P1-06。用固定 CSR 验证非规则邻域、稳定 ID、粒子场和获准阶段公式及归约。 | V6-SPH/V8；零/长邻域、重排、版本失效、CPU/CUDA、历史回放与含转换的端到端耗时；不能只提交规则 SAXPY 结果。 |
 | **P1-08 FVM 代表性切片** | `src/methods/fvm/` 的 FaceFlux/CellAccumulation/Topology；`tests/methods/fvm/`、`validation/fvm/`、`benchmarks/fvm/`；`nexora_methods_fvm` | 前置 P1-01b 对应数学基准、P1-03、P1-04、P1-05、P1-06。cell/face 分域、owner/neighbour/patch/CSR；独立 face 输出→cell 累积，保留原守恒方向约定。 | V6-FVM/V8；内部面唯一逻辑通量、边界面、非均匀连接；CPU/CUDA 和全局通量预算通过；完整压力校正在 P3。 |
 | **P1-09 case 与装配能力** | `apps/nexora/`、拟 `schemas/reference/`、`cases/reference/`、CLI tests；`nexora` | 前置 P1-02/06；schema 可在契约冻结后准备。versioned key=value reference fixture、validate/plan/run 共用校验；built/available/validated 分开；取消 provider 选择键。 | V9；非法/重复键、时间/量子/NaN/Inf、未支持组合明确失败；plan 列复制、布局转换与同步边界；run 不隐式选另一设备。 |
 | **P1-10 验收与端到端性能** | `tests/`、`validation/`、`benchmarks/`、`.github/workflows/ci.yml` 与受控 GPU runner 文档；测试叶 target | 前置 P1-02、P1-03、P1-04、P1-05、P1-06、P1-07、P1-08、P1-09；各 profile 的预检可随对应任务开展，汇总关闭须全部满足。固定独立 oracle、重复策略、manifest 和时序统计。受控致命错误只在隔离测试进程，不在正常进程强行恢复设备。 | V1–V9 的候选行为与 V10 预检，全部结果按实际 profile 记录；V1 最终包消费和 V10 最终删除检查由 P1-11 完成。硬件/驱动/编译器/架构/输入/hash/时间/skip 俱全，无设备不算通过。 |
@@ -48,15 +48,15 @@ double 配置的原稿数值门槛不变：`λ=1 s⁻¹, x₀=1, q₀=0, T=1 s`�
 
 `P1-01b` 的 [SPH 一维密度小算例](../../validation/baselines/sph-density-1d-v1.md) 已冻结核函数、输入、精确参考答案、误差判据及 SHA-256。P1-07 按此基准精确核对稳定 ID、CSR 关系和重排，并按精度核对密度与归约。真实 `BASE-001/SPH-001` 继续独立验收。
 
-P1-07 的 [Serial CPU 实现和验证记录](../../validation/sph/serial.md) 包含密度与归约边界、重排和版本失效、快照预算、失败恢复和重放，以及小／大规模端到端与内存计量。CUDA 实机数值和性能仍待验收。
+P1-07 的 Serial CPU 验证包含密度与归约边界、重排和版本失效、快照预算、失败恢复和重放，以及小／大规模端到端与内存计量。固定 CSR 实现由一维测试与显式 benchmark 共用。三维静态几何、密度与压力通过格索引和算子接口验证，三维 WCSPH 时间推进通过内部 `sph::Participant3D` 的 Simulation 窗口验证。CUDA 实机数值和性能仍待验收。[Serial CPU 验证记录](../../validation/sph/serial.md) · [三维邻域设计与实施](migration-roadmap.md#sph-cell-begin)
 
-#### 3.2.1 Serial SPH 精简结果
+#### 3.2.1 Serial 固定 CSR 验证夹具
 
-固定 CSR 在初始化时用计算精度下的距离校验每条边是否位于闭支持域内。重排保留邻接关系。M₄ 算子按原 CSR 顺序计算每个 owned 行，单计自身项，ghost 只读。核权重由现行分段多项式直接求值，再乘邻居质量。[密度算子](../../src/methods/sph/Density.cpp) · [边界回归](../../tests/methods/sph/sph_tests.cpp)
+固定 CSR 在初始化时用计算精度下的距离校验每条边是否位于闭支持域内。重排保留邻接关系。M₄ 算子按原 CSR 顺序计算每个 owned 行，单计自身项，ghost 只读。核权重由现行分段多项式直接求值，再乘邻居质量。[密度算子](../../validation/sph/fixed_csr/Density.cpp) · [边界回归](../../tests/methods/sph/sph_tests.cpp)
 
 一次 Kokkos `parallel_reduce` 写入每行的 `real` 密度，并将该值累加到普通 `double` 诊断和。归约结果有限且落在 `real` 的范围内才转换并交给 participant。失败时恢复已提交状态。[Kokkos 归约语义](https://kokkos.org/kokkos-core-wiki/API/core/parallel-dispatch/parallel_reduce.html#semantics)
 
-跨窗口读取持有完整 `Snapshot`，通过数量及按索引取值的接口读取布局和密度。副本共享快照记录与读授权，布局和密度各自持有载荷预算。重排单独预留临时空间；提交时如有读者保留 trial，参与者先为 accepted 密度分配并复制。Serial 四配置及两种精度的基准结果见验证记录。[快照接口](../../src/participants/sph/Participant.hpp) · [Serial 验证](../../validation/sph/serial.md)
+跨窗口读取持有完整 `Snapshot`，通过数量及按索引取值的接口读取布局和密度。副本共享快照记录与读授权，布局和密度各自持有载荷预算。重排单独预留临时空间；提交时如有读者保留 trial，参与者先为 accepted 密度分配并复制。Serial 四配置及两种精度的基准结果见验证记录。[快照接口](../../validation/sph/fixed_csr/Participant.hpp) · [Serial 验证](../../validation/sph/serial.md)
 
 ### 3.3 FVM 面通量与单元累积切片
 

@@ -1,6 +1,8 @@
 #include "wcsph_oracle.hpp"
 #include <iomanip>
 #include <nexora/simulation/Simulation.hpp>
+#include <participants/sph/Participant3D.hpp>
+#include <optional>
 #include <sstream>
 
 namespace {
@@ -226,8 +228,45 @@ TEST(SphVerletWindow, UniformVelocityCrossesCellsAndStrictCfl) {
     ASSERT_TRUE(simulation.begin_window(bound).ok());
     ASSERT_TRUE(simulation.restore_window().ok());
     for (std::size_t step = 1; step <= 6; ++step) {
+        const auto before = checked(participant.snapshot());
+        std::optional<sph::Snapshot3D> discarded;
+        if (step == 5) {
+            // Replay a real cell crossing from a noninitial accepted state.
+            ASSERT_TRUE(simulation.begin_window(.125).ok());
+            ASSERT_TRUE(simulation.advance_trial().ok());
+            discarded.emplace(checked(participant.trial_snapshot(checked(participant.trial_stamp()))));
+            ASSERT_TRUE(simulation.restore_window().ok());
+            EXPECT_EQ(checked(participant.snapshot()).stamp, before.stamp);
+            EXPECT_EQ(simulation.time().accepted_steps, 4U);
+            EXPECT_DOUBLE_EQ(simulation.time().accepted_time, .5);
+            ASSERT_NO_FATAL_FAILURE(check_trajectory(before, expected, parameters.eos, 4));
+        }
         expected = explicit_verlet(expected, parameters.eos, .125);
-        ASSERT_TRUE(simulation.advance(.125).ok());
+        ASSERT_TRUE(simulation.begin_window(.125).ok());
+        ASSERT_TRUE(simulation.advance_trial().ok());
+        if (discarded) {
+            const auto replay = checked(participant.trial_snapshot(checked(participant.trial_stamp())));
+            EXPECT_NE(replay.stamp.trial, discarded->stamp.trial);
+            EXPECT_EQ(replay.stamp.geometry, discarded->stamp.geometry);
+            EXPECT_EQ(replay.stamp.layout, discarded->stamp.layout);
+            EXPECT_EQ(replay.stamp.topology, discarded->stamp.topology);
+            EXPECT_FALSE(participant.trial_snapshot(discarded->stamp).ok());
+            ASSERT_NO_FATAL_FAILURE(check_trajectory(*discarded, expected, parameters.eos, step));
+            ASSERT_NO_FATAL_FAILURE(check_trajectory(replay, expected, parameters.eos, step));
+            std::map<std::uint64_t, std::size_t> rows;
+            for (std::size_t row = 0; row < discarded->row_count(); ++row)
+                rows.emplace(discarded->row_id(row), row);
+            for (std::size_t row = 0; row < replay.row_count(); ++row) {
+                const auto old = rows.at(replay.row_id(row));
+                EXPECT_EQ(checked(replay.position(row)), checked(discarded->position(old)));
+                EXPECT_EQ(checked(replay.velocity(row)), checked(discarded->velocity(old)));
+                EXPECT_EQ(replay.density(row), discarded->density(old));
+                EXPECT_EQ(checked(replay.pressure(row)), checked(discarded->pressure(old)));
+                EXPECT_EQ(checked(replay.pressure_acceleration(row)),
+                          checked(discarded->pressure_acceleration(old)));
+            }
+        }
+        ASSERT_TRUE(simulation.commit_window().ok());
         const auto accepted = checked(participant.snapshot());
         ASSERT_NO_FATAL_FAILURE(check_trajectory(accepted, expected, parameters.eos, step));
         for (std::size_t row = 0; row < accepted.row_count(); ++row)
@@ -313,11 +352,17 @@ TEST(SphVerletWindow, NoninitialRestoreAndSmallerRetryPreserveHeldSnapshots) {
     auto velocity = input_velocity(initial);
     sph::Participant3D participant(fields.get(), 1000, parameters, velocity,
                                    seed_density(initial.particles));
+    sph::Participant3D other(fields.get(), 1000, parameters, velocity,
+                             seed_density(initial.particles));
     Simulation simulation(participant);
+    Simulation foreign(other);
     ASSERT_TRUE(simulation.initialize().ok());
     ASSERT_TRUE(simulation.prepare().ok());
+    ASSERT_TRUE(foreign.initialize().ok());
+    ASSERT_TRUE(foreign.prepare().ok());
     auto accepted_reference = explicit_verlet(initial, parameters.eos, .02);
     ASSERT_TRUE(simulation.advance(.02).ok());
+    ASSERT_TRUE(foreign.advance(.02).ok());
     const auto accepted = checked(participant.snapshot());
     const double accepted_cfl = participant.time_constraint(.02).maximum_step;
     const auto discarded_reference = explicit_verlet(accepted_reference, parameters.eos, .04);
@@ -325,6 +370,11 @@ TEST(SphVerletWindow, NoninitialRestoreAndSmallerRetryPreserveHeldSnapshots) {
     ASSERT_TRUE(simulation.advance_trial().ok());
     const auto stamp = checked(participant.trial_stamp());
     const auto discarded = checked(participant.trial_snapshot(stamp));
+    ASSERT_TRUE(foreign.begin_window(.04).ok());
+    ASSERT_TRUE(foreign.advance_trial().ok());
+    EXPECT_FALSE(other.trial_snapshot(stamp).ok());
+    EXPECT_FALSE(participant.trial_snapshot(checked(other.trial_stamp())).ok());
+    ASSERT_TRUE(foreign.restore_window().ok());
     ASSERT_NO_FATAL_FAILURE(check_trajectory(discarded, discarded_reference, parameters.eos, 2));
     ASSERT_TRUE(simulation.restore_window().ok());
     EXPECT_DOUBLE_EQ(simulation.time().accepted_time, .02);
@@ -334,9 +384,11 @@ TEST(SphVerletWindow, NoninitialRestoreAndSmallerRetryPreserveHeldSnapshots) {
         check_trajectory(checked(participant.snapshot()), accepted_reference, parameters.eos, 1));
     const auto retry_reference = explicit_verlet(accepted_reference, parameters.eos, .01);
     ASSERT_TRUE(simulation.advance(.01).ok());
+    EXPECT_FALSE(participant.trial_snapshot(stamp).ok());
     const auto retried = checked(participant.snapshot());
     ASSERT_NO_FATAL_FAILURE(check_trajectory(retried, retry_reference, parameters.eos, 2));
     ASSERT_TRUE(simulation.finalize().ok());
+    ASSERT_TRUE(foreign.finalize().ok());
     ASSERT_NO_FATAL_FAILURE(check_trajectory(accepted, accepted_reference, parameters.eos, 1));
     ASSERT_NO_FATAL_FAILURE(check_trajectory(discarded, discarded_reference, parameters.eos, 2));
     ASSERT_NO_FATAL_FAILURE(check_trajectory(retried, retry_reference, parameters.eos, 2));
@@ -543,6 +595,119 @@ TEST(SphVerletWindow, RetainedTrialCanCommitWithinWorkspaceBudget) {
     EXPECT_EQ(participant.resource_usage().snapshot_records, 0u);
 }
 
+TEST(SphVerletWindow, SnapshotRecordScopesAndRestoreRetryWithAndWithoutTrialReaders) {
+    const sph::WcsphVerletParameters parameters{{1, .5, 3}, .5};
+    const Trajectory initial{{{{.25, .5, .75}, 1, 11, 0}}, {{11, {.125, 0, 0}}}};
+    for (const bool retain_trial : {false, true}) {
+        Fields fields(initial.particles);
+        sph::Participant3D participant(fields.get(), 1, parameters, input_velocity(initial),
+                                       seed_density(initial.particles), ParticipantId{1},
+                                       {2, 1024 * 1024});
+        Simulation simulation(participant);
+        ASSERT_TRUE(simulation.initialize().ok());
+        ASSERT_TRUE(simulation.prepare().ok());
+        // Warm the actual integration workspace and use a noninitial accepted bank.
+        ASSERT_TRUE(simulation.advance(.125).ok());
+        const auto accepted_reference = explicit_verlet(initial, parameters.eos, .125);
+        const auto baseline = participant.resource_usage();
+        {
+            auto first = checked(participant.snapshot());
+            auto shared_copy = first;
+            EXPECT_EQ(participant.resource_usage().snapshot_records, 1U);
+            {
+                auto second = checked(participant.snapshot());
+                EXPECT_EQ(participant.resource_usage().snapshot_records, 2U);
+                EXPECT_EQ(participant.snapshot().status().code(), StatusCode::resource_exhausted);
+            }
+            EXPECT_EQ(participant.resource_usage().snapshot_records, 1U);
+        }
+        EXPECT_EQ(participant.resource_usage().snapshot_records, baseline.snapshot_records);
+        ASSERT_TRUE(simulation.begin_window(.125).ok());
+        ASSERT_TRUE(simulation.advance_trial().ok());
+        const auto restored_stamp = checked(participant.trial_stamp());
+        std::optional<sph::Snapshot3D> retained;
+        if (retain_trial)
+            retained.emplace(checked(participant.trial_snapshot(restored_stamp)));
+        const auto endpoint = explicit_verlet(accepted_reference, parameters.eos, .125);
+        ASSERT_TRUE(simulation.restore_window().ok());
+        EXPECT_EQ(simulation.state(), SimulationState::prepared);
+        EXPECT_DOUBLE_EQ(simulation.time().accepted_time, .125);
+        EXPECT_FALSE(participant.trial_snapshot(restored_stamp).ok());
+        ASSERT_NO_FATAL_FAILURE(check_trajectory(checked(participant.snapshot()),
+                                                 accepted_reference, parameters.eos, 1));
+        if (retained) {
+            ASSERT_NO_FATAL_FAILURE(check_trajectory(*retained, endpoint, parameters.eos, 2));
+            EXPECT_GT(participant.resource_usage().controlled_bytes, baseline.controlled_bytes);
+        }
+        retained.reset();
+        EXPECT_EQ(participant.resource_usage().controlled_bytes, baseline.controlled_bytes);
+        EXPECT_EQ(participant.resource_usage().snapshot_records, baseline.snapshot_records);
+        ASSERT_TRUE(simulation.begin_window(.125).ok());
+        ASSERT_TRUE(simulation.advance_trial().ok());
+        const auto retry_stamp = checked(participant.trial_stamp());
+        EXPECT_NE(retry_stamp.trial, restored_stamp.trial);
+        if (retain_trial)
+            retained.emplace(checked(participant.trial_snapshot(retry_stamp)));
+        ASSERT_TRUE(simulation.commit_window().ok());
+        EXPECT_FALSE(participant.trial_snapshot(retry_stamp).ok());
+        ASSERT_NO_FATAL_FAILURE(check_trajectory(checked(participant.snapshot()), endpoint,
+                                                 parameters.eos, 2));
+        if (retained)
+            ASSERT_NO_FATAL_FAILURE(check_trajectory(*retained, endpoint, parameters.eos, 2));
+        retained.reset();
+        EXPECT_EQ(participant.resource_usage().controlled_bytes, baseline.controlled_bytes);
+        EXPECT_EQ(participant.resource_usage().snapshot_records, baseline.snapshot_records);
+        ASSERT_TRUE(simulation.finalize().ok());
+        EXPECT_EQ(participant.resource_usage().controlled_bytes, 0U);
+        EXPECT_EQ(participant.resource_usage().snapshot_records, 0U);
+    }
+}
+TEST(SphVerletWindow, RetainedTrialBudgetRefusalRestoresAndRetryWithoutReaderSucceeds) {
+    const sph::WcsphVerletParameters parameters{{1, .5, 3}, .5};
+    const Trajectory initial{{{{.25, .5, .75}, 1, 11, 0}}, {{11, {0, 0, 0}}}};
+    Fields fields(initial.particles);
+    const auto velocity = input_velocity(initial);
+    const auto density = seed_density(initial.particles);
+    std::size_t accepted_bytes{};
+    {
+        sph::Participant3D baseline(fields.get(), 1, parameters, velocity, density);
+        ASSERT_TRUE(baseline.initialize(0).ok());
+        accepted_bytes = baseline.resource_usage().controlled_bytes;
+        ASSERT_TRUE(baseline.finalize().ok());
+    }
+    // The actual integration stage fits, but the retained trial requires another
+    // eight-scalar publication bank even after private scratch is released.
+    sph::Participant3D participant(fields.get(), 1, parameters, velocity, density,
+                                   ParticipantId{1}, {32, accepted_bytes + 20 * sizeof(real) - 1});
+    Simulation simulation(participant);
+    ASSERT_TRUE(simulation.initialize().ok());
+    ASSERT_TRUE(simulation.prepare().ok());
+    ASSERT_TRUE(simulation.begin_window(.125).ok());
+    ASSERT_TRUE(simulation.advance_trial().ok());
+    const auto stamp = checked(participant.trial_stamp());
+    {
+        const auto held = checked(participant.trial_snapshot(stamp));
+        ASSERT_NO_FATAL_FAILURE(check_trajectory(held, initial, parameters.eos, 1));
+        EXPECT_EQ(simulation.commit_window().code(), StatusCode::resource_exhausted);
+        EXPECT_EQ(simulation.state(), SimulationState::prepared);
+        EXPECT_DOUBLE_EQ(simulation.time().accepted_time, 0);
+        EXPECT_FALSE(participant.trial_snapshot(stamp).ok());
+        ASSERT_NO_FATAL_FAILURE(check_trajectory(checked(participant.snapshot()), initial,
+                                                 parameters.eos, 0));
+        ASSERT_NO_FATAL_FAILURE(check_trajectory(held, initial, parameters.eos, 1));
+        EXPECT_GT(participant.resource_usage().controlled_bytes, accepted_bytes);
+    }
+    EXPECT_EQ(participant.resource_usage().controlled_bytes, accepted_bytes);
+    EXPECT_EQ(participant.resource_usage().snapshot_records, 0U);
+    ASSERT_TRUE(simulation.advance(.125).ok());
+    EXPECT_DOUBLE_EQ(simulation.time().accepted_time, .125);
+    ASSERT_NO_FATAL_FAILURE(check_trajectory(checked(participant.snapshot()), initial,
+                                             parameters.eos, 1));
+    ASSERT_TRUE(simulation.finalize().ok());
+    EXPECT_EQ(participant.resource_usage().controlled_bytes, 0U);
+    EXPECT_EQ(participant.resource_usage().snapshot_records, 0U);
+}
+
 TEST(SphVerletWindow, ChecksInitialVelocityCflAndOwnershipBeforePublishing) {
     const sph::WcsphVerletParameters parameters{{1, 1, 3}, .5};
     Fields fields({{{0, 0, 0}, 1, 1, 0}});
@@ -567,11 +732,6 @@ TEST(SphVerletWindow, ChecksInitialVelocityCflAndOwnershipBeforePublishing) {
     rejects(parameters, velocity, StatusCode::unsupported);
     fields.ghost(0) = 0;
 
-    // Staged mode accepts caller geometry. Integrated mode owns each candidate.
-    sph::Participant3D staged(fields.get(), 1, parameters.eos);
-    ASSERT_TRUE(staged.initialize(0).ok());
-    EXPECT_EQ(checked(staged.snapshot()).velocity(0).status().code(), StatusCode::unsupported);
-    ASSERT_TRUE(staged.finalize().ok());
     sph::Participant3D diagnostic(fields.get(), 1, parameters, velocity);
     Simulation diagnostic_sim(diagnostic);
     ASSERT_TRUE(diagnostic_sim.initialize().ok());
@@ -586,8 +746,18 @@ TEST(SphVerletWindow, ChecksInitialVelocityCflAndOwnershipBeforePublishing) {
     Simulation simulation(integrated);
     ASSERT_TRUE(simulation.initialize().ok());
     ASSERT_TRUE(simulation.prepare().ok());
+    {
+        const auto snapshot = checked(integrated.snapshot());
+        EXPECT_TRUE(snapshot.pressure(0).ok());
+        EXPECT_TRUE(snapshot.pressure_acceleration(0).ok());
+        EXPECT_EQ(snapshot.pressure(snapshot.row_count()).status().code(),
+                  StatusCode::invalid_argument);
+        EXPECT_EQ(snapshot.pressure_acceleration(snapshot.row_count()).status().code(),
+                  StatusCode::invalid_argument);
+        EXPECT_FALSE(snapshot.pressure(std::numeric_limits<std::size_t>::max()).ok());
+        EXPECT_FALSE(snapshot.pressure_acceleration(std::numeric_limits<std::size_t>::max()).ok());
+    }
     ASSERT_TRUE(simulation.begin_window(.125).ok());
-    EXPECT_EQ(integrated.set_trial_fields(fields.get()).code(), StatusCode::unsupported);
     ASSERT_TRUE(simulation.advance_trial().ok());
     ASSERT_TRUE(simulation.commit_window().ok());
     ASSERT_TRUE(simulation.finalize().ok());
@@ -598,8 +768,15 @@ TEST(SphVerletWindow, ChecksInitialVelocityCflAndOwnershipBeforePublishing) {
     ASSERT_TRUE(empty_sim.prepare().ok());
     EXPECT_EQ(empty.time_constraint(0).maximum_step, .5);
     ASSERT_TRUE(empty_sim.advance(.5).ok());
-    EXPECT_EQ(checked(empty.snapshot()).row_count(), 0u);
+    const auto empty_state = checked(empty.snapshot());
+    EXPECT_EQ(empty_state.row_count(), 0u);
+    EXPECT_EQ(empty_state.pressure(0).status().code(), StatusCode::invalid_argument);
+    EXPECT_EQ(empty_state.pressure_acceleration(0).status().code(), StatusCode::invalid_argument);
+    EXPECT_FALSE(empty_state.pressure(std::numeric_limits<std::size_t>::max()).ok());
+    EXPECT_FALSE(empty_state.pressure_acceleration(std::numeric_limits<std::size_t>::max()).ok());
     ASSERT_TRUE(empty_sim.finalize().ok());
+    EXPECT_EQ(empty_state.row_count(), 0u);
+    EXPECT_EQ(empty_state.pressure(0).status().code(), StatusCode::invalid_argument);
 
     Fields fixed({{{.25, .5, .75}, 1, 19, 1}});
     sph::Participant3D walls_only(

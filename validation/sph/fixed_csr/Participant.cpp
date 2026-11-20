@@ -1,4 +1,4 @@
-#include <participants/sph/Participant.hpp>
+#include <fixed_csr/Participant.hpp>
 
 #include <array>
 #include <cmath>
@@ -7,14 +7,14 @@
 #include <exception>
 #include <initializer_list>
 #include <limits>
-#include <methods/sph/Density.hpp>
+#include <fixed_csr/Density.hpp>
 #include <new>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
-namespace nexora::sph {
+namespace nexora::sph_fixture {
 namespace {
 using detail::CsrAdjacency;
 using detail::EntityOrder;
@@ -552,4 +552,4 @@ void Participant::close_window() noexcept {
     stage_ = Stage::ready;
 }
 
-} // namespace nexora::sph
+} // namespace nexora::sph_fixture

@@ -1,5 +1,4 @@
 add_library(nexora_methods_sph STATIC
-    Density.cpp
     Density3D.cpp
     Pressure3D.cpp
     Verlet3D.cpp

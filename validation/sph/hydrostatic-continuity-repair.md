@@ -87,9 +87,9 @@
 本算例固定箱边长 H=6 m，粒距 Δx=6/n，M₄ 核的 h=Δx，重力为 (0,0,−9.81) m/s²。Tait 参数为 ρ₀=1000 kg/m³、c₀=80 m/s、γ=7。约定大气表压 p(H)=0。平衡参考满足 dp/dz=−ρg，其解析密度为 ρ*(z)=ρ₀[1+(γ−1)g(H−z)/c₀²]^(1/(γ−1))，p*(z) 由同一 Tait EOS 得到。流体与固定壁均取常规质量 mᵢ=ρ*(zᵢ)Δx³，同一 ID 的质量在推进期间恒定。6³、12³、24³ 的总流体质量分别为 216,978.512、216,978.436、216,978.417 kg。壁粒子静止，流体从零速开始。两种密度路径的对比同时改变了初始密度的来源和以后的密度更新，不能将收益进一步分摊给这两项。
 
 1. **算例几何**。开顶箱的共享生成器按 ⌈2h/Δx壁⌉ 层填满底部、四侧及交棱、角点。顶缘以上保留空气侧空域。独立参考取更厚的六层实体点阵，用实际距离 r<2h 筛选，再逐流体 ID 比对生产邻域返回的完整壁格心坐标集合。验证覆盖三档 h=Δx、h/Δx壁=1.3（三层），以及固定 h=0.5 m、Δx壁=0.25 m（四层）；另把探针移到壁、棱、底角的支撑范围并移出。在 d/h=0.5 的自由面内侧，连续核质量仅约 0.81224，离散权重和约 0.85029。零大气表压是自由面参考条件，液内粒子的压力仍由 EOS 求得。实体侧补足壁粒子后，空气侧的核截断依然存在。[共享几何](../../tests/methods/sph/hydrostatic_tank_fixture.hpp) · [独立覆盖检查](../../tests/methods/sph/hydrostatic_initial_tests.cpp) · [自由面核截断实测](hydrostatic-initial-resolution.md)
-2. **已接受状态**。时间积分入口接收与输入流体顺序对应的显式物理密度。初始化时将密度映射到已排序的流体行，与位置、速度、质量及稳定 ID 对应。旧的核求和保留为初态诊断，外供终点字段的求和接口仍可单独使用。[Participant3D 接口](../../src/participants/sph/Participant3D.hpp)
+2. **已接受状态**。时间积分入口接收与输入流体顺序对应的显式物理密度。初始化时将密度映射到已排序的流体行，与位置、速度、质量及稳定 ID 对应。省略初始密度时，参与者可提供核求和初态诊断，开窗返回 `unsupported`。独立评估可直接在给定格表上调用 `evaluate_density_3d` 或 `evaluate_pressure_3d`。普通 ghost 在压力算子中按本阶段完整邻域重构密度。[Participant3D 接口](../../src/participants/sph/Participant3D.hpp)
 3. **一步推进**。令 aₙ 为已接受状态的压力加速度与重力之和。在已接受位置、速度上计算 Dₙ=Σⱼmⱼ(vᵢ−vⱼ)·∇ᵢWᵢⱼ，源包括流体与速度为零的固定壁。先半踢 v½=vₙ+Δt·aₙ/2，再漂移至 xₙ₊₁=xₙ+Δt·v½。用 v*=vₙ+Δt·aₙ 与新位置计算 D*，按 ρₙ₊₁=ρₙ+Δt(Dₙ+D*)/2 校正。用新密度求 Tait 表压，外推 Adami 壁压和反解壁密度，计算原有对称压力力，最后半踢 vₙ₊₁=v½+Δt·aₙ₊₁/2。两阶段共用原 M₄ 核梯度与实际格邻域。全程未使用阻尼、压力限幅或质量拟合。[连续性算子](../../src/methods/sph/Verlet3D.cpp) · [窗口推进](../../src/participants/sph/Participant3D.cpp) · [Adami 外推和压力力](../../src/methods/sph/Pressure3D.cpp)
-4. **所有权与失败处理**。实现使用 Kokkos Serial 的受预算管理临时 View，在试算重排索引上携带同一粒子的质量、初始密度和第一阶段密度率。只有校正密度正值、有限且可由所选精度表示，且新压力和末速度均有效，窗口才可提交。失败保留上一已提交快照和仿真时钟，可从该状态缩小步长重试。本次执行范围为单进程 CPU Serial；跨 rank 交换、GPU 执行和持久 checkpoint 尚无本次实测。
+4. **所有权与失败处理**。实现使用 Kokkos Serial 的受预算管理临时 View，按试算置换对应到同一粒子的质量、上一步已接受密度和第一阶段密度率。成功步的工作区可在下一步复用。创建候选字段或为保留的试算快照准备提交副本遇到预算不足时，参与者可释放已完成用途的工作区后重试。只有校正密度正值、有限且可由所选精度表示，且新压力和末速度均有效，窗口才可提交。失败保留上一已提交快照和仿真时钟，可从该状态缩小步长重试。本次执行范围为单进程 CPU Serial；跨 rank 交换、GPU 执行和持久 checkpoint 尚无本次实测。
 
 固定壁的外推与流体压力力采用下面两式。下标 b 表示固定壁粒子，f 表示其流体邻居，j 遍历流体目标 i 的所有有贡献邻居。壁压反解 Tait EOS 后得到壁密度，随后与流体邻居一起参与压力求和。
 
@@ -107,6 +107,11 @@ $$
 - Apple M2 Pro，macOS 27.2.1 arm64 (26B131)，Apple Clang 21.0.0，C++20，CMake 4.4.3，Ninja 1.13.2，Kokkos 5.2.2 Serial。三档正式轨迹使用 Release double。只改壁层与修复后的测量始于 2026-11-20T13:33:52+08:00，全部完结于 2026-11-20T13:35:37+08:00。24³ 半步长运行于 2026-11-20T13:37:53+08:00 至 2026-11-20T13:40:53+08:00。最终源码干净构建的名义步长 24³ 复跑，四个 CSV 与正式输出逐字节一致。独立从冻结补丁重建的原算法、只改壁层 6³ 共八个 CSV 也与正式输出逐字节一致。
 - 最终轨迹驱动从已接受快照读取实际质量并与同 ID 初始质量逐粒子精确比较。三档名义步长与 24³ 半步长共做 101,935,152 次比对（含初态），全部相等；四次复跑的 16 个 CSV 全部与正式测量逐字节相同。最后一次结束于 2026-11-20T13:48:05+08:00。[质量逐步验证与复跑摘要](../../results/wcsph-continuity-repair/lifetime-mass-check/data-comparison.log)
 - Debug 和 Release 各自通过 float 的 134 项、double 的 135 项常规 CTest，四组另各通过 1 项安装后消费测试。最终完整增量复验于 2026-11-20T13:42:49+08:00 结束，含安装测试共 135/135（float）和 136/136（double）。数值门限按独立的轨迹验收脚本判定，24³ 的超限项保留在结果与退出状态中。[Debug 验证记录](../../results/wcsph-continuity-repair/verified/Debug/validation-debug.json) · [Release 验证记录](../../results/wcsph-continuity-repair/verified/Release/validation-release.json)
+
+<a id="solver-cleanup-trajectory"></a>
+## 三维窗口入口清理后的 6³ 复验
+
+在 macOS 27.2.1 arm64、AppleClang 21.0.0、Kokkos 5.2.2 Serial、Release double 下，分别用清理后的工作树和提交 `a9af3bf6a3fdbcac8675a0d258cb5aa9f1967cdf` 构建并运行同一轨迹驱动。两次均以 601 步到达 2.34765625 s，216 个流体粒子全部留在箱内，五面向外穿越事件为零。两次生成的 `steps.csv`、`frames.csv`、`profiles.csv` 和 `crossings.csv` 逐字节相同，比较覆盖已接受步的 CFL、受控字节数和关键帧逐粒子场。执行及比对时间为 `2026-11-20T19:22:38+08:00` 至 `2026-11-20T19:23:04+08:00`，两版 `steps.csv` 的 SHA-256 均为 `9a83a2724f2fe5d4bf786eb44be96f1fc57c5d4af263b20364027a46ef04cfc3`。
 
 ## 下载与复跑
 
@@ -126,7 +131,8 @@ cmake -S . -B "$build_dir" -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DNEXORA_ENABLE_DOUBLE_PRECISION=ON -DNEXORA_ENABLE_MPI=OFF \
   -DKokkos_DIR="$deps/kokkos-Release/lib/cmake/Kokkos" \
   -DGTest_DIR="$deps/gtest-Release/lib/cmake/GTest"
-cmake --build "$build_dir" --target nexora_sph_tank_trajectory
+cmake --build "$build_dir" --target nexora_sph_tests nexora_sph_tank_trajectory
+ctest --test-dir "$build_dir" --no-tests=error -R 'Sph(Continuity|HydrostaticInitial)\.' --output-on-failure
 for n in 6 12 24; do
   python3 "$out/replay/run-tank.py" "$build_dir/tests/methods/sph/nexora_sph_tank_trajectory" \
     "$n" "$out/rerun/continuity/n$n" || exit 1

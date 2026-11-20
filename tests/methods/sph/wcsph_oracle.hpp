@@ -2,7 +2,7 @@
 #include "cell_grid_oracle.hpp"
 #include <gtest/gtest.h>
 #include <limits>
-#include <participants/sph/Participant3D.hpp>
+#include <methods/sph/Pressure3D.hpp>
 namespace sph_test {
 struct ForceOracle {
     Oracle csr;
@@ -66,7 +66,10 @@ inline ForceOracle force_oracle(const std::vector<Particle>& input, sph::WcsphPa
     }
     return result;
 }
-inline void check_force_snapshot(const sph::Snapshot3D& snapshot,
+// Both participant snapshots and direct operator results expose these observations.
+// Keeping one checker preserves the independent CSR reference and error bounds.
+template <class Observation>
+inline void check_force_snapshot(const Observation& snapshot,
                                  const std::vector<Particle>& input,
                                  sph::WcsphParameters parameters,
                                  const std::map<std::uint64_t, long double>& density = {}) {

@@ -1,8 +1,8 @@
 #include <Kokkos_Core.hpp>
+#include <fixed_csr/Participant.hpp>
+#include <fixed_csr/sph_fixture.hpp>
 #include <gtest/gtest.h>
 #include <nexora/simulation/Simulation.hpp>
-#include <participants/sph/Participant.hpp>
-#include <sph_fixture.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -18,10 +18,10 @@
 namespace {
 
 using namespace nexora;
-using sph::Config;
-using sph::Participant;
-using sph::Snapshot;
 namespace fixture = sph_fixture;
+using fixture::Config;
+using fixture::Participant;
+using fixture::Snapshot;
 
 static_assert(std::is_same_v<decltype(std::declval<const Snapshot&>().density(0)), real>);
 static_assert(std::is_same_v<decltype(std::declval<const Snapshot&>().index(0)), LocalIndex>);

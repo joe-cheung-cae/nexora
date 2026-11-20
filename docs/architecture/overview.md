@@ -1,6 +1,6 @@
 # Nexora 当前架构入口
 
-修订时间 `2026-11-20T13:45:00+08:00`。**这是唯一有效的架构入口。Kokkos Serial CPU 已实现参考状态生命周期、P1-04 字段访问与本地传输、P1-07 SPH 代表性切片，以及三维 WCSPH 的密度、压力、Velocity Verlet、恒定重力与 Adami 固定壁。完整 Phase 1 仍开放。**
+修订时间 `2026-11-20T19:20:01+08:00`。**这是唯一有效的架构入口。Kokkos Serial CPU 已实现参考状态生命周期、P1-04 字段访问与本地传输、P1-07 SPH 代表性切片，以及三维 WCSPH 的密度、压力、Velocity Verlet、恒定重力与 Adami 固定壁。完整 Phase 1 仍开放。**
 
 ## 1. 决策与文档效力
 
@@ -40,15 +40,17 @@ Nexora 自有数值计算和存储统一使用 Kokkos，包括默认 CPU、可�
 
 Reference 的同步窗口同时推进主状态、replay history 和控制序列，按试算 stamp 检查诊断缓存。旧快照与独立 packed 消费者保留各自的预算记录，最后一个持有者完成时回收额度。见 [进程内恢复与资源预算](reference-resource-validation.md)。
 
-P1-07 的内部 Serial SPH 切片在既有 Simulation 窗口上运行固定 CSR 的一维 M₄ 密度与 owned 归约。逐行输出与普通 double 归约共享一次遍历。具体 participant 负责 stable ID、字段授权、行列重排和结果发布，跨窗口读者持有完整快照。四种构建配置的数值复验与 Release 端到端计量见 [SPH Serial 验证](../../validation/sph/serial.md)。
+P1-07 的 Serial 验证夹具用既有 Simulation 窗口运行固定 CSR 的一维 M₄ 密度与 owned 归约。逐行输出与普通 double 归约共享一次遍历。夹具 participant 负责稳定 ID、字段授权、行列重排和结果发布，跨窗口读者持有完整快照。私有目标 `nexora_sph_fixed_csr_fixture` 仅供一维测试及显式构建的 `nexora_sph_benchmark` 使用。[夹具源码](../../validation/sph/fixed_csr/) · [SPH Serial 验证](../../validation/sph/serial.md)
 
-私有 `sph::Participant3D` 提供外供终点字段和内部时间积分两种窗口模式。前者可计算密度或 WCSPH 压力。后者接收全 owned 的流体初态和速度，可另供固定壁粒子与恒定重力。推进时另供输入流体顺序的初始密度，每个接受步按稳定 ID 携带密度、位置和速度。积分模式通过 `WcsphVerletParameters::smoothing_length` 为每个算例指定统一且固定的三维平滑长度，默认 1 m。格宽和核支持半径均为 `2h`，密度求和、压力加速度和声学 CFL 共享该长度。漂移后按格归属复用或重建 `cellBegin`，在旧状态和新位置的预测速度上分别求连续性方程右端，以梯形公式更新密度，再计算 Tait 表压、Adami 湿壁状态和流体压力加速度。无显式初始密度的 Verlet 重载仅提供初态核求和诊断。Velocity Verlet 的两次半步均使用压力加速度与重力之和，步长上限来自已提交速度的声学 CFL。流体位置、速度和力学字段一起提交，回滚保留原状态、时钟与 CFL 上限。[格索引](../../validation/sph/cell-begin-serial.md#simulation-window) · [压力](../../validation/sph/wcsph-pressure-serial.md) · [多步时间积分](../../validation/sph/wcsph-verlet-serial.md) · [固定壁与历史轨迹对照](../../validation/sph/adami-hydrostatic-serial.md) · [物理质量静水初态验收](../../validation/sph/hydrostatic-initial-resolution.md) · [原核求和轨迹](../../validation/sph/hydrostatic-trajectory-resolution.md) · [连续性密度与壁层验证](../../validation/sph/hydrostatic-continuity-repair.md)
+给定三维粒子状态可直接建立或更新格索引，并调用密度和压力算子。静态验证通过 `CellGrid`、`prepare_geometry_3d` 和算子接口核对稳定 ID、邻居及数值。[格索引](../../validation/sph/cell-begin-serial.md) · [压力](../../validation/sph/wcsph-pressure-serial.md)
+
+私有 `sph::Participant3D` 承担三维 WCSPH 积分窗口。它接收全 owned 的流体初态和速度，可另供固定壁粒子与恒定重力。推进需要按输入流体顺序提供初始密度。每个接受步按稳定 ID 携带密度、位置和速度。无显式初始密度的重载用于初态核求和诊断。每个算例以 `WcsphVerletParameters::smoothing_length` 指定统一且固定的平滑长度，默认 1 m。格宽和核支持半径均为 `2h`，密度求和、压力加速度和声学 CFL 共享该尺度。漂移后按格归属复用或重建 `cellBegin`，在旧状态和新位置的预测速度上分别求连续性方程右端，以梯形公式更新密度，再计算 Tait 表压、Adami 湿壁状态和流体压力加速度。Velocity Verlet 的两次半步均使用压力加速度与重力之和，步长上限来自已提交速度的声学 CFL。流体位置、速度和力学字段一起提交，回滚保留原状态、时钟与 CFL 上限。[多步时间积分](../../validation/sph/wcsph-verlet-serial.md) · [固定壁与历史轨迹对照](../../validation/sph/adami-hydrostatic-serial.md) · [物理质量静水初态验收](../../validation/sph/hydrostatic-initial-resolution.md) · [原核求和轨迹](../../validation/sph/hydrostatic-trajectory-resolution.md) · [连续性密度与壁层验证](../../validation/sph/hydrostatic-continuity-repair.md)
 
 CLI 的 `validate`、`plan` 和 `run` 共用版本化 Reference case 预检。`run` 装配现有 `Simulation` 与内部 Reference participant，并发布可核对的 accepted 数值摘要。 [case 格式与验证](reference-case.md)
 
-任何 `NEXORA_GPU_BACKEND` 值均被拒绝，旧 native CUDA 源文件休眠。OpenMP、CUDA/HIP 尚未实现。没有真实 SPH/FVM/FEM/LBM/DEM/MBD solver、MPI halo 或持久 checkpoint。CI 先供应锁定的 Kokkos，再用本地安装验证 Serial。可选 MPI smoke 有独立配置。已运行的平台、配置和禁网记录见 [Serial CI 验证](serial-ci-validation.md)。
+任何 `NEXORA_GPU_BACKEND` 值均被拒绝，旧 native CUDA 源文件休眠。OpenMP、CUDA/HIP 尚未实现。完整 SPH 求解器仍待验收，FVM/FEM/LBM/DEM/MBD 求解器、MPI halo 和持久 checkpoint 尚未实现。CI 先供应锁定的 Kokkos，再用本地安装验证 Serial。可选 MPI smoke 有独立配置。已运行的平台、配置和禁网记录见 [Serial CI 验证](serial-ci-validation.md)。
 
-当前依赖图如下；本次删除旧层不代表完整 P1 已验收。
+当前生产目标的直接依赖如下。
 
 ```mermaid
 flowchart TD

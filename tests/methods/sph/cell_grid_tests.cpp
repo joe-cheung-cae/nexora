@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 #include <methods/sph/Density3D.hpp>
 #include <methods/sph/neighbors/CellGrid.hpp>
+#include <participants/sph/Geometry3D.hpp>
 
 #include <algorithm>
 #include <array>
@@ -456,5 +457,108 @@ TEST(SphCellGrid, UpdateFailureRetryBudgetAndEmptyTransitions) {
     ASSERT_NO_FATAL_FAILURE(compare(still_empty, {}, exec));
     const auto repopulated = checked(still_empty.update(exec, fields.get(), 100));
     ASSERT_NO_FATAL_FAILURE(compare(repopulated, initial, exec));
+}
+std::vector<Particle> initial_particles() {
+    return {{{.25, -.25, .5}, 1, (9ULL << 32) | 17, 0},
+            {{2.5, -.25, .5}, 2, (1ULL << 32) | 17, 0},
+            {{-.5, -.25, .5}, 3, (5ULL << 32) | 17, 1},
+            {{3.75, -.25, .5}, 4, (3ULL << 32) | 17, 1}};
+}
+TEST(SphGeometry3D, UpdatesOwnGeometryAndRetainPreviousStates) {
+    Kokkos::Serial exec;
+    detail::ResourceBudget budget;
+    const auto initial = initial_particles();
+    Fields input(initial);
+    const auto first = checked(sph::prepare_geometry_3d(exec, input.get(), 1000, budget, 1));
+    auto same_cell = initial;
+    same_cell[0].position[0] = real{1.75};
+    same_cell[1].mass = 5;
+    Fields fields(same_cell);
+    const auto next = checked(sph::prepare_geometry_3d(exec, fields.get(), 1000, budget, 1,
+                                                       first.get()));
+    // Geometry owns its values; caller reuse cannot change any retained result.
+    fields.position(0, 0) = 100;
+    fields.mass(1) = 99;
+    ASSERT_NO_FATAL_FAILURE(compare(next->grid, same_cell, exec));
+    auto crossing = same_cell;
+    std::swap(crossing[0].position, crossing[1].position);
+    std::swap(crossing[2].position, crossing[3].position);
+    std::reverse(crossing.begin(), crossing.end());
+    const auto latest = checked(sph::prepare_geometry_3d(exec, Fields(crossing).get(), 1000,
+                                                         budget, 1, next.get()));
+    EXPECT_NE(next->grid.cell_begin().data(), latest->grid.cell_begin().data());
+    ASSERT_NO_FATAL_FAILURE(compare(latest->grid, crossing, exec));
+    ASSERT_NO_FATAL_FAILURE(compare(first->grid, initial, exec));
+    ASSERT_NO_FATAL_FAILURE(compare(next->grid, same_cell, exec));
+}
+TEST(SphGeometry3D, VersionsDescribeGeometryLayoutAndTopologySeparately) {
+    Kokkos::Serial exec;
+    detail::ResourceBudget budget;
+    auto state = initial_particles();
+    auto previous = checked(sph::prepare_geometry_3d(exec, Fields(state).get(), 1000, budget, 1));
+    const auto update = [&] {
+        auto geometry = checked(sph::prepare_geometry_3d(exec, Fields(state).get(), 1000,
+                                                         budget, 1, previous.get()));
+        compare(geometry->grid, state, exec);
+        return geometry;
+    };
+    state[0].position[0] += real{.125};
+    auto current = update();
+    EXPECT_EQ(current->geometry.value(), previous->geometry.value() + 1);
+    EXPECT_EQ(current->layout, previous->layout);
+    EXPECT_EQ(current->topology, previous->topology);
+    previous = current;
+    state[0].mass = 7;
+    current = update();
+    EXPECT_EQ(current->geometry, previous->geometry);
+    EXPECT_EQ(current->layout, previous->layout);
+    EXPECT_EQ(current->topology, previous->topology);
+    previous = current;
+    std::reverse(state.begin(), state.end());
+    current = update();
+    EXPECT_EQ(current->layout.value(), previous->layout.value() + 1);
+    EXPECT_EQ(current->geometry, previous->geometry);
+    EXPECT_EQ(current->topology, previous->topology);
+    previous = current;
+    state[0].ghost = !state[0].ghost;
+    current = update();
+    EXPECT_EQ(current->topology.value(), previous->topology.value() + 1);
+    EXPECT_EQ(current->geometry, previous->geometry);
+    previous = current;
+    state[0].id += 123;
+    current = update();
+    EXPECT_EQ(current->topology.value(), previous->topology.value() + 1);
+    previous = current;
+    state.push_back({{0, 0, 0}, 1, 98765, 0});
+    current = update();
+    EXPECT_EQ(current->topology.value(), previous->topology.value() + 1);
+}
+TEST(SphGeometry3D, ThreeAxisCrossingAndInputReorderCompareGeometryById) {
+    std::vector<Particle> state;
+    for (int i = 0; i < 27; ++i)
+        state.push_back({{real(i % 3 - 1) * real{1.25}, real(i / 3 % 3 - 1) * real{1.25},
+                          real(i / 9 - 1) * real{1.25}},
+                         real(1 + i % 5), (std::uint64_t(i) << 32) | 7,
+                         static_cast<std::uint8_t>(i % 4 == 0)});
+    Kokkos::Serial exec;
+    detail::ResourceBudget budget;
+    const auto first = checked(sph::prepare_geometry_3d(exec, Fields(state).get(), 64, budget, 1));
+    auto crossing = state;
+    std::swap(crossing.front().position, crossing.back().position);
+    std::reverse(crossing.begin(), crossing.end());
+    const auto next = checked(sph::prepare_geometry_3d(exec, Fields(crossing).get(), 64,
+                                                       budget, 1, first.get()));
+    EXPECT_EQ(next->geometry.value(), first->geometry.value() + 1);
+    EXPECT_EQ(next->layout.value(), first->layout.value() + 1);
+    EXPECT_EQ(next->topology, first->topology);
+    ASSERT_NO_FATAL_FAILURE(compare(next->grid, crossing, exec));
+    ASSERT_NO_FATAL_FAILURE(compare(first->grid, state, exec));
+    std::reverse(crossing.begin(), crossing.end());
+    const auto reordered = checked(sph::prepare_geometry_3d(exec, Fields(crossing).get(), 64,
+                                                            budget, 1, next.get()));
+    EXPECT_EQ(reordered->geometry, next->geometry);
+    EXPECT_EQ(reordered->layout.value(), next->layout.value() + 1);
+    EXPECT_EQ(reordered->topology, next->topology);
+    ASSERT_NO_FATAL_FAILURE(compare(reordered->grid, crossing, exec));
 }
 } // namespace
