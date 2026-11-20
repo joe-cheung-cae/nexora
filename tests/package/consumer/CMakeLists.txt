@@ -4,7 +4,8 @@ project(NexoraConsumer LANGUAGES CXX)
 set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(Nexora 0.1 CONFIG REQUIRED)
 foreach(internal_target IN ITEMS methods_reference participants_reference methods_sph
-                                 participants_sph sph_tests sph_benchmark kokkos_test_main)
+                                 participants_sph sph_fixed_csr_fixture sph_fixed_csr_tests
+                                 sph_tests sph_benchmark sph_tank_trajectory kokkos_test_main)
     if(TARGET "nexora_${internal_target}" OR TARGET "nexora::${internal_target}"
        OR TARGET "nexora::nexora_${internal_target}")
         message(FATAL_ERROR "Internal target is exported: ${internal_target}")

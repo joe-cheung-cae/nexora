@@ -16,6 +16,8 @@ RETIRED_TARGETS = {"nexora_exec_api", "nexora_exec_cpu", "nexora_exec_tests",
 RETIRED_PUBLIC_HEADERS = {"core/ArrayView.hpp", "core/math/Vec.hpp", "core/math/Tensor.hpp",
                           "data/FieldView.hpp"}
 
+FIXED_CSR_TARGET = "nexora_sph_fixed_csr_fixture"
+FIXED_CSR_LINKS = {FIXED_CSR_TARGET, "nexora_simulation"}
 SPH_LEAF_LINKS = {"nexora_participants_sph", "nexora_simulation"}
 ALLOWED_LINKS = {
     "nexora_build_options": set(),
@@ -30,12 +32,13 @@ ALLOWED_LINKS = {
     "nexora_methods_sph": {"nexora_core", "Kokkos::kokkos"},
     "nexora_participants_sph": {
         "nexora_participant_api", "nexora_methods_sph", "nexora_data", "Kokkos::kokkos"},
-    "nexora_sph_benchmark": SPH_LEAF_LINKS,
+    FIXED_CSR_TARGET: {"nexora_participant_api", "nexora_data", "Kokkos::kokkos"},
+    "nexora_sph_benchmark": FIXED_CSR_LINKS,
     "nexora": {"nexora_core", "nexora_simulation", "nexora_participants_reference",
                "Kokkos::kokkos", "MPI::MPI_C"},
 }
 TEST_LINKS = set(ALLOWED_LINKS) - {"nexora", "nexora_build_options", "nexora_methods_sph",
-                                   "nexora_participants_sph", "nexora_sph_benchmark"}
+                                   "nexora_participants_sph", FIXED_CSR_TARGET, "nexora_sph_benchmark"}
 REQUIRED_LINKS = {
     "nexora_data_schema": {"nexora_core"},
     "nexora_data": {"nexora_data_schema", "Kokkos::kokkos"},
@@ -45,7 +48,8 @@ REQUIRED_LINKS = {
         "nexora_participant_api", "nexora_methods_reference", "nexora_data"},
     "nexora_methods_sph": ALLOWED_LINKS["nexora_methods_sph"],
     "nexora_participants_sph": ALLOWED_LINKS["nexora_participants_sph"],
-    "nexora_sph_benchmark": SPH_LEAF_LINKS,
+    FIXED_CSR_TARGET: ALLOWED_LINKS[FIXED_CSR_TARGET],
+    "nexora_sph_benchmark": FIXED_CSR_LINKS,
     "nexora": {"nexora_core", "nexora_simulation", "nexora_participants_reference", "Kokkos::kokkos"},
 }
 
@@ -68,6 +72,8 @@ SPECIAL_TEST_LINKS = {
     "nexora_reference_transport_tests": {KOKKOS_TEST_MAIN, *REFERENCE_TEST_LINKS},
     "nexora_reference_resource_tests": {KOKKOS_TEST_MAIN, *REFERENCE_TEST_LINKS},
     "nexora_sph_tests": {KOKKOS_TEST_MAIN, *SPH_LEAF_LINKS},
+    "nexora_sph_fixed_csr_tests": {KOKKOS_TEST_MAIN, *FIXED_CSR_LINKS},
+    "nexora_sph_tank_trajectory": SPH_LEAF_LINKS,
     "nexora_transport_tests": {KOKKOS_TEST_MAIN, "nexora_data"},
     "nexora_transport_receive_tests": {KOKKOS_TEST_MAIN, "nexora_data"},
     "nexora_serial_irregular_measurement": {"nexora_participants_reference", "nexora_data"},
@@ -106,26 +112,47 @@ REFERENCE_ASSEMBLY_SOURCES = {REFERENCE_CASE_HEADER, REFERENCE_CASE_HEADER.with_
                               REFERENCE_COMMAND_SOURCE}
 SPH_METHOD_DIR = ("src", "methods", "sph")
 SPH_PARTICIPANT_DIR = ("src", "participants", "sph")
+FIXED_CSR_DIR = Path("validation/sph/fixed_csr")
+FIXED_CSR_PARTICIPANT = FIXED_CSR_DIR / "Participant.hpp"
 RESOURCE_BUDGET_HEADER = "participants/ResourceBudget.hpp"
 RESOURCE_BUDGET_CONSUMERS = {
     Path("src/participants/reference/Participant.hpp"),
-    Path(*SPH_PARTICIPANT_DIR) / "Participant.hpp",
+    FIXED_CSR_PARTICIPANT,
+    Path(*SPH_PARTICIPANT_DIR) / "Geometry3D.hpp",
 }
-SPH_LEAF_SOURCES = {
-    "nexora_sph_tests": Path("tests/methods/sph/sph_tests.cpp"),
+FIXED_CSR_CONSUMERS = {
+    "nexora_sph_fixed_csr_tests": Path("tests/methods/sph/sph_tests.cpp"),
     "nexora_sph_benchmark": Path("benchmarks/sph/sph_benchmark.cpp"),
 }
-SPH_FIXTURE_HEADER = "sph_fixture.hpp"
+SPH_CELL_GRID_TEST = Path("tests/methods/sph/cell_grid_tests.cpp")
+SPH_PRESSURE_TEST = SPH_CELL_GRID_TEST.with_name("pressure_3d_tests.cpp")
+SPH_VERLET_TEST = SPH_CELL_GRID_TEST.with_name("verlet_window_tests.cpp")
+SPH_HYDROSTATIC_INITIAL_TEST = SPH_CELL_GRID_TEST.with_name("hydrostatic_initial_tests.cpp")
+SPH_CONTINUITY_TEST = SPH_CELL_GRID_TEST.with_name("continuity_tests.cpp")
+SPH_TANK_FIXTURE = SPH_CELL_GRID_TEST.with_name("hydrostatic_tank_fixture.hpp")
+SPH_TANK_TRAJECTORY = SPH_CELL_GRID_TEST.with_name("hydrostatic_trajectory.cpp")
+SPH_TARGET_DIRS = {
+    FIXED_CSR_TARGET: FIXED_CSR_DIR,
+    "nexora_sph_tests": SPH_CELL_GRID_TEST.parent,
+    "nexora_sph_tank_trajectory": SPH_TANK_TRAJECTORY.parent,
+    **{target: source.parent for target, source in FIXED_CSR_CONSUMERS.items()},
+}
+SPH_PRESSURE_ORACLE = SPH_CELL_GRID_TEST.with_name("wcsph_oracle.hpp")
+SPH_WINDOW_TESTS = {SPH_CELL_GRID_TEST.with_name("adami_wall_tests.cpp"),
+                    SPH_CELL_GRID_TEST.with_name("hydrostatic_tank_tests.cpp"),
+                    SPH_VERLET_TEST, SPH_HYDROSTATIC_INITIAL_TEST, SPH_CONTINUITY_TEST}
+SPH_GRID_ORACLE = SPH_CELL_GRID_TEST.with_name("cell_grid_oracle.hpp")
 DATA_PREINIT_TEST = Path("tests/data/preinitialization_tests.cpp")
 KOKKOS_VIEW_PROBE_CONSUMERS = {Path("tests/kokkos/kokkos_tests.cpp"),
                                Path("tests/package/consumer/kokkos.cpp")}
 # These test-tree sources are also compiled by standalone programs.
 STANDALONE_TEST_SOURCES = {
     SERIAL_IRREGULAR_MEASUREMENT, STRUCTURE_FIXTURE, Path("tests/kokkos/view_probe.hpp"),
-    Path("tests/reference/cli_oracle.cpp"), Path("tests/methods/sph") / SPH_FIXTURE_HEADER,
+    SPH_TANK_TRAJECTORY, SPH_TANK_FIXTURE,
+    Path("tests/reference/cli_oracle.cpp"),
 }
 PRIVATE_DATA_HEADERS = {
-    "FieldIssuer.hpp": {DATA_PREINIT_TEST, STRUCTURE_FIXTURE, BINDING_TEST, FIELD_GROUP_TEST,
+    "FieldIssuer.hpp": {FIXED_CSR_PARTICIPANT, DATA_PREINIT_TEST, STRUCTURE_FIXTURE, BINDING_TEST, FIELD_GROUP_TEST,
                         TRANSPORT_TEST, RECEIVE_TEST, REFERENCE_TRANSPORT_TEST},
     "ExternalField.hpp": {DATA_PREINIT_TEST, TRANSPORT_TEST},
     "TransportBuilder.hpp": {STRUCTURE_FIXTURE, TRANSPORT_TEST, RECEIVE_TEST,
@@ -167,7 +194,9 @@ def check_kokkos_header(relative: Path, scope: str, module: str, header: str) ->
             or (scope == "src" and module == "data")
             or (scope == "src" and relative.parts[:3] == ("src", "methods", "reference"))
             or relative.parts[:3] in {SPH_METHOD_DIR, SPH_PARTICIPANT_DIR}
-            or relative in SPH_LEAF_SOURCES.values()
+            or relative.parent == FIXED_CSR_DIR or relative in FIXED_CSR_CONSUMERS.values()
+            or relative in {SPH_CELL_GRID_TEST, SPH_PRESSURE_TEST, SPH_GRID_ORACLE,
+                            SPH_TANK_TRAJECTORY, *SPH_WINDOW_TESTS}
             or relative in STRUCTURE_STATE_SOURCES
             or (scope == "tests" and relative.parts[:2] in {
                 ("tests", "kokkos"), ("tests", "reference")})
@@ -194,10 +223,19 @@ def check_internal_include(relative: Path, scope: str, header: str) -> list[str]
         if relative in STRUCTURE_FIXTURE_CONSUMERS:
             return []
         return [f"{relative}: {header} is private to the structure test and measurement"]
-    if parts[-1] == SPH_FIXTURE_HEADER:
-        if relative in SPH_LEAF_SOURCES.values():
+    if "fixed_csr" in parts or parts[-1] == "sph_fixture.hpp":
+        if relative.parent == FIXED_CSR_DIR or relative in FIXED_CSR_CONSUMERS.values():
             return []
-        return [f"{relative}: {header} is private to the SPH test and benchmark"]
+        return [f"{relative}: {header} is private to the fixed CSR fixture, test and benchmark"]
+    if parts[-1] == SPH_PRESSURE_ORACLE.name:
+        if relative in {SPH_PRESSURE_TEST, SPH_VERLET_TEST}:
+            return []
+        return [f"{relative}: {header} is private to WCSPH pressure and integration regressions"]
+    if parts[-1] == SPH_GRID_ORACLE.name:
+        if relative in {SPH_CELL_GRID_TEST, SPH_PRESSURE_ORACLE,
+                        SPH_TANK_TRAJECTORY, SPH_TANK_FIXTURE, *SPH_WINDOW_TESTS}:
+            return []
+        return [f"{relative}: {header} is private to the 3D SPH regression tests"]
     if parts[-1] == "ResourceBudget.hpp":
         if "/".join(parts) == RESOURCE_BUDGET_HEADER and relative in RESOURCE_BUDGET_CONSUMERS:
             return []
@@ -205,7 +243,9 @@ def check_internal_include(relative: Path, scope: str, header: str) -> list[str]
     if parts[-1] in PRIVATE_ENTITY_HEADERS:
         if (location[:2] == ("src", "data") or relative in STRUCTURE_STATE_SOURCES
                 or location[:3] == SPH_PARTICIPANT_DIR
-                or relative in {STRUCTURE_FIXTURE, ENTITY_TOPOLOGY_TEST}):
+                or relative in {STRUCTURE_FIXTURE, ENTITY_TOPOLOGY_TEST}
+                or (relative in {FIXED_CSR_PARTICIPANT, FIXED_CSR_PARTICIPANT.with_suffix(".cpp")}
+                    and parts[-1] in {"CsrAdjacency.hpp", "Permutation.hpp"})):
             return []
         return [f"{relative}: {header} is private to data and the approved structure boundaries"]
     if parts[-1] in PRIVATE_DATA_HEADERS:
@@ -219,8 +259,17 @@ def check_internal_include(relative: Path, scope: str, header: str) -> list[str]
     if len(parts) < 3 or parts[1] not in {"reference", "sph"}:
         return [f"{relative}: internal include {header} is not a known module path"]
     if parts[1] == "sph":
-        if (location[:3] == SPH_PARTICIPANT_DIR or relative in SPH_LEAF_SOURCES.values()
-                or (parts[0] == "methods" and location[:3] == SPH_METHOD_DIR)):
+        if (location[:3] == SPH_PARTICIPANT_DIR
+                or (parts[0] == "methods"
+                    and (location[:3] == SPH_METHOD_DIR or relative in {SPH_CELL_GRID_TEST, SPH_GRID_ORACLE}))
+                or (relative == SPH_CELL_GRID_TEST and parts == ["participants", "sph", "Geometry3D.hpp"])
+                or (relative == SPH_HYDROSTATIC_INITIAL_TEST
+                    and parts == ["methods", "sph", "Density3D.hpp"])
+                or (relative in {SPH_PRESSURE_TEST, SPH_PRESSURE_ORACLE, SPH_TANK_FIXTURE}
+                    and parts == ["methods", "sph", "Pressure3D.hpp"])
+                or (relative == SPH_CONTINUITY_TEST and parts == ["methods", "sph", "Verlet3D.hpp"])
+                or (relative in {*SPH_WINDOW_TESTS, SPH_TANK_TRAJECTORY}
+                    and parts == ["participants", "sph", "Participant3D.hpp"])):
             return []
         return [f"{relative}: forbidden internal include {header} from this module"]
 
@@ -306,7 +355,8 @@ def policy_self_test() -> list[str]:
         ("nexora_methods_sph", ["nexora_core", "Kokkos::kokkos"]),
         ("nexora_participants_sph",
          ["nexora_participant_api", "nexora_methods_sph", "nexora_data", "Kokkos::kokkos"]),
-        ("nexora_sph_benchmark", ["nexora_participants_sph", "nexora_simulation"]),
+        (FIXED_CSR_TARGET, ALLOWED_LINKS[FIXED_CSR_TARGET]),
+        ("nexora_sph_benchmark", FIXED_CSR_LINKS),
         ("nexora", ["nexora_core", "nexora_simulation", "nexora_participants_reference", "Kokkos::kokkos"]),
         *SPECIAL_TEST_LINKS.items(),
     ):
@@ -326,14 +376,16 @@ def policy_self_test() -> list[str]:
         failures.append("checker self-test failed to allow the CLI's optional MPI diagnostic")
     if not check_link_policy("nexora", cli_links + ["nexora_methods_reference"]):
         failures.append("checker self-test failed to reject a direct CLI method target dependency")
-    for target in ("nexora_methods_sph", "nexora_participants_sph", "nexora_sph_benchmark"):
+    for target in ("nexora_methods_sph", "nexora_participants_sph", FIXED_CSR_TARGET, "nexora_sph_benchmark"):
         if not check_link_policy("nexora", cli_links + [target]):
             failures.append(f"checker self-test failed to reject a CLI dependency on {target}")
         if not check_link_policy("nexora_core_tests", [target]):
             failures.append(f"checker self-test failed to reject an unrelated test dependency on {target}")
-    for target in SPH_LEAF_SOURCES:
-        if not check_link_policy(target, sorted(SPH_LEAF_LINKS | {"nexora_data"})):
-            failures.append(f"checker self-test failed to reject extra dependencies for {target}")
+    for target in ("nexora_methods_sph", "nexora_participants_sph"):
+        if not check_link_policy(target, [*REQUIRED_LINKS[target], FIXED_CSR_TARGET]):
+            failures.append(f"checker self-test failed to keep the fixed CSR fixture out of {target}")
+    if not check_link_policy("nexora_sph_benchmark", [*FIXED_CSR_LINKS, "nexora_participants_sph"]):
+        failures.append("checker self-test failed to isolate the fixed CSR benchmark from the solver")
     if check_link_policy("nexora_methods_reference", ["nexora_data", "Kokkos::kokkos"]):
         failures.append("checker self-test failed to allow reference-method dependencies")
     if not check_link_policy("nexora_methods_reference", ["nexora_data", "Kokkos::kokkos", "nexora_participant_api"]):
@@ -345,14 +397,14 @@ def policy_self_test() -> list[str]:
         for forbidden in (set(ALLOWED_LINKS) | {"GTest::gtest", GTEST_MAIN, KOKKOS_TEST_MAIN}) - deps:
             if not check_link_policy(target, [*deps, forbidden]):
                 failures.append(f"checker self-test failed to reject {forbidden} from {target}")
-    for target in ("nexora_core", "nexora", "nexora_sph_benchmark",
+    for target in ("nexora_core", "nexora", FIXED_CSR_TARGET, "nexora_sph_benchmark",
                    "nexora_reference_cli_oracle", "nexora_serial_irregular_measurement"):
         for dep in ("GTest::gtest", GTEST_MAIN, KOKKOS_TEST_MAIN):
             if not check_link_policy(target, [*REQUIRED_LINKS.get(target, ()), dep]):
                 failures.append(f"checker self-test failed to keep {dep} out of {target}")
     for path in (Path("include/nexora/core/Status.hpp"), Path("src/data/Fields.cpp"),
                  REFERENCE_COMMAND_SOURCE, *STANDALONE_TEST_SOURCES,
-                 Path("tests/package/consumer/kokkos.cpp"), SPH_LEAF_SOURCES["nexora_sph_benchmark"]):
+                 Path("tests/package/consumer/kokkos.cpp"), FIXED_CSR_CONSUMERS["nexora_sph_benchmark"]):
         if not check_internal_include(path, path.parts[0], "gtest/gtest.h"):
             failures.append(f"checker self-test failed to keep GoogleTest out of {path}")
     for path in (Path("tests/kokkos/gtest_main.cpp"), DATA_PREINIT_TEST, REFERENCE_TRANSPORT_TEST):
@@ -399,7 +451,7 @@ def policy_self_test() -> list[str]:
             failures.append(f"checker self-test failed to reject {header} in other reference tests")
     for header, test_paths in PRIVATE_DATA_HEADERS.items():
         for test_path in test_paths:
-            if check_internal_include(test_path, "tests", f"data/{header}"):
+            if check_internal_include(test_path, test_path.parts[0], f"data/{header}"):
                 failures.append(f"checker self-test failed to allow {header} in {test_path}")
         if check_internal_include(Path("src/participants/reference/Participant.cpp"),
                                   "src", f"data/{header}"):
@@ -413,13 +465,13 @@ def policy_self_test() -> list[str]:
     for header in PRIVATE_ENTITY_HEADERS:
         for path, scope in ((Path("src/data/TransportReceiver.hpp"), "src"),
                             (STRUCTURE_STATE, "src"),
-                            (Path("src/participants/sph/Participant.hpp"), "src"),
+                            (Path("src/participants/sph/Participant3D.hpp"), "src"),
                             (ENTITY_TOPOLOGY_TEST, "tests"), (STRUCTURE_FIXTURE, "tests")):
             if check_internal_include(path, scope, f"data/{header}"):
                 failures.append(f"checker self-test failed to allow {header} in {path}")
         for path, scope in ((Path("include/nexora/data/FieldBinding.hpp"), "include/nexora"),
                             (Path("src/methods/reference/State.hpp"), "src"),
-                            (Path("src/methods/sph/Density.hpp"), "src"),
+                            (Path("src/methods/sph/Density3D.hpp"), "src"),
                             (Path("src/participants/reference/Participant.cpp"), "src"),
                             (RECEIVE_TEST, "tests")):
             if not check_internal_include(path, scope, f"data/{header}"):
@@ -437,10 +489,10 @@ def policy_self_test() -> list[str]:
         if not check_internal_include(path, "tests", "methods/reference/State.hpp"):
             failures.append(f"checker self-test failed to keep method state out of {path}")
     for path in sorted(RESOURCE_BUDGET_CONSUMERS):
-        if check_internal_include(path, "src", RESOURCE_BUDGET_HEADER):
+        if check_internal_include(path, path.parts[0], RESOURCE_BUDGET_HEADER):
             failures.append(f"checker self-test failed to allow the participant budget in {path}")
     for path, scope in ((Path("include/nexora/data/TransportView.hpp"), "include/nexora"),
-                        (Path("src/methods/sph/Density.hpp"), "src"),
+                        (Path("src/methods/sph/Density3D.hpp"), "src"),
                         (REFERENCE_COMMAND_SOURCE, "apps")):
         if not check_internal_include(path, scope, RESOURCE_BUDGET_HEADER):
             failures.append(f"checker self-test failed to reject the participant budget in {path}")
@@ -472,27 +524,39 @@ def policy_self_test() -> list[str]:
     if check_internal_include(Path("tests/reference/reference_tests.cpp"),
                               "tests", "methods/reference/State.hpp"):
         failures.append("checker self-test failed to allow reference tests to include internals")
-    sph_method = Path("src/methods/sph/Density.hpp")
-    sph_participant = Path("src/participants/sph/Participant.hpp")
-    for path in (sph_method, sph_participant, *SPH_LEAF_SOURCES.values()):
-        scope = path.parts[0]
-        if check_kokkos_header(path, scope, path.parts[1], "Kokkos_Core.hpp"):
-            failures.append(f"checker self-test failed to allow Kokkos in {path}")
-        if check_internal_include(path, scope, "methods/sph/Density.hpp"):
+    sph_method = Path("src/methods/sph/Density3D.hpp")
+    sph_participant = Path("src/participants/sph/Participant3D.hpp")
+    for path in SPH_WINDOW_TESTS:
+        if check_internal_include(path, "tests", "participants/sph/Participant3D.hpp"):
+            failures.append(f"checker self-test failed to allow the 3D SPH window test in {path}")
+    for path in (sph_participant, SPH_GRID_ORACLE, REFERENCE_COMMAND_SOURCE):
+        if not check_internal_include(path, path.parts[0], SPH_GRID_ORACLE.name):
+            failures.append(f"checker self-test failed to keep the 3D test oracle out of {path}")
+        if not check_internal_include(path, path.parts[0], SPH_PRESSURE_ORACLE.name):
+            failures.append(f"checker self-test failed to keep the WCSPH test oracle out of {path}")
+    for path in (sph_method, sph_participant, SPH_CELL_GRID_TEST):
+        if check_internal_include(path, path.parts[0], "methods/sph/Density3D.hpp"):
             failures.append(f"checker self-test failed to allow the SPH method in {path}")
-    for path in (sph_method, REFERENCE_COMMAND_SOURCE, Path("tests/reference/reference_tests.cpp")):
-        if not check_internal_include(path, path.parts[0], "participants/sph/Participant.hpp"):
+    package_consumer = Path("tests/package/consumer/kokkos.cpp")
+    for path in (sph_method, SPH_CELL_GRID_TEST, SPH_PRESSURE_TEST,
+                 REFERENCE_COMMAND_SOURCE, package_consumer,
+                 *FIXED_CSR_CONSUMERS.values()):
+        if not check_internal_include(path, path.parts[0], "participants/sph/Participant3D.hpp"):
             failures.append(f"checker self-test failed to reject the SPH participant in {path}")
-    if not check_internal_include(REFERENCE_COMMAND_SOURCE, "apps", "./methods/sph/Density.hpp"):
+    cell_grid_header = "methods/sph/neighbors/CellGrid.hpp"
+    if check_internal_include(SPH_CELL_GRID_TEST, "tests", cell_grid_header):
+        failures.append("checker self-test failed to allow the SPH cell-grid test to include internals")
+    if not check_internal_include(package_consumer, "tests", cell_grid_header):
+        failures.append("checker self-test failed to reject private SPH grid headers in the installed consumer")
+    if not check_internal_include(REFERENCE_COMMAND_SOURCE, "apps", "./methods/sph/Density3D.hpp"):
         failures.append("checker self-test failed to reject an alternate SPH method include in the CLI")
-    for path in (sph_participant, *SPH_LEAF_SOURCES.values()):
-        if check_internal_include(path, path.parts[0], "participants/sph/Participant.hpp"):
-            failures.append(f"checker self-test failed to allow the SPH participant in {path}")
-    for path in SPH_LEAF_SOURCES.values():
-        if check_internal_include(path, path.parts[0], SPH_FIXTURE_HEADER):
-            failures.append(f"checker self-test failed to allow the SPH fixture in {path}")
-    if not check_internal_include(sph_participant, "src", SPH_FIXTURE_HEADER):
-        failures.append("checker self-test failed to keep SPH fixtures out of production source")
+    for header in ("fixed_csr/Density.hpp", "fixed_csr/Participant.hpp", "fixed_csr/sph_fixture.hpp"):
+        for path in (FIXED_CSR_PARTICIPANT, *FIXED_CSR_CONSUMERS.values()):
+            if check_internal_include(path, path.parts[0], header):
+                failures.append(f"checker self-test failed to allow {header} in {path}")
+        for path in (sph_method, sph_participant, SPH_CELL_GRID_TEST, REFERENCE_COMMAND_SOURCE, package_consumer):
+            if not check_internal_include(path, path.parts[0], header):
+                failures.append(f"checker self-test failed to keep {header} out of {path}")
     return failures
 
 
@@ -522,7 +586,7 @@ def check_graph(path: Path) -> list[str]:
             errors.append(f"{name}: test target exists with testing disabled")
         if name == KOKKOS_TEST_MAIN and source_dir != "tests/kokkos":
             errors.append(f"{name}: unexpected source directory {source_dir!r}")
-        if name in SPH_LEAF_SOURCES and source_dir != SPH_LEAF_SOURCES[name].parent.as_posix():
+        if name in SPH_TARGET_DIRS and source_dir != SPH_TARGET_DIRS[name].as_posix():
             errors.append(f"{name}: unexpected source directory {source_dir!r}")
         seen.add(name)
         links = target.get("links")
@@ -540,14 +604,16 @@ def check_graph(path: Path) -> list[str]:
 
 def check_includes() -> list[str]:
     errors: list[str] = []
-    for scope in ("include/nexora", "src", "apps", "tests", "benchmarks"):
+    for scope in ("include/nexora", "src", "apps", "tests", "benchmarks", "validation"):
         for path in sorted((ROOT / scope).rglob("*")):
             if path.suffix not in SOURCE_SUFFIXES or not path.is_file():
                 continue
             relative = path.relative_to(ROOT)
             below_scope = path.relative_to(ROOT / scope)
             module = public_module(below_scope.parts) if scope == "include/nexora" else below_scope.parts[0]
-            if scope in {"apps", "tests", "benchmarks"}:
+            if relative.parent == FIXED_CSR_DIR:
+                allowed = SOURCE_MODULE_INCLUDES["participants"]
+            elif scope in {"apps", "tests", "benchmarks", "validation"}:
                 allowed = set(ALLOWED_INCLUDES)
             elif relative.parts[:3] == SPH_METHOD_DIR:
                 allowed = ALLOWED_INCLUDES["core"]

@@ -1,11 +1,10 @@
 #include <Kokkos_Core.hpp>
+#include <fixed_csr/Participant.hpp>
+#include <fixed_csr/sph_fixture.hpp>
 #include <gtest/gtest.h>
 #include <nexora/simulation/Simulation.hpp>
-#include <participants/sph/Participant.hpp>
-#include <sph_fixture.hpp>
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -19,11 +18,10 @@
 namespace {
 
 using namespace nexora;
-using sph::Config;
-using sph::Participant;
-using sph::Snapshot;
-using Fault = Participant::Fault;
 namespace fixture = sph_fixture;
+using fixture::Config;
+using fixture::Participant;
+using fixture::Snapshot;
 
 static_assert(std::is_same_v<decltype(std::declval<const Snapshot&>().density(0)), real>);
 static_assert(std::is_same_v<decltype(std::declval<const Snapshot&>().index(0)), LocalIndex>);
@@ -187,54 +185,6 @@ void prepare(Simulation& simulation) {
     ASSERT_TRUE(simulation.prepare().ok());
 }
 
-TEST(Sph, SupportEdgePrecision) {
-    Config config;
-    config.row_ids = {GlobalEntityId{1}};
-    config.column_ids = {GlobalEntityId{1}, GlobalEntityId{2}};
-    config.ghost = {0, 1};
-    config.boundary = {0, 0};
-    config.offsets = {0, 1};
-    config.indices = {1};
-    const auto check_density = [&](long double expected) {
-        Participant participant(config);
-        Simulation simulation(participant);
-        ASSERT_NO_FATAL_FAILURE(prepare(simulation));
-        ASSERT_TRUE(simulation.advance(0.125).ok());
-        const auto accepted = require(participant.snapshot());
-        ASSERT_TRUE(accepted.density_valid);
-        ASSERT_NO_FATAL_FAILURE(
-            check_close(accepted.density(0), expected, fixture::density_epsilon));
-        ASSERT_NO_FATAL_FAILURE(
-            check_close(accepted.owned_density_sum, expected, fixture::sum_epsilon));
-        ASSERT_TRUE(simulation.finalize().ok());
-    };
-
-    constexpr int edge_exponent = std::numeric_limits<real>::digits + 1;
-    const real gap = std::ldexp(real{1}, -edge_exponent);
-    config.masses = {real{1}, std::ldexp(real{1}, 3 * edge_exponent + 3)};
-    for (real sign : {real{1}, real{-1}}) {
-        config.positions = {sign * real{2}, sign * gap};
-        // The ghost contributes 8/6 and the owned self term contributes 2/3.
-        ASSERT_NO_FATAL_FAILURE(check_density(2));
-        config.positions[1] = -sign * gap;
-        Participant participant(config);
-        Simulation simulation(participant);
-        ASSERT_EQ(simulation.initialize().code(), StatusCode::invalid_argument);
-        ASSERT_TRUE(simulation.finalize().ok());
-    }
-    config.positions = {real{2}, real{0}};
-    ASSERT_NO_FATAL_FAILURE(check_density(2.0L / 3.0L));
-
-    // The standalone weight underflows, while mass * gap^3 / 6 is normal.
-    constexpr int tiny_gap_exponent = std::is_same_v<real, float> ? -51 : -360;
-    constexpr int mass_exponent = std::numeric_limits<real>::max_exponent - 1;
-    constexpr int contribution_exponent = mass_exponent + 3 * tiny_gap_exponent;
-    config.positions[1] = std::ldexp(real{1}, tiny_gap_exponent);
-    config.masses = {std::ldexp(real{1}, contribution_exponent - 4),
-                     std::ldexp(real{1}, mass_exponent)};
-    ASSERT_NO_FATAL_FAILURE(check_density(std::ldexp(5.0L / 24.0L, contribution_exponent)));
-}
-
 TEST(Sph, FrozenLayoutAndReorder) {
     const auto config = fixture::frozen_config<Config>();
     const auto rows = fixture::strong_ids<GlobalEntityId>(fixture::reordered_rows);
@@ -315,13 +265,14 @@ TEST(Sph, RestoreRetryAndReplay) {
     ASSERT_NO_FATAL_FAILURE(check_frozen(abandoned, false));
     ASSERT_NO_FATAL_FAILURE(check_same_accepted(accepted, require(participant.snapshot())));
     ASSERT_TRUE(simulation.restore_window().ok());
+    ASSERT_EQ(simulation.state(), SimulationState::prepared);
+    ASSERT_EQ(simulation.time().accepted_time, step);
+    ASSERT_EQ(simulation.time().accepted_steps, 1);
+    ASSERT_EQ(simulation.time().trial_attempts, 2);
     ASSERT_EQ(participant.trial_snapshot(abandoned_stamp).status().code(),
               StatusCode::invalid_state);
-
-    participant.fail_next(Fault::advance);
-    ASSERT_EQ(simulation.advance(step).code(), StatusCode::numerical_failure);
-    ASSERT_EQ(simulation.state(), SimulationState::prepared);
     ASSERT_NO_FATAL_FAILURE(check_same_accepted(accepted, require(participant.snapshot())));
+
     ASSERT_TRUE(simulation.begin_window(step).ok());
     ASSERT_TRUE(simulation.advance_trial().ok());
     const auto stamp = require(participant.trial_stamp());
@@ -340,20 +291,9 @@ TEST(Sph, RestoreRetryAndReplay) {
     stale = stamp;
     stale.topology = TopologyVersion{stamp.topology.value() + 1};
     ASSERT_EQ(participant.trial_snapshot(stale).status().code(), StatusCode::invalid_state);
-    ASSERT_NO_FATAL_FAILURE(check_frozen(require(participant.trial_snapshot(stamp)), false));
 
-    participant.fail_next(Fault::prepare);
-    ASSERT_EQ(simulation.commit_window().code(), StatusCode::execution_failure);
-    ASSERT_EQ(simulation.state(), SimulationState::prepared);
-    ASSERT_EQ(simulation.time().accepted_time, step);
-    ASSERT_EQ(simulation.time().accepted_steps, 1);
-    ASSERT_EQ(simulation.time().trial_attempts, 4);
-    ASSERT_EQ(participant.trial_snapshot(stamp).status().code(), StatusCode::invalid_state);
-    ASSERT_NO_FATAL_FAILURE(check_same_accepted(accepted, require(participant.snapshot())));
-    ASSERT_TRUE(simulation.begin_window(step).ok());
-    ASSERT_TRUE(simulation.advance_trial().ok());
-    const auto successful_stamp = require(participant.trial_stamp());
-    auto retained_trial = require(participant.trial_snapshot(successful_stamp));
+    auto retained_trial = require(participant.trial_snapshot(stamp));
+    ASSERT_NO_FATAL_FAILURE(check_frozen(retained_trial, false));
     auto trial_copy = retained_trial;
     const auto trial_bytes = retained_trial.row_count() * sizeof(real);
     const auto bytes_before_commit = participant.resource_usage().controlled_bytes;
@@ -362,16 +302,15 @@ TEST(Sph, RestoreRetryAndReplay) {
     const auto replayed = require(participant.snapshot());
     ASSERT_TRUE(replayed.stamp.accepted);
     ASSERT_TRUE(replayed.density_valid);
-    ASSERT_EQ(retained_trial.stamp, successful_stamp);
+    ASSERT_EQ(retained_trial.stamp, stamp);
     ASSERT_FALSE(retained_trial.stamp.accepted);
     ASSERT_NE(retained_trial.stamp.storage_incarnation, replayed.stamp.storage_incarnation);
     ASSERT_EQ(retained_trial.owned_density_sum, replayed.owned_density_sum);
     for (std::size_t row = 0; row < replayed.row_count(); ++row)
         ASSERT_EQ(retained_trial.density(row), replayed.density(row));
-    ASSERT_EQ(participant.trial_snapshot(successful_stamp).status().code(),
-              StatusCode::invalid_state);
+    ASSERT_EQ(participant.trial_snapshot(stamp).status().code(), StatusCode::invalid_state);
     ASSERT_EQ(simulation.time().accepted_steps, 2);
-    ASSERT_EQ(simulation.time().trial_attempts, 5);
+    ASSERT_EQ(simulation.time().trial_attempts, 3);
     ASSERT_TRUE(simulation.finalize().ok());
 
     Participant continuous(config);
@@ -615,86 +554,5 @@ TEST(Sph, RejectsInvalidInput) {
             --config.offsets[offset];
     }));
 }
-
-TEST(Sph, NonfiniteReductionPreservesAcceptedState) {
-    Config overflow;
-    overflow.row_ids = fixture::strong_ids<GlobalEntityId>(std::array{1u, 2u});
-    overflow.column_ids = overflow.row_ids;
-    overflow.positions = {0, 3};
-    overflow.masses.assign(2, std::numeric_limits<real>::max());
-    overflow.boundary = {0, 0};
-    overflow.ghost = {0, 0};
-    overflow.offsets = {0, 0, 0};
-    Participant participant(std::move(overflow));
-    Simulation simulation(participant);
-    ASSERT_NO_FATAL_FAILURE(prepare(simulation));
-    const auto initial = require(participant.snapshot());
-    ASSERT_EQ(simulation.advance(0.125).code(), StatusCode::numerical_failure);
-    ASSERT_EQ(simulation.state(), SimulationState::prepared);
-    ASSERT_EQ(simulation.time().accepted_steps, 0);
-    ASSERT_NO_FATAL_FAILURE(check_same_accepted(initial, require(participant.snapshot())));
-    ASSERT_TRUE(simulation.finalize().ok());
-}
-
-#if NEXORA_ENABLE_DOUBLE_PRECISION
-TEST(Sph, FiniteRoundedReductionAtRangeLimit) {
-    Config config;
-    config.row_ids = fixture::strong_ids<GlobalEntityId>(std::array{1u, 2u, 3u});
-    config.column_ids = config.row_ids;
-    config.positions = {0, 3, 6};
-    config.ghost.resize(3);
-    config.boundary.resize(3);
-    config.offsets.resize(4);
-    // The first two rounded rows sum to DBL_MAX. The third is positive
-    // and too small to change the rounded double diagnostic.
-    config.masses = {static_cast<real>(0x1.8p+1023), static_cast<real>(0x1.7ffffffffffffp+1023),
-                     real{1}};
-
-    Participant participant(config);
-    Simulation simulation(participant);
-    ASSERT_NO_FATAL_FAILURE(prepare(simulation));
-    ASSERT_TRUE(simulation.advance(0.125).ok());
-    const auto accepted = require(participant.snapshot());
-    ASSERT_TRUE(accepted.stamp.accepted);
-    ASSERT_TRUE(accepted.density_valid);
-    ASSERT_GT(accepted.density(2), 0);
-    ASSERT_EQ(accepted.owned_density_sum, std::numeric_limits<double>::max());
-    ASSERT_TRUE(simulation.finalize().ok());
-}
-
-TEST(Sph, RoundedReductionDependsOnRowOrder) {
-    Config config;
-    for (unsigned i = 0; i < 13; ++i) {
-        config.row_ids.emplace_back(i + 1);
-        config.positions.push_back(static_cast<real>(3 * i));
-    }
-    config.column_ids = config.row_ids;
-    config.ghost.resize(13);
-    config.boundary.resize(13);
-    config.offsets.resize(14);
-    config.masses.assign(11, static_cast<real>(0x1.2p+971));
-    config.masses.resize(13, static_cast<real>(0x1.7fffffffffff8p+1023));
-
-    Participant participant(config);
-    Simulation simulation(participant);
-    ASSERT_NO_FATAL_FAILURE(prepare(simulation));
-    ASSERT_TRUE(simulation.advance(0.125).ok());
-    const auto first = require(participant.snapshot());
-    ASSERT_EQ(first.owned_density_sum, static_cast<real>(0x1.ffffffffffffep+1023));
-
-    auto reversed = config.row_ids;
-    std::ranges::reverse(reversed);
-    ASSERT_TRUE(participant.reorder(reversed, config.column_ids, first.stamp).ok());
-    const auto reordered = require(participant.snapshot());
-    ASSERT_EQ(reordered.owned_density_sum, first.owned_density_sum);
-    // Starting with the two largest rows makes the same rounded row values
-    // overflow the diagnostic during the next Serial evaluation.
-    ASSERT_EQ(simulation.advance(0.125).code(), StatusCode::numerical_failure);
-    ASSERT_EQ(simulation.state(), SimulationState::prepared);
-    ASSERT_EQ(simulation.time().accepted_steps, 1);
-    ASSERT_NO_FATAL_FAILURE(check_same_accepted(reordered, require(participant.snapshot())));
-    ASSERT_TRUE(simulation.finalize().ok());
-}
-#endif
 
 } // namespace

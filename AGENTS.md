@@ -17,6 +17,13 @@
 - When changing state, account for ownership, host/device accessibility, synchronization, communication, and checkpointing. Document any gaps.
 - Change numerical formulas, defaults, tolerances, or physical conventions only on explicit request and with correctness evidence. Reject unsupported capabilities explicitly.
 
+## Numerical implementation and tests
+
+- Evaluate documented physical formulas directly for supported workloads. Add special scaling, compensation, or recovery only when evidence from a supported case shows that direct evaluation misses a correctness or accuracy requirement.
+- Check numerical simplifications against the behavior they affect. Preserve floating-point treatment needed for ordinary inputs, such as near-equilibrium Tait pressure, cell assignment, and neighbor cutoff decisions. Verify the affected outcomes directly, including cell counts and neighbor IDs when reviewing geometry changes.
+- Validate each invariant where it is established. Rely on a documented precondition only after tracing every caller. Remove a check when the remaining predicate already covers it under the applicable floating-point semantics. For example, `abs(x) <= max(real)` rejects NaN and infinity. Keep checks that protect index conversion, positivity after narrowing, and candidate validity before publication. Reject invalid candidates through the existing failure and rollback paths.
+- Use representative inputs and explicit expected results for distinct behaviors. Consolidate cases that exercise the same validation rule and outcome. Compare numerical results with an independent reference. When real trial failures or resource limits can exercise rollback and retry, use them and keep test-only fault hooks out of the production solver.
+
 ## Build and validation
 
 - Use the language standard, CMake minimum, generator, and exact Kokkos lock defined in [build and validation](docs/architecture/build-and-validation.md). Default CPU operation uses Kokkos Serial; OpenMP, CUDA/HIP, and MPI require explicit configurations and separate validation evidence. Consult that document for implemented and validated profiles; a planned profile is not an implemented capability.

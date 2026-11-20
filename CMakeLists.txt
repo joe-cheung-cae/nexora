@@ -72,6 +72,7 @@ add_subdirectory(src/methods/sph)
 add_subdirectory(src/participants/reference)
 add_subdirectory(src/participants/sph)
 add_subdirectory(apps/nexora)
+add_subdirectory(validation/sph/fixed_csr)
 add_subdirectory(benchmarks/sph)
 
 if(BUILD_TESTING)

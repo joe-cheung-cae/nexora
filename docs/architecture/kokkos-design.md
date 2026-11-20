@@ -187,14 +187,14 @@ template<class Space> struct CsrAdjacency {
 
 | 方法 | 拓扑/状态归属与典型 Kokkos 布局 | 离散算子与恢复要点 |
 |---|---|---|
-| SPH | 粒子 SoA；位置可 `View<Real*[3], LayoutLeft, Space>` 或独立 x/y/z；CSR/压缩邻域；稳定粒子 ID | 邻域构建、密度、压力/相互作用、边界和归约；积分历史/自适应历史恢复，邻域按版本重建 |
+| SPH | 粒子 SoA（位置可用 `View<Real*[3], LayoutLeft, Space>` 或独立 x/y/z）和稳定粒子 ID。三维动态路径默认按格重排并直接遍历 [`cellBegin` 区间](migration-roadmap.md#sph-cell-begin) | 格索引供密度与压力/相互作用使用，积分后校验格归属。边界和归约遵循模型契约，恢复积分/自适应历史，按版本复用或重建索引 |
 | FVM | 单元主变量与面通量分开；owner/neighbour、patch、cell-face CSR，面面积向量与体积独立 | face flux → cell gather/累积；内部面方向一致、每面逻辑通量唯一；压力/速度/通量一致性按具体方案保留 |
 | FEM | DOF 向量、element connectivity、约束图；积分点可 rank 3/4（element, quadrature, component），稀疏块各自布局 | element apply/组装、边界约束、trace、材料积分；塑性等不可逆历史须 trial 分离，不能当缓存丢弃 |
 | LBM | block / lattice / direction 多维 populations，ping-pong 时间层；stencil、halo 与掩码 | collision/streaming/forcing；保存 parity、populations、边界与固定步长量子，宏观量按需重建 |
 | DEM | 粒子平动/旋转场；contact pair stable IDs、接触图；切向/滚动历史单独存储 | 搜索、接触力、积分；contact history、产生/消亡事件及 owner 迁移均影响恢复 |
 | MBD | body/joint/constraint graph；q/v 长度可以不同，约束乘子、积分器/控制历史由 engine 拥有 | 动力学引擎执行 formulation；participant 负责机械端口、时间和恢复认证，见 §9 |
 
-以下声明展示典型 SPH 与 FVM 类型边界，不固定维度、精度、公式或物理默认值；`Real` 必须来自获准的算例/模型。
+以下声明展示典型 SPH 与 FVM 类型边界。`SphKernelInput` 示意显式 CSR 对照路径的只读输入。三维动态密度的默认输入为按格排列的粒子字段、owned 目标映射和 `cellBegin`。具体维度、精度、公式及物理默认值由获准的算例/模型确定。
 
 ```cpp
 namespace nexora {

@@ -1,15 +1,53 @@
-# P1-07 SPH Serial CPU 验证
+# P1-07 一维固定 CSR 验证夹具
 
-`nexora_methods_sph` 使用指定的 Kokkos Serial 实例计算 [P1-01b](../baselines/sph-density-1d-v1.md) 的固定 CSR 一维 M₄ 密度。每个 owned 行写入一个独立 trial 值，ghost 只供读取。支持边界用减法余项判定，核尾项计算保留边界内可表示的质量贡献。同一次 Kokkos 归约把逐行 `real` 密度写入 trial，并用普通 `double` 累加 owned 和。归约值有限且未超过 `real` 上限才转换和发布。位于上限附近的微小正项可能被舍去，重排行可能改变重算时的溢出结果。 [密度算子](../../src/methods/sph/Density.cpp) · [SPH participant](../../src/participants/sph/Participant.cpp)
+`nexora_sph_fixed_csr_fixture` 由一维回归和显式构建的 benchmark 共用。夹具在每个 Simulation 窗口读取既有几何，使用指定的 Kokkos Serial 实例计算 [P1-01b](../baselines/sph-density-1d-v1.md) 的固定 CSR 一维 M₄ 密度。每个 owned 行写入一个独立 trial 值，ghost 只供读取。支持边界和核权重直接由粒子距离求得。同一次 Kokkos 归约把逐行 `real` 密度写入 trial，并用普通 `double` 累加 owned 和。归约值有限且未超过 `real` 上限才转换和发布。 [密度算子](fixed_csr/Density.cpp) · [SPH participant](fixed_csr/Participant.cpp)
 
 ## 状态与验证范围
 
 - 所有数值 Views 位于 HostSpace。participant 验证输入的 ID、owned 行、CSR 边和字段，持有位置与质量的只读 lease。固定邻域的完整性由输入给定，基准用独立扫描核对。试算密度由写 lease 独占。提交时仍有 trial 读授权，则为 accepted 另取独立存储。其余情况下复用试算密度的原分配并签发新的 accepted 读授权与 stamp。原 trial stamp 随窗口关闭而失效。
 - 重排使用已有双向排列同时迁移行列、字段和 CSR，发布时推进 layout 并保留 geometry、topology 和 accepted 时间。首次密度发布前的快照使用当前位置分配的 `storage_incarnation`，密度快照使用其密度分配的身份。重排拒绝过期和其他实例的 stamp。已签发的读快照在新状态发布、回滚和关闭后继续有效。
-- 跨窗口读取持有完整 `Snapshot`。按索引读取返回数值，副本共享同一快照记录和读授权。预算分别绑定整套不可变布局与密度分配，重排另预留临时排列和 CSR 的字节数。最后一个持有者释放后归还额度。默认上限为 64 份快照记录与 256 MiB 受控载荷，受控载荷按 Kokkos 数组逻辑字节计；进程 RSS 包含主机输入、校验容器和运行时开销。 [快照接口](../../src/participants/sph/Participant.hpp)
+- 跨窗口读取持有完整 `Snapshot`。按索引读取返回数值，副本共享同一快照记录和读授权。预算分别绑定整套不可变布局与密度分配，重排另预留临时排列和 CSR 的字节数。最后一个持有者释放后归还额度。默认上限为 64 份快照记录与 256 MiB 受控载荷，受控载荷按 Kokkos 数组逻辑字节计；进程 RSS 包含主机输入、校验容器和运行时开销。 [快照接口](fixed_csr/Participant.hpp)
 - 支持范围为单进程同步 Serial、固定粒子集合和本地 ghost 输入。快照与恢复限进程内。CUDA、跨 rank 通信、动态邻域、持久 restart 和生产 SPH 分别保留在相应任务。 [验收矩阵](../../docs/architecture/phase-1-design-review.md#acceptance)
 
-## 本地离线执行
+## 求解器清理复验
+
+基线为 `a9af3bf6a3fdbcac8675a0d258cb5aa9f1967cdf`。一维夹具、冻结输入和独立参考仍验证两套行列 CSR、稳定 ID、逐行密度、owned 归约、保留快照和预算。三维静态构型在网格和压力算子上按 ID 检查邻居与力学字段。事务断言在真实 Velocity Verlet 窗口中执行，覆盖非初始步回滚、相同及较小步长重试、过期或其他实例的 stamp、快照记录上限，以及预提交因读者占用超过字节预算后的恢复。[一维回归](../../tests/methods/sph/sph_tests.cpp) · [几何回归](../../tests/methods/sph/cell_grid_tests.cpp) · [压力回归](../../tests/methods/sph/pressure_3d_tests.cpp) · [积分回归](../../tests/methods/sph/verlet_window_tests.cpp)
+
+在 Apple M2 Pro、macOS 27.2.1 arm64（26B131）、AppleClang 21.0.0.21000401、CMake 4.4.3、Ninja 1.13.2 上，Serial 验证器从空目录配置和构建，核对本地 Kokkos 5.2.2 与 GoogleTest 1.17.0 的锁定清单。四组均完成依赖边界、CTest、Reference 的 80 位十进制 oracle、安装搬迁及独立消费，退出码为 0，零跳过。禁网探针在两轮运行前后均通过。执行始于 `2026-11-20T19:23:47+08:00`。
+
+| 配置 | 一维 / 三维 SPH（计入常规 CTest） | 常规 CTest | 安装 CTest / 包内消费者 | 完成时间 |
+|---|---:|---:|---:|---|
+| Debug float | 7/7、56/56 | 129/129 | 1/1、3/3 | `2026-11-20T19:24:46+08:00` |
+| Debug double | 7/7、56/56 | 128/128 | 1/1、3/3 | `2026-11-20T19:25:39+08:00` |
+| Release float | 7/7、56/56 | 129/129 | 1/1、3/3 | `2026-11-20T19:24:24+08:00` |
+| Release double | 7/7、56/56 | 128/128 | 1/1、3/3 | `2026-11-20T19:25:01+08:00` |
+
+- 按冻结基准中的 Python 分数程序复算，SHA-256、两个 CSR、五个 owned ID 的密度与 owned 和 `946/48 kg/m` 均精确匹配。C++ 夹具继续用逐粒子 `8ε` 和归约 `16ε`。[冻结输入和复核命令](../baselines/sph-density-1d-v1.md)
+- 两个 Release 配置均显式构建并执行默认 benchmark，分别于 `2026-11-20T19:24:43+08:00` 和 `2026-11-20T19:25:20+08:00` 前完成。262144 组大例重排后的 owned 和为 float `6137857`、double `6137857.0833186787`，对精确参考 `73654285/12 kg/m` 的相对误差分别为 `1.36e-8` 和 `2.39e-12`。Release double 的数值和分配、复制、fence 计数均与单独构建的基线一致。[benchmark](../../benchmarks/sph/sph_benchmark.cpp)
+- Release double 显式构建并运行 6³ 固定壁轨迹，4 份 CSV 与基线逐字节一致，包括步长、场值和资源记录。[轨迹复验](hydrostatic-continuity-repair.md#solver-cleanup-trajectory)
+- 在独立源码副本中以 Release float、`BUILD_TESTING=OFF` 配置后，移开全部一维夹具的 C++ 源码和头文件，再构建 `nexora_methods_sph`、`nexora_participants_sph` 以及默认目标，均成功。验证结束于 `2026-11-20T19:26:58+08:00`。正常关闭测试的构建也可显式运行 benchmark。JUnit、依赖清单、Decimal 输出、安装和显式构建日志位于本机 `results/sph-cleanup-final/`。
+
+## 常规公式复验
+
+以 `e39ca40` 为基线，在工作树中直接求值一维和三维密度、Tait 压力、Adami 壁面、连续性方程、声学 CFL 与 Velocity Verlet。测试用实际的物理、几何和预算失败验证回滚与重试。保留冻结 CSR 对照、长邻域、守恒、静水初态和快照保活检查。
+
+在 Apple M2 Pro、macOS 27.2.1 arm64（26B131）、AppleClang 21.0.0.21000401、CMake 4.4.3、Ninja 1.13.2、Kokkos 5.2.2 Serial 和 GoogleTest 1.17.0 上，重新构建了已有的四套配置。各配置用 `ctest -R '^nexora_sph_tests\.'` 执行注册的 SPH 测试。
+
+| 配置 | 通过 | 完成时间 |
+| --- | ---: | --- |
+| Release float | 63/63 | `2026-11-20T15:04:37+08:00` |
+| Release double | 63/63 | `2026-11-20T15:04:38+08:00` |
+| Debug float 和 Debug double（各组） | 63/63 | `2026-11-20T15:04:54+08:00` |
+
+Release double 的依赖检查及全仓 CTest（含安装包消费者）也通过，共 129/129 项，于 `2026-11-20T15:05:40+08:00` 完成。另以 Release double 执行 `nexora_sph_benchmark 256` 和 `nexora_sph_tank_trajectory 6 <输出目录>`。冻结一维基准与重排对照通过。三维水箱诊断执行了 601 步，达到 2.34765625 s，216 个流体粒子全程无穿壁记录。两项均于 `2026-11-20T15:05:28+08:00` 完成。
+
+### 数值检查与 CFL 复验
+
+以 `d60beb7` 为基线，压力、Verlet 和连续性更新采用有序范围判断。CFL 对初始化或最终半步已验证的有限速度取最大速度平方，并验证所得时间步。负例按校验行为合并，仍覆盖无效坐标与初速、容量拒绝和密度试算回滚重试。
+
+沿用上述工具链和四套构建目录。float 与 double 的 Release SPH 测试各通过 63/63 项，于 `2026-11-20T15:32:57+08:00` 完成。float 与 double 的 Debug SPH 测试也各通过 63/63 项，于 `2026-11-20T15:33:15+08:00` 完成。Release double 的依赖检查及全仓 CTest（含安装包消费者）通过，共 129/129 项，于 `2026-11-20T15:33:52+08:00` 完成。
+
+## 历史离线执行
 
 Apple M2 Pro arm64（8P+4E，16 GB），macOS 27.2.1 build 26B131，AppleClang 21.0.0.21000401，CMake 4.4.3，Ninja 1.13.2，Python 3.14.7。Kokkos 5.2.2（`8e15454876298832f013ebcaf08d53825b5bda40`）用校验过的官方归档分别供应 Debug/Release，两组安装均核对逐文件摘要。MPI 关闭。两轮验证前后的 10 项 IPv4/IPv6 网络探针均返回 EPERM。 [依赖来源](../../third_party/README.md#kokkos-provenance-record)
 
@@ -22,7 +60,7 @@ Apple M2 Pro arm64（8P+4E，16 GB），macOS 27.2.1 build 26B131，AppleClang 2
 | Release float | `2026-11-19T11:39:07+08:00` | `2026-11-19T11:39:33+08:00` | 21/21 | 3/3 |
 | Release double | `2026-11-19T11:39:33+08:00` | `2026-11-19T11:39:58+08:00` | 21/21 | 3/3 |
 
-SPH 测试按每个固定输入生成一次独立 scalar oracle，在首次提交、行列重排和重算后核对结果。覆盖空行、4096 邻居行、闭支持域两侧、可表示的微小核尾项、有限舍入至 `DBL_MAX` 及重算溢出后的回滚。保留完整 accepted 或 trial 快照，检查跨提交、恢复和关闭读取、最后一份副本释放后的预算恢复，以及失败重排原子性。另执行冻结算例的分数复核，两个 CSR 布局、逐 ID 密度及 owned 和均精确匹配。 [CTest 用例](../../tests/methods/sph/sph_tests.cpp) · [冻结基准](../baselines/sph-density-1d-v1.md)
+SPH 测试按每个固定输入生成一次独立 scalar oracle，在首次提交、行列重排和重算后核对结果。覆盖空行、4096 邻居行和闭支持域两侧。保留完整 accepted 或 trial 快照，检查跨提交、恢复和关闭读取、最后一份副本释放后的预算恢复，以及失败重排原子性。另执行冻结算例的分数复核，两个 CSR 布局、逐 ID 密度及 owned 和均精确匹配。 [CTest 用例](../../tests/methods/sph/sph_tests.cpp) · [冻结基准](../baselines/sph-density-1d-v1.md)
 
 源码基线 `1e4e10c7a4643a3ab97129e210e2efd369598e65` 加工作树修改。最终源码、夹具和构建输入清单 SHA-256 为 `960797be742b7d5ebf3f2349eb75a7f3eedaf6c0e7bb933980b01879c02fe064`。本地 JUnit、依赖清单、精确复核、计时样本和源码清单存于 `results/p1-07-serial-simplified-20261119T113427/final/`。精简前的原始计量与验证保存在 `results/p1-07-view-lifetime-20261119/`，此前的依赖检查反例见 `results/p1-07-review-fixes-20261119/`。
 
@@ -58,13 +96,15 @@ Release float 计量从 `2026-11-19T11:40:26+08:00` 至 `2026-11-19T11:40:29+08:
 
 ## 复跑
 
-本次在禁网环境中分别对 `serial_config=Debug` 和 `serial_config=Release` 执行以下命令。`kokkos_prefix` 指向对应配置已供应的本地安装，`serial_work` 与 `serial_logs` 指向新的构建和日志目录。
+分别对 `serial_config=Debug` 和 `serial_config=Release` 执行以下命令。`kokkos_prefix` 和 `gtest_prefix` 指向对应配置已供应的本地安装，`serial_work` 与 `serial_logs` 指向新的构建和日志目录。
 
 ```sh
 python3 tools/validate_serial.py --cc /usr/bin/cc --cxx /usr/bin/c++ --config "$serial_config" verify \
-  --prefix "$kokkos_prefix" --work-dir "$serial_work" --logs "$serial_logs" \
+  --prefix "$kokkos_prefix" --gtest-prefix "$gtest_prefix" --work-dir "$serial_work" --logs "$serial_logs" \
   --jobs 3 --precisions float double --require-network-blocked
 ```
+
+单独复跑一维夹具可用 `ctest --test-dir "$serial_work/release-double" --no-tests=error -R '^nexora_sph_fixed_csr_tests[.]' --output-on-failure`。三维回归使用 `^nexora_sph_tests[.]`。
 
 将 `nexora_release_build` 分别设为 `$serial_work/release-float` 与 `$serial_work/release-double`，依次计量。可执行文件默认测试上表的两个规模，也接受显式组数。
 

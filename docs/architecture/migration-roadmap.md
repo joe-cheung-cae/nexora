@@ -35,6 +35,8 @@
 | `data_schema`、`data` | INTERFACE `data_schema → core`；STATIC `data → data_schema, Kokkos::kokkos`。 [data CMake](../../src/data/CMakeLists.txt) | 已移除 `data → exec_api`。CPU 外部借用、本地 pack 及按稳定 ID 接收解包已实现，设备异步交接仍待实施。 |
 | `participant_api`、`simulation` | INTERFACE `participant_api → data_schema`；STATIC `simulation → participant_api`。两者均已导出。 [simulation CMake](../../src/simulation/CMakeLists.txt) | 保留生命周期边界。Kokkos 状态及算子实例放进实际方法/参与者实现。 |
 | `methods_reference`、`participants_reference` | 步骤 2 新增内部 STATIC 目标。`methods_reference → data, Kokkos::kokkos`；`participants_reference → participant_api, methods_reference, data`。不导出、不安装。 [方法 CMake](../../src/methods/reference/CMakeLists.txt) [参与者 CMake](../../src/participants/reference/CMakeLists.txt) | 只实现本次 Serial 状态闭环；其他设备、公共安装 API 和完整数据契约分别验收。 |
+| `methods_sph`、`participants_sph` | 内部三维 SPH 目标。`methods_sph → core, Kokkos::kokkos`。`participants_sph → participant_api, methods_sph, data, Kokkos::kokkos`。[方法 CMake](../../src/methods/sph/CMakeLists.txt) · [参与者 CMake](../../src/participants/sph/CMakeLists.txt) | 保留三维格索引、算子与 WCSPH 积分窗口。 |
+| `sph_fixed_csr_fixture` | 一维固定 CSR 验证目标，直接链接 `participant_api`、`data` 和 `Kokkos::kokkos`。一维测试和显式 benchmark 链接此夹具。[夹具 CMake](../../validation/sph/fixed_csr/CMakeLists.txt) | 源码归入验证目录。关闭测试时仍可显式构建 benchmark。 |
 | `nexora` CLI | `nexora` 直接链接 core、simulation、内部 `participants_reference` 和 Kokkos，以版本化 case 装配 Serial Reference。可选私有 `MPI::MPI_C` 用于独立探针。 [CLI CMake](../../apps/nexora/CMakeLists.txt) · [case 格式与验证](reference-case.md) | 后续设备组合按各自的实机验收与能力清单装配。 |
 | 原草案 `exec_cuda`、`reference_contract`、`reference_cpu`、`reference_cuda` | 均无 CMake 声明或实现。 | 取消 backend 专属执行目标。参考参与者与算子签名继续按职责组织，同一算子模板实例化所选 Kokkos execution space；内部目标只随实际使用者增加。 |
 | 测试和安装消费 | 旧 exec 测试与消费已删除；保留字段、生命周期、schema、simulation 与 Kokkos 安装消费测试。 | 干净安装与独立消费及现行正反例按实际执行结果记录；不以旧测试证明新路径。 |
@@ -98,8 +100,8 @@ P3、P4、P5 的单方法可以在 P1 字段契约确定后分别准备设计，
 
 | 任务与处置 | 拟修改/新增文件与 target | 契约与精确前置 | 通过条件 |
 |---|---|---|---|
-| `SPH-001` **保留并迁移**。真实 density 阶段超出 P1 结构夹具。 | `src/methods/sph/{State,Density,Instantiations}.*`、`src/participants/sph/`、`tests/methods/sph/`、`validation/sph/`、`benchmarks/sph/`；`nexora_methods_sph`、`nexora_participants_sph`。 | typed 粒子/邻域输入和 trial density 输出，同一公式与已批准的精度/边界。前置 `BASE-001`、`P1-05`、`P1-06`、`P1-07`、`SPH-002`。 | 独立基准匹配密度和原物理约定；零/极端邻域与重排后的稳定 ID 对照通过。已启用 CPU/CUDA 分别实跑并记录含准备/归约的耗时。 |
-| `SPH-002` **保留**。稳定 ID 与局部顺序仍须隔离。 | `src/methods/sph/neighbors/`、`tests/methods/sph/`；`nexora_methods_sph`。 | 定义 CSR、permutation 与按拓扑/几何/布局版本失效的邻域绑定；方法持有重排数据。前置 `P1-03`、`P1-07`。 | 双射、所有同域字段与历史一同重排、陈旧绑定拒绝或重建；用稳定 ID 对比重排前后关系，覆盖空/极端邻域与 ghost。 |
+| `SPH-001` **保留并迁移**。真实 density 阶段超出 P1 结构夹具。 | `src/methods/sph/{State,Density,Instantiations}.*`、`src/participants/sph/`、`tests/methods/sph/`、`validation/sph/`、`benchmarks/sph/`；`nexora_methods_sph`、`nexora_participants_sph`。 | 三维动态密度默认直接遍历 `SPH-002` 的格区间，读取 typed 粒子字段，按批准的公式、精度和边界写 owned trial density。前置 `BASE-001`、`P1-05`、`P1-06`、`P1-07`、`SPH-002`。 | 独立基准匹配密度和原物理约定；零/极端邻域与重排后的稳定 ID 对照通过。已启用 CPU/CUDA 分别实跑并记录含准备/归约的耗时。 |
+| `SPH-002` **保留**。三维动态 SPH 默认直接遍历 [`cellBegin` 格索引](#sph-cell-begin)。 | `src/methods/sph/neighbors/`、`tests/methods/sph/`；`nexora_methods_sph`。 | 方法持有按格重排的粒子字段、稳定 ID 与槽位双射，以及按拓扑、几何和布局版本校验的格索引。前置 `P1-03`、`P1-07`。 | 同域字段和历史随粒子重排，陈旧绑定拒绝或更新。按稳定 ID 对照独立全扫描与显式 CSR，覆盖空格、极端邻域、支持边界、ghost 和跨格移动。 |
 | `DEM-001` **保留并迁移**。稳定 contact key 和 history 是恢复输入。 | `src/methods/dem/contacts/`、`src/participants/dem/`、`tests/methods/dem/`、`validation/dem/`；`nexora_methods_dem`、`nexora_participants_dem`。 | 以稳定实体对及已批准的接触标识绑定唯一 owner，typed View 保存 accepted/trial history；交付首例所需的受限接触/积分阶段。前置 `BASE-001`、`P1-03`、`P1-05`、`P1-06`。 | 接触/脱离、重排、失败回滚和重放保留正确历史，拒绝重复接触。选定力学小例对照已批准 DEM 基线；跨 rank 迁移另验 `MPI-003`。 |
 | `CPL-001` **保留**。端口物理兼容须在读写前确定。 | `src/coupling/ports/`、`tests/coupling/ports/`；`nexora_coupling`。 | 以 `PortDescriptor`、`FieldDescriptor` 和快照 stamp 检查方向、单位、frame、association、measure 与有效时间。前置 `P1-03`、`P1-04`、`P1-06`。 | 兼容端口可签发所需交换；错误语义在提交或修改目标状态之前明确拒绝。 |
 | `CPL-002` **保留并迁移**。映射关系与计算基础无关，实现改用 typed Kokkos 数据。 | `src/coupling/mapping/`、`tests/coupling/mapping/`；`nexora_coupling`。 | 按下述[现行映射定义](#p2-mapping-contract)绑定 `H` 与共轭 `Hᵀ` 的源/目标稳定 ID、权重和版本键；空间映射与载荷方向保持已批准物理约定。前置 `CPL-001`、`P1-05`。 | 常量、线性、合力/矩及离散功检查分别与独立 oracle 对照；陈旧映射或失配拒绝。 |
@@ -111,6 +113,33 @@ P3、P4、P5 的单方法可以在 P1 字段契约确定后分别准备设计，
 | `MPI-003` **保留**。跨 rank 迁移需要保持历史和接触所有权。 | `src/parallel/migration/`、`src/participants/dem/`、`tests/parallel/migration/`；`nexora_parallel_api`、`nexora_parallel_mpi`、`nexora_participants_dem`。 | 粒子与接触历史按稳定 ID 迁移，成功完成后才换 owner。前置 `DEM-001`、`MPI-002`。 | 分别在固定 2 或 4 rank 的运行中迁移所有权，于获准安全点发布，覆盖跨界接触、空 rank 和失败路径；无重复接触、丢历史或提前发布，复算满足参考准则。R0 loader 不执行重分区：若快照在在线迁移后生成，只恢复快照当时的分区/owner；改变 rank 或分区的重启属于延期 R1。 |
 | `IO-001` **保留并迁移**。持久重启与内存快照、输出场景是独立边界。 | `src/io/checkpoint/`、`tests/io/checkpoint/`、`validation/restart/`；`nexora_io_checkpoint`。HDF5 为独立可选依赖，格式选型随实施包审批。 | 只序列化 accepted 逻辑 schema、稳定 ID、状态/历史与 manifest。前置 `CKPT-001`；启用 MPI 重启时还须 `MPI-001`、`MPI-002`、`MPI-003`。 | 按 [R0 定义](checkpoint-restart.md#restart-levels)和 [CP-02–08](checkpoint-restart.md#restart-acceptance)验收；比较恢复与不中断运行，验证完整性及中断写入拒绝，记录运行组合和恢复级别。 |
 | `CPL-004` **保留并迁移**。真实 SPH–DEM 窗口验证整条平台路径。 | `apps/nexora/`、`src/participants/{sph,dem}/`、`cases/verification/coupling/sph_dem/`、`tests/coupling/sph_dem/`、`validation/coupling/`、`benchmarks/coupling/`；`nexora`、`nexora_coupling`、`nexora_participants_sph`、`nexora_participants_dem`。 | 真实参与者声明稳定 ID 的运动/载荷端口，按批准基准接首例所需的力和时间推进阶段，通过载荷账本交换并发布 accepted 快照。串行前置 `P1-09`、`BASE-001`、`SPH-001`、`SPH-002`、`DEM-001`、`CPL-001`、`CPL-002`、`CPL-003`、`TIME-001`、`CKPT-001`、`IO-001`；申报 MPI 组合追加 `MPI-001`、`MPI-002`、`MPI-003`。 | 正常 case 校验→typed 计算→守恒交换→accepted 提交→持久重启/重放，全链记录数值、失败恢复与端到端性能。MPI 组合另报实测跨 rank 一致性与通信开销；串行交付不冒充 MPI 支持。 |
+
+<a id="sph-cell-begin"></a>
+#### SPH-002 三维动态邻域、密度与 WCSPH 压力
+
+**静态几何与算子。** `CellGrid` 按稳定 ID 检查更新后的粒子状态，格归属、成员与 ownership 相同就复用 `cellBegin`，任一变化即重建。`prepare_geometry_3d` 管理几何版本和预算。三维 M₄ 密度直接按当前格表上的坐标判距与累加。压力算子接收 `WcsphParameters{reference_density, sound_speed, gamma}` 和当前几何的 owned 密度，计算 Tait 表压及对称压力加速度。参与受力的普通 ghost 从完整本地支撑域重算同阶段密度。静态验证按 owned ID 对照独立显式 CSR。[格索引与验证](../../validation/sph/cell-begin-serial.md) · [压力公式与 ghost 输入约定](../../validation/sph/wcsph-pressure-serial.md)
+
+**Serial 积分窗口。** `sph::Participant3D` 使用全 owned 的初始流体字段、初始速度、初始密度和 CFL 安全系数推进。算例平滑长度 `h` 固定，默认 1 m。格宽和核支持半径均为 `2h`，核值和核梯度分别按 `h⁻³`、`h⁻⁴` 缩放，声学 CFL 随 `h` 缩放。每个窗口从 accepted 加速度出发，半步更新速度并移动粒子，在更新后的格表用预测速度再求一次密度变化率。两端变化率校正流体密度后重算压力加速度，再完成速度更新和下一步 CFL 估计。提交发布整份候选快照，恢复保留原 accepted 状态、时钟和 CFL 上限。[Velocity Verlet 与 CFL 验证](../../validation/sph/wcsph-verlet-serial.md)
+
+积分模式还可接收恒定重力与单独的固定壁粒子集。壁源随流体进入同一邻域索引，每次力评估从当前流体外推壁压，再反解 Tait 壁密度。积分和字段发布只遍历流体行。静水箱壁层统一取 ceil(2h/壁粒距)，完整包覆实体壁与底角，顶部对大气开放。现行推进需要显式物理密度，几何初态的核求和另作诊断。三档算例均保持物理质量，用推进后的压力、速度和穿墙检验静水平衡。[修复与实测](../../validation/sph/hydrostatic-continuity-repair.md) 原来的两种质量分布与轨迹对照属于历史实验。[现行初态验收](../../validation/sph/hydrostatic-initial-resolution.md) · [历史 Adami 固定壁实验](../../validation/sph/adami-hydrostatic-serial.md)
+
+1. **按格组织数据。** 用 Kokkos 按 `(cell, 稳定粒子 ID)` 排序，将位置各分量和质量等热字段按同一置换写成 SoA，并保留 owned 目标到粒子槽位的映射。同域字段、归属标记及积分历史须按稳定 ID 对齐。`cellBegin` 含格数加一项，末尾哨兵等于源粒子数。格 `c` 的连续槽位为 `[cellBegin[c], cellBegin[c+1])`，空格两端相等，下一格的起点兼作本格的 `cellEnd`。
+2. **在密度核内直接遍历。** 固定支持半径 `R`、格宽为 `R`、x 为最快变化的格编号时，三维内部目标周围最多 27 格。沿每个合法的 `(y,z)` 合并相邻 x 格，非周期边界先裁剪，每行最多扫描 9 个连续区间。对当前阶段坐标现场检查支持域并累加，只写 owned 目标的试算密度。ghost 可作只读源。以粒子身份识别自身，自身项只加一次，同位置的不同 ID 仍分别参与筛选。
+3. **跨阶段检查有效性。** 压力与相互作用阶段可复用仍有效的格索引，并读取该阶段的坐标和物理字段。积分更新位置后检查格归属，粒子仍在原格时可复用区间并重新判距，越格时更新置换、相关字段和格边界。成员、ghost 集合、布局或网格参数变化时须重新校验绑定。试算重排与索引更新受窗口发布和回滚约束，恢复后按 accepted 版本复用或重建索引。
+
+显式 CSR 保留作三维回归对照，也是固定几何下高复用压力计算的候选优化。一维验证夹具继续按原行列顺序、闭支持域（含零权重边）、自身单计和原容差核对固定 CSR、逐 ID 密度及 owned 和。[P1-07 一维冻结算例](../../validation/baselines/sph-density-1d-v1.md) · [夹具源码](../../validation/sph/fixed_csr/)
+
+**CPU 选型依据。** 独立的 Kokkos 5.2.2 实验于 `2026-11-19T15:42:18+08:00` 至 `2026-11-19T15:47:42+08:00` 在 Apple M2 Pro 上运行。下表取 OpenMP 8 线程、FP64、固定几何的三维密度核，含 262,144 个粒子、229,376 个 owned 目标及 3,895,709 条非自身有向边。三种方法的六种启动顺序各重复三次。累计耗时从格索引与字段重排开始，包含可选建表，至最后一遍密度核完成。各列为 18 轮中位数，峰值 RSS 按单方法独立进程测量。
+
+| 方法 | 1 遍（ms） | 2 遍（ms） | 3 遍（ms） | 8 遍（ms） | 峰值 RSS（MiB） |
+|---|---:|---:|---:|---:|---:|
+| `cellBegin` 直接遍历 | 25.88 | 37.72 | 49.48 | 108.80 | 39.13 |
+| 显式 CSR | 37.89 | 38.90 | 39.92 | 45.32 | 56.72 |
+| 建 CSR 时临时缓存每格区间 | 29.87 | 30.94 | 31.97 | 37.26 | 56.95 |
+
+三种方法的全部 owned 密度逐位一致。单遍直接遍历的累计耗时和峰值内存均最低。普通 CSR 从第 3 遍、临时缓存区间的 CSR 从第 2 遍起在累计耗时中位数上优于直接遍历。独立的固定两遍配对复测中，缓存版在 17/17 组更快，普通 CSR 在 2/17 组更快。Serial 和 OpenMP 4 线程也观察到相同的中位数交叉点。这些遍数仅作该密度负载的实验依据，不设自动切换阈值。本地原始记录位于 `results/sph-density-cell-csr-20261119T073659Z/`。
+
+**后续验收。** OpenMP 按 owned 行比较连续 SoA 读取的线程扩展、带宽或缓存计数，并计入排序、字段搬移、越格更新和归约。CUDA、HIP 分别在 NVIDIA、AMD 实机验证 Kokkos 执行空间，比较按行与组内协作遍历时的合并访问、实际内存流量、同步和峰值空间。各配置均按稳定 ID 核对邻居与密度，并记录端到端耗时。实际压力核须在对应设备上按几何有效期和实测复用次数复验 CSR 的收益；上述独立 CPU 实验只作为规划证据。
 
 <a id="p2-mapping-contract"></a>
 #### CPL-002 已采纳的映射定义
