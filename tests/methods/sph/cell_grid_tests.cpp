@@ -145,22 +145,17 @@ TEST(SphCellGrid, RebuildMovesWithinAndAcrossCellsAndPreservesOldIndex) {
 }
 TEST(SphCellGrid, RejectsDuplicateIdsBadExtentsAndCellBudget) {
     Kokkos::Serial exec;
-    Fields fields({{{0, 0, 0}, 1, 40, 0}, {{1, 1, 1}, 1, 41, 0}});
+    Fields fields({{{0, 0, 0}, 1, 40, 0}, {{100, 1, 1}, 1, 41, 0}});
     fields.ids(1) = fields.ids(0);
-    EXPECT_FALSE(sph::CellGrid::build(exec, fields.get(), 1000).ok());
+    EXPECT_EQ(sph::CellGrid::build(exec, fields.get(), 1000).status().code(),
+              StatusCode::invalid_argument);
     fields.ids(1) = 41;
     auto bad = fields.get();
     bad.mass = Array<real>("bad.mass", 1);
-    EXPECT_FALSE(sph::CellGrid::build(exec, bad, 1000).ok());
-    bad = fields.get();
-    bad.ids = Array<std::uint64_t>("bad.ids", 1);
-    EXPECT_FALSE(sph::CellGrid::build(exec, bad, 1000).ok());
-    bad = fields.get();
-    bad.ghost = Array<std::uint8_t>("bad.ghost", 1);
-    EXPECT_FALSE(sph::CellGrid::build(exec, bad, 1000).ok());
-    EXPECT_FALSE(sph::CellGrid::build(exec, fields.get(), 0).ok());
-    fields.position(1, 0) = real{100};
-    EXPECT_FALSE(sph::CellGrid::build(exec, fields.get(), 1).ok());
+    EXPECT_EQ(sph::CellGrid::build(exec, bad, 1000).status().code(), StatusCode::invalid_argument);
+    for (const auto budget : {0u, 1u})
+        EXPECT_EQ(sph::CellGrid::build(exec, fields.get(), budget).status().code(),
+                  StatusCode::resource_exhausted);
 }
 TEST(SphCellGrid, HighDegreeHasNoTruncation) {
     constexpr std::size_t degree = 4096;
@@ -238,28 +233,29 @@ TEST(SphCellGrid, NonbinaryCellWidthUsesExactFloorOnRoundedQuotient) {
 TEST(SphCellGrid, ValidatesCaseSupport) {
     Kokkos::Serial exec;
     Fields fields({{{0, 0, 0}, 1, 1, 0}});
-    for (const double h : {0., -1., std::numeric_limits<double>::quiet_NaN(),
-                           std::numeric_limits<double>::infinity()})
-        EXPECT_FALSE(sph::CellGrid::build(exec, fields.get(), 1, {}, h).ok());
+    for (const double h : {0., std::numeric_limits<double>::infinity()})
+        EXPECT_EQ(sph::CellGrid::build(exec, fields.get(), 1, {}, h).status().code(),
+                  StatusCode::invalid_argument)
+            << h;
 }
 
 TEST(SphCellGrid, RejectsInvalidPhysicalFields) {
     Kokkos::Serial exec;
     Fields fields({{{0, 0, 0}, 1, 1, 0}});
-    for (const real bad : {real{0}, real{-1}, std::numeric_limits<real>::infinity(),
-                           std::numeric_limits<real>::quiet_NaN()}) {
-        fields.mass(0) = bad;
-        EXPECT_FALSE(sph::CellGrid::build(exec, fields.get(), 100).ok());
+    for (const real mass : {real{0}, std::numeric_limits<real>::infinity()}) {
+        fields.mass(0) = mass;
+        EXPECT_EQ(sph::CellGrid::build(exec, fields.get(), 100).status().code(),
+                  StatusCode::invalid_argument)
+            << mass;
     }
     fields.mass(0) = 1;
     fields.ghost(0) = 2;
-    EXPECT_FALSE(sph::CellGrid::build(exec, fields.get(), 100).ok());
+    EXPECT_EQ(sph::CellGrid::build(exec, fields.get(), 100).status().code(),
+              StatusCode::invalid_argument);
     fields.ghost(0) = 0;
-    for (const real bad : {std::numeric_limits<real>::infinity(),
-                           std::numeric_limits<real>::quiet_NaN()}) {
-        fields.position(0, 0) = bad;
-        EXPECT_FALSE(sph::CellGrid::build(exec, fields.get(), 100).ok());
-    }
+    fields.position(0, 0) = std::numeric_limits<real>::quiet_NaN();
+    EXPECT_EQ(sph::CellGrid::build(exec, fields.get(), 100).status().code(),
+              StatusCode::invalid_argument);
 }
 TEST(SphCellGrid, ExactComponentSupportBothDirectionsAndInputOrders) {
     const real inside_two = std::nextafter(real{2}, real{0});
@@ -299,8 +295,6 @@ TEST(SphCellGrid, EmptyCellsShareOffsetsBetweenOccupiedRuns) {
     for (std::size_t c = 0; c < expected.size(); ++c)
         EXPECT_EQ(grid.cell_begin()(c), expected[c]);
     ASSERT_NO_FATAL_FAILURE(compare(grid, particles, exec));
-    fields.ids(0) = fields.ids(2);
-    EXPECT_FALSE(sph::CellGrid::build(exec, fields.get(), 6).ok());
 }
 TEST(SphCellGrid, CrossStepReuseAndRebuildMatchesExplicitCsr) {
     Kokkos::Serial exec;

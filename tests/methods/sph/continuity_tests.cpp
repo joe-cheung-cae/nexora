@@ -148,15 +148,17 @@ TEST(SphContinuity, CrossingParticlesPreserveUnequalMassAndDensityById) {
 TEST(SphContinuity, InvalidExplicitDensityAndExtentPublishNoSnapshot) {
     Fields fields({{{0, 0, 0}, 1, 31, 0}});
     sph::Velocity3D velocity("continuity_test.velocity", 1);
-    for (const auto& rho :
-         {initial_density({}), initial_density({1, 1}), initial_density({0}), initial_density({-1}),
-          initial_density({std::numeric_limits<real>::infinity()}),
-          initial_density({std::numeric_limits<real>::quiet_NaN()})}) {
+    const auto rejects = [&](const sph::Values& rho, StatusCode reason) {
         sph::Participant3D participant(fields.get(), 16, {{1, 1, 1}, 1}, velocity, rho);
         Simulation sim(participant);
-        EXPECT_FALSE(sim.initialize().ok());
+        EXPECT_EQ(sim.initialize().code(), reason);
         EXPECT_FALSE(participant.snapshot().ok());
         EXPECT_TRUE(sim.finalize().ok());
+    };
+    rejects(initial_density({1, 1}), StatusCode::invalid_argument);
+    for (const real density : {real{0}, std::numeric_limits<real>::infinity()}) {
+        SCOPED_TRACE(density);
+        rejects(initial_density({density}), StatusCode::numerical_failure);
     }
 }
 

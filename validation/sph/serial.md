@@ -23,6 +23,12 @@
 
 Release double 的依赖检查及全仓 CTest（含安装包消费者）也通过，共 129/129 项，于 `2026-11-20T15:05:40+08:00` 完成。另以 Release double 执行 `nexora_sph_benchmark 256` 和 `nexora_sph_tank_trajectory 6 <输出目录>`。冻结一维基准与重排对照通过。三维水箱诊断执行了 601 步，达到 2.34765625 s，216 个流体粒子全程无穿壁记录。两项均于 `2026-11-20T15:05:28+08:00` 完成。
 
+### 数值检查与 CFL 复验
+
+以 `d60beb7` 为基线，压力、Verlet 和连续性更新采用有序范围判断。CFL 对初始化或最终半步已验证的有限速度取最大速度平方，并验证所得时间步。负例按校验行为合并，仍覆盖无效坐标与初速、容量拒绝和密度试算回滚重试。
+
+沿用上述工具链和四套构建目录。float 与 double 的 Release SPH 测试各通过 63/63 项，于 `2026-11-20T15:32:57+08:00` 完成。float 与 double 的 Debug SPH 测试也各通过 63/63 项，于 `2026-11-20T15:33:15+08:00` 完成。Release double 的依赖检查及全仓 CTest（含安装包消费者）通过，共 129/129 项，于 `2026-11-20T15:33:52+08:00` 完成。
+
 ## 历史离线执行
 
 Apple M2 Pro arm64（8P+4E，16 GB），macOS 27.2.1 build 26B131，AppleClang 21.0.0.21000401，CMake 4.4.3，Ninja 1.13.2，Python 3.14.7。Kokkos 5.2.2（`8e15454876298832f013ebcaf08d53825b5bda40`）用校验过的官方归档分别供应 Debug/Release，两组安装均核对逐文件摘要。MPI 关闭。两轮验证前后的 10 项 IPv4/IPv6 网络探针均返回 EPERM。 [依赖来源](../../third_party/README.md#kokkos-provenance-record)

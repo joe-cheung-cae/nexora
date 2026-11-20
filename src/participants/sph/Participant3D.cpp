@@ -439,8 +439,7 @@ Snapshot3D Participant3D::integrate(FieldStamp stamp, double dt) const {
                 for (int axis = 0; axis < 3; ++axis) {
                     const double value = Kokkos::fma(
                         dt, acceleration(row, axis) + gravity_[axis], double(v(row, axis)));
-                    if (Kokkos::isfinite(value) &&
-                        Kokkos::abs(value) <= std::numeric_limits<real>::max())
+                    if (Kokkos::abs(value) <= std::numeric_limits<real>::max())
                         velocity(slot, axis) = static_cast<real>(value);
                     else
                         ++errors;
@@ -461,8 +460,8 @@ Snapshot3D Participant3D::integrate(FieldStamp stamp, double dt) const {
                 const auto previous = old_row(to_old(new_owned(row)));
                 const double value = Kokkos::fma(
                     .5 * dt, rate_n(previous) + rate_star(row), double(rho(previous)));
-                if (Kokkos::isfinite(value) && value > 0 &&
-                    value <= std::numeric_limits<real>::max() && static_cast<real>(value) > 0)
+                if (value > 0 && value <= std::numeric_limits<real>::max() &&
+                    static_cast<real>(value) > 0)
                     corrected(row) = static_cast<real>(value);
                 else
                     ++errors;

@@ -39,9 +39,9 @@ Status finish_kick_3d(const Kokkos::Serial&, const CellGrid& refreshed,
                       const Velocity3D& velocity, const std::array<double, 3>& gravity = {},
                       bool fixed_walls = false);
 
-// Maximum acoustic step for constant h. Input is accepted owned velocity. Empty and stationary
-// fields give C*h/c0. C is an explicit safety factor in (0,1].
-Result<double> cfl_step_3d(const Kokkos::Serial&, const Velocity3D::const_type& accepted_velocity,
+// Maximum acoustic step for constant h. Input velocities must be finite and follow owned rows.
+// Empty and stationary fields give C*h/c0. C is an explicit safety factor in (0,1].
+Result<double> cfl_step_3d(const Kokkos::Serial&, const Velocity3D::const_type& velocity,
                            double sound_speed, double cfl_coefficient, double smoothing_length = 1);
 
 } // namespace nexora::sph

@@ -19,7 +19,7 @@ template <class A, class B> bool overlaps(const A& a, const B& b) {
 }
 
 bool fits_real(double value) {
-    return Kokkos::isfinite(value) && Kokkos::abs(value) <= std::numeric_limits<real>::max();
+    return Kokkos::abs(value) <= std::numeric_limits<real>::max();
 }
 
 // log1p and expm1 retain small pressure perturbations near equilibrium.

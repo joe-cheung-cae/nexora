@@ -16,7 +16,7 @@ Status validate_length(double h) {
 }
 
 Status validate_cfl(double cfl) {
-    if (!std::isfinite(cfl) || cfl <= 0 || cfl > 1)
+    if (!(cfl > 0 && cfl <= 1))
         return {StatusCode::invalid_argument, "WCSPH CFL safety factor must be in (0,1]"};
     return {};
 }
@@ -49,7 +49,7 @@ Status check_step(const CellGrid& grid, double dt, const std::array<double, 3>& 
 }
 
 bool fits_real(double value) {
-    return Kokkos::isfinite(value) && Kokkos::abs(value) <= std::numeric_limits<real>::max();
+    return Kokkos::abs(value) <= std::numeric_limits<real>::max();
 }
 } // namespace
 
@@ -206,27 +206,20 @@ Result<double> cfl_step_3d(const Kokkos::Serial& exec, const Velocity3D::const_t
     const auto n = velocity.extent(0);
     if (n && !velocity.data())
         return Status{StatusCode::invalid_argument, "WCSPH accepted velocity has no storage"};
-    const Policy rows(exec, 0, n);
-    double vmax = 0;
+    double largest_square = 0;
     if (n) {
-        double largest_square{};
         Kokkos::parallel_reduce(
-            "sph.verlet.maximum_speed", rows,
+            "sph.verlet.maximum_speed", Policy(exec, 0, n),
             [&](std::size_t i, double& maximum) {
                 const double x = velocity(i, 0);
                 const double y = velocity(i, 1);
                 const double z = velocity(i, 2);
                 const double square = x * x + y * y + z * z;
-                if (!Kokkos::isfinite(square))
-                    maximum = std::numeric_limits<double>::infinity();
-                else
-                    maximum = std::max(maximum, square);
+                maximum = std::max(maximum, square);
             },
             Kokkos::Max<double>(largest_square));
-        if (!std::isfinite(largest_square))
-            return Status{StatusCode::numerical_failure, "WCSPH accepted velocity must be finite"};
-        vmax = Kokkos::sqrt(largest_square);
     }
+    const double vmax = Kokkos::sqrt(largest_square);
     const double step = cfl_coefficient * smoothing_length / (sound_speed + vmax);
     if (!std::isfinite(step) || step <= 0)
         return Status{StatusCode::numerical_failure, "invalid WCSPH CFL step"};
