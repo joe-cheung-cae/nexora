@@ -1,5 +1,6 @@
 #pragma once
 
+#include <methods/sph/SphBoundary.hpp>
 #include <methods/sph/Verlet3D.hpp>
 #include <nexora/data/FieldStamp.hpp>
 #include <nexora/participant/ParticipantIF.hpp>
@@ -46,12 +47,6 @@ class Snapshot3D {
     detail::ResourceBudget::Ticket record_;
     std::shared_ptr<const Geometry3D> geometry_;
     std::shared_ptr<const Fields> fields_;
-};
-
-struct FixedWallParticles3D {
-    decltype(ParticleFields3D::position) position;
-    decltype(ParticleFields3D::mass) mass;
-    decltype(ParticleFields3D::ids) ids;
 };
 
 class Participant3D final : public ParticipantIF {
@@ -129,8 +124,13 @@ class Participant3D final : public ParticipantIF {
         std::optional<Buffer<Values>> corrected;
         std::optional<Continuity> continuity;
     };
+    struct FixedWallState {
+        detail::ResourceBudget::Ticket reservation;
+        SphBoundary::FixedWall3D boundary;
+    };
     Snapshot3D compute(std::shared_ptr<const Geometry3D> geometry, FieldStamp stamp,
-                       const Velocity3D::const_type& input_velocity, double dt = 0,
+                       const Velocity3D::const_type& input_velocity,
+                       const SphBoundary::FixedWall3D* walls, double dt = 0,
                        const Values::const_type* owned_density = nullptr,
                        IntegrationWorkspace* finished_continuity = nullptr) const;
     Snapshot3D integrate(FieldStamp stamp, double dt);
@@ -143,7 +143,8 @@ class Participant3D final : public ParticipantIF {
     ParticipantId id_;
     detail::ResourceBudget budget_;
     WcsphVerletParameters parameters_;
-    std::optional<FixedWallParticles3D> fixed_walls_;
+    std::optional<FixedWallParticles3D> initial_walls_;
+    std::optional<FixedWallState> fixed_walls_;
     Velocity3D::const_type initial_velocity_;
     std::optional<Values::const_type> initial_density_;
     std::optional<Kokkos::Serial> exec_;

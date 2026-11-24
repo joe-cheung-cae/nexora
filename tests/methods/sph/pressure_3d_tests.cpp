@@ -38,7 +38,7 @@ PressureEvaluation evaluate_pressure(const std::vector<Particle>& input,
     auto density = checked(sph::evaluate_density_3d(exec, grid));
     sph::Values pressure("test.pressure", density.extent(0));
     sph::Acceleration3D acceleration("test.acceleration", density.extent(0));
-    const auto status = sph::evaluate_pressure_3d(exec, grid, parameters, density, pressure,
+    const auto status = sph::evaluate_pressure_3d(exec, grid, sph::TaitEos(parameters), density, pressure,
                                                  acceleration);
     if (!status.ok())
         throw std::runtime_error(status.message());
@@ -188,7 +188,7 @@ TEST(SphWcsphOperators, RejectsInvalidParameters) {
     for (const auto parameters : {sph::WcsphParameters{0, 1, 3}, sph::WcsphParameters{1, 0, 3},
                                   sph::WcsphParameters{1, 1, 0}}) {
         EXPECT_EQ(parameters.validate().code(), StatusCode::invalid_argument);
-        EXPECT_EQ(sph::evaluate_pressure_3d(exec, grid, parameters, density, pressure, acceleration)
+        EXPECT_EQ(sph::evaluate_pressure_3d(exec, grid, sph::TaitEos(parameters), density, pressure, acceleration)
                       .code(), StatusCode::invalid_argument);
     }
 }

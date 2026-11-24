@@ -13,6 +13,7 @@ namespace nexora::sph {
 namespace {
 
 using Ticket = detail::ResourceBudget::Ticket;
+using SphBoundary::FixedWall3D;
 using ScalarRead = ReadField<Values::const_type>;
 using AccelerationRead = ReadField<Acceleration3D::const_type>;
 using Policy = Kokkos::RangePolicy<Kokkos::Serial, Kokkos::IndexType<std::size_t>>;
@@ -128,17 +129,12 @@ struct CombinedWallSources {
 };
 
 CombinedWallSources combine_fixed_walls(const Kokkos::Serial& exec, const ParticleFields3D& fluid,
-                                        const FixedWallParticles3D& walls,
+                                        const FixedWall3D& walls,
                                         const detail::ResourceBudget& budget) {
     const auto nf = fluid.position.extent(0);
-    const auto nw = walls.position.extent(0);
-    if (!source_extents(nf, fluid.position, fluid.mass, fluid.ids, fluid.ghost) ||
-        !source_extents(nw, walls.position, walls.mass, walls.ids))
-        throw Failure{{StatusCode::invalid_argument, "invalid 3D SPH fluid or wall fields"}};
-    if (nw > std::numeric_limits<std::size_t>::max() - nf ||
-        !detail::checked_entity_count(nf + nw).ok())
-        throw Failure{
-            {StatusCode::resource_exhausted, "3D SPH fluid and wall count exceeds capacity"}};
+    const auto nw = walls.particles().extent(0);
+    if (!source_extents(nf, fluid.position, fluid.mass, fluid.ids, fluid.ghost))
+        throw Failure{{StatusCode::invalid_argument, "invalid 3D SPH fluid fields"}};
     std::size_t ghosts{};
     Kokkos::parallel_reduce(
         "sph.wall.validate_ownership", Policy(exec, 0, nf),
@@ -158,15 +154,43 @@ CombinedWallSources combine_fixed_walls(const Kokkos::Serial& exec, const Partic
         allocate<decltype(fluid.ghost)::non_const_type>(exec, "sph.wall.combined_flags", n);
     Kokkos::parallel_for("sph.wall.combine_sources", Policy(exec, 0, n), [&](std::size_t i) {
         const bool wall = i >= nf;
-        const auto j = wall ? i - nf : i;
-        for (int axis = 0; axis < 3; ++axis)
-            position(i, axis) = wall ? walls.position(j, axis) : fluid.position(j, axis);
-        mass(i) = wall ? walls.mass(j) : fluid.mass(j);
-        ids(i) = wall ? walls.ids(j) : fluid.ids(j);
+        if (wall) {
+            const auto& particle = walls.particles()(i - nf);
+            const auto sample = walls.sample(particle.id, 0).value();
+            for (int axis = 0; axis < 3; ++axis)
+                position(i, axis) = sample.position[axis];
+            mass(i) = particle.mass;
+            ids(i) = particle.id;
+        } else {
+            for (int axis = 0; axis < 3; ++axis)
+                position(i, axis) = fluid.position(i, axis);
+            mass(i) = fluid.mass(i);
+            ids(i) = fluid.ids(i);
+        }
         flags(i) = wall;
     });
     exec.fence("3D SPH combined fluid and wall inputs ready");
     return {std::move(ticket), {position, mass, ids, flags}};
+}
+
+template <class Write>
+void sample_fixed_walls(const Kokkos::Serial& exec, const FixedWall3D& walls,
+                        const ParticleFields3D& fields, const char* label, const Write& write) {
+    std::size_t invalid{};
+    Kokkos::parallel_reduce(
+        label, Policy(exec, 0, fields.ids.extent(0)),
+        [&](std::size_t slot, std::size_t& errors) {
+            if (!fields.ghost(slot))
+                return;
+            const auto sample = walls.sample(fields.ids(slot), 0);
+            if (sample.ok())
+                write(slot, sample.value());
+            else
+                ++errors;
+        },
+        invalid);
+    if (invalid)
+        throw Failure{{StatusCode::invalid_state, "fixed wall ID missing from 3D SPH geometry"}};
 }
 
 std::size_t field_bytes(std::size_t rows) {
@@ -227,7 +251,7 @@ Participant3D::Participant3D(ParticleFields3D fluid, std::size_t max_cells,
                              WcsphVerletParameters parameters, Velocity3D::const_type velocity,
                              FixedWallParticles3D walls, ParticipantId id, ResourceLimits limits)
     : Participant3D(std::move(fluid), max_cells, parameters, std::move(velocity), id, limits) {
-    fixed_walls_.emplace(std::move(walls));
+    initial_walls_.emplace(std::move(walls));
 }
 
 Participant3D::Participant3D(ParticleFields3D fluid, std::size_t max_cells,
@@ -243,7 +267,7 @@ Participant3D::Participant3D(ParticleFields3D fluid, std::size_t max_cells,
                              ParticipantId id, ResourceLimits limits)
     : Participant3D(std::move(fluid), max_cells, parameters, std::move(velocity),
                     std::move(density), id, limits) {
-    fixed_walls_.emplace(std::move(walls));
+    initial_walls_.emplace(std::move(walls));
 }
 
 TimeConstraint Participant3D::time_constraint(double) const {
@@ -254,7 +278,8 @@ TimeConstraint Participant3D::time_constraint(double) const {
 }
 
 Snapshot3D Participant3D::compute(std::shared_ptr<const Geometry3D> geometry, FieldStamp stamp,
-                                  const Velocity3D::const_type& input_velocity, double dt,
+                                  const Velocity3D::const_type& input_velocity,
+                                  const FixedWall3D* walls, double dt,
                                   const Values::const_type* owned_density,
                                   IntegrationWorkspace* finished_continuity) const {
     stamp.topology = geometry->topology;
@@ -297,18 +322,34 @@ Snapshot3D Participant3D::compute(std::shared_ptr<const Geometry3D> geometry, Fi
         allocate<Acceleration3D>(*exec_, "sph.participant3d.pressure_acceleration", rows);
     {
         Ticket workspace;
+        WallAcceleration3D wall_acceleration;
+        const auto& sources = geometry->grid.fields();
+        const auto count = sources.ids.extent(0);
+        const bool sample_acceleration = walls && rows && count != rows;
         if (rows != 0) {
-            const auto sources = geometry->grid.fields().ids.extent(0);
-            const auto bytes =
-                pressure_workspace_bytes_per_source(sources != rows, fixed_walls_.has_value());
-            workspace = reserve(require(detail::checked_array_bytes(sources, bytes)));
+            auto bytes = pressure_workspace_bytes_per_source(count != rows, walls != nullptr);
+            if (sample_acceleration)
+                bytes += 3 * sizeof(double);
+            workspace = reserve(require(detail::checked_array_bytes(count, bytes)));
+        }
+        if (sample_acceleration) {
+            wall_acceleration = allocate<WallAcceleration3D>(*exec_, "sph.wall.acceleration", count);
+            sample_fixed_walls(*exec_, *walls, sources, "sph.wall.sample_acceleration",
+                               [&](std::size_t slot, const auto& sample) {
+                                   for (int axis = 0; axis < 3; ++axis)
+                                       wall_acceleration(slot, axis) = sample.acceleration[axis];
+                               });
         }
         auto pressure_write = write_field(pressure, pressure_field(FieldAccess::overwrite), stamp);
         auto acceleration_write =
             write_field(acceleration, acceleration_field(FieldAccess::overwrite), stamp);
-        auto evaluated = evaluate_pressure_3d(
-            *exec_, geometry->grid, parameters_.eos, density_read.view(), pressure_write.view(),
-            acceleration_write.view(), fixed_walls_ ? &parameters_.gravity : nullptr);
+        const TaitEos eos(parameters_.eos);
+        auto evaluated = walls
+            ? evaluate_pressure_3d(*exec_, geometry->grid, eos, density_read.view(),
+                                   pressure_write.view(), acceleration_write.view(),
+                                   wall_acceleration, parameters_.gravity)
+            : evaluate_pressure_3d(*exec_, geometry->grid, eos, density_read.view(),
+                                   pressure_write.view(), acceleration_write.view());
         if (!evaluated.ok())
             throw Failure{std::move(evaluated)};
     }
@@ -322,7 +363,7 @@ Snapshot3D Participant3D::compute(std::shared_ptr<const Geometry3D> geometry, Fi
         if (dt > 0) {
             const auto status =
                 finish_kick_3d(*exec_, geometry->grid, input_velocity, acceleration_read.view(), dt,
-                               write.view(), parameters_.gravity, fixed_walls_.has_value());
+                               write.view(), parameters_.gravity);
             if (!status.ok())
                 throw Failure{status};
         } else {
@@ -374,15 +415,22 @@ Snapshot3D Participant3D::integrate(FieldStamp stamp, double dt) {
     if (!work.stage)
         work.stage.emplace(source_vector("sph.verlet.stage"));
     const auto& half_velocity = work.half_velocity->values;
+    const auto* walls = fixed_walls_ ? &fixed_walls_->boundary : nullptr;
     auto geometry = [&] {
         const auto& position = work.stage->values;
         const auto& fields = *accepted_->fields_;
         const auto kicked =
             kick_drift_3d(*exec_, before, fields.velocity.view(), fields.acceleration.view(), dt,
-                          position, half_velocity, parameters_.gravity, fixed_walls_.has_value());
+                          position, half_velocity, parameters_.gravity);
         if (!kicked.ok())
             throw Failure{kicked};
         const auto& old_fields = before.fields();
+        if (walls)
+            sample_fixed_walls(*exec_, *walls, old_fields, "sph.wall.sample_position",
+                               [&](std::size_t slot, const auto& sample) {
+                                   for (int axis = 0; axis < 3; ++axis)
+                                       position(slot, axis) = sample.position[axis];
+                               });
         const ParticleFields3D updated{position, old_fields.mass, old_fields.ids, old_fields.ghost};
         auto next = prepare_geometry_3d(*exec_, updated, max_cells_, budget_,
                                         parameters_.smoothing_length, accepted_->geometry_.get());
@@ -428,6 +476,13 @@ Snapshot3D Participant3D::integrate(FieldStamp stamp, double dt) {
             for (int axis = 0; axis < 3; ++axis)
                 velocity(slot, axis) = v(row, axis);
         });
+        const auto write_wall_velocity = [&](std::size_t slot, const auto& sample) {
+            for (int axis = 0; axis < 3; ++axis)
+                velocity(slot, axis) = sample.velocity[axis];
+        };
+        if (walls)
+            sample_fixed_walls(*exec_, *walls, before.fields(), "sph.wall.sample_old_velocity",
+                               write_wall_velocity);
         auto status = continuity_rate_3d(*exec_, before, velocity, rate_n);
         if (!status.ok())
             throw Failure{status};
@@ -450,6 +505,9 @@ Snapshot3D Participant3D::integrate(FieldStamp stamp, double dt) {
             invalid);
         if (invalid)
             throw Failure{{StatusCode::numerical_failure, "invalid predicted WCSPH velocity"}};
+        if (walls)
+            sample_fixed_walls(*exec_, *walls, refreshed.fields(), "sph.wall.sample_new_velocity",
+                               write_wall_velocity);
         status = continuity_rate_3d(*exec_, refreshed, velocity, rate_star);
         if (!status.ok())
             throw Failure{status};
@@ -463,7 +521,7 @@ Snapshot3D Participant3D::integrate(FieldStamp stamp, double dt) {
         });
     }
     const Values::const_type completed = corrected;
-    auto result = compute(std::move(geometry), stamp, half_velocity, dt, &completed, &work);
+    auto result = compute(std::move(geometry), stamp, half_velocity, walls, dt, &completed, &work);
     integration_workspace_ = std::move(work);
     return result;
 }
@@ -484,30 +542,47 @@ Status Participant3D::initialize(double time) {
             return {StatusCode::invalid_argument, "3D SPH initial density extent mismatch"};
         if (!source_extents(count, initial_velocity_))
             return {StatusCode::invalid_argument, "3D SPH initial velocity extent mismatch"};
+        std::optional<FixedWallState> walls;
+        if (initial_walls_) {
+            const auto nw = initial_walls_->ids.extent(0);
+            if (!source_extents(nw, initial_walls_->position, initial_walls_->mass,
+                                initial_walls_->ids))
+                return {StatusCode::invalid_argument, "invalid 3D SPH wall fields"};
+            if (nw > std::numeric_limits<std::size_t>::max() - count ||
+                !detail::checked_entity_count(count + nw).ok())
+                return {StatusCode::resource_exhausted, "3D SPH fluid and wall count exceeds capacity"};
+            Ticket reservation;
+            if (nw)
+                reservation = require(budget_.reserve(require(detail::checked_array_bytes(
+                    nw, sizeof(SphBoundary::WallParticle3D)))));
+            walls.emplace(FixedWallState{
+                std::move(reservation),
+                FixedWall3D(require(SphBoundary::capture_wall_particles(exec, *initial_walls_)))});
+        }
         auto geometry = [&] {
-            if (fixed_walls_) {
-                auto combined = combine_fixed_walls(exec, initial_, *fixed_walls_, budget_);
+            if (walls) {
+                auto combined = combine_fixed_walls(exec, initial_, walls->boundary, budget_);
                 return require(prepare_geometry_3d(exec, combined.fields, max_cells_, budget_,
                                                    parameters_.smoothing_length));
             }
             return require(prepare_geometry_3d(exec, initial_, max_cells_, budget_,
                                                parameters_.smoothing_length));
         }();
-        if (!fixed_walls_ &&
-            geometry->grid.owned_slots().extent(0) != geometry->grid.fields().ids.extent(0))
+        if (!walls && geometry->grid.owned_slots().extent(0) != geometry->grid.fields().ids.extent(0))
             return {StatusCode::unsupported, "3D SPH Verlet integration does not support ghosts"};
         FieldStamp stamp;
         stamp.accepted = true;
         stamp.time.physical_time = stamp.valid_from = stamp.valid_until = time;
-        accepted_.emplace(compute(std::move(geometry), stamp, initial_velocity_));
+        accepted_.emplace(compute(std::move(geometry), stamp, initial_velocity_,
+                                  walls ? &walls->boundary : nullptr));
+        fixed_walls_ = std::move(walls);
         initial_ = {};
         initial_velocity_ = {};
         // Release caller storage. Engagement records the explicit-density integration mode,
         // including the valid empty-fluid case.
         if (initial_density_)
             *initial_density_ = {};
-        if (fixed_walls_)
-            *fixed_walls_ = {};
+        initial_walls_.reset();
         stage_ = Stage::initialized;
         return {};
     });
@@ -632,6 +707,7 @@ Status Participant3D::finalize() {
     initial_ = {};
     initial_velocity_ = {};
     initial_density_.reset();
+    initial_walls_.reset();
     fixed_walls_.reset();
     integration_workspace_ = {};
     exec_.reset();

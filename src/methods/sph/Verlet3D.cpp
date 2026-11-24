@@ -39,12 +39,9 @@ Status validate_gravity(const std::array<double, 3>& gravity) {
     return {};
 }
 
-Status check_step(const CellGrid& grid, double dt, const std::array<double, 3>& gravity,
-                  bool fixed_walls) {
+Status check_step(double dt, const std::array<double, 3>& gravity) {
     if (!std::isfinite(dt) || dt <= 0)
         return {StatusCode::invalid_argument, "Verlet step must be finite and positive"};
-    if (!fixed_walls && grid.fields().ids.extent(0) != grid.owned_slots().extent(0))
-        return {StatusCode::unsupported, "Verlet requires an all-owned particle grid"};
     return validate_gravity(gravity);
 }
 
@@ -75,7 +72,7 @@ Status continuity_rate_3d(const Kokkos::Serial& exec, const CellGrid& grid,
                     return;
                 double dot = 0;
                 for (int axis = 0; axis < 3; ++axis) {
-                    const double vj = sources.ghost(j) ? 0 : velocity(j, axis);
+                    const double vj = velocity(j, axis);
                     const double dx = double(sources.position(j, axis)) - sources.position(i, axis);
                     dot += (double(velocity(i, axis)) - vj) * dx;
                 }
@@ -103,8 +100,8 @@ Status kick_drift_3d(const Kokkos::Serial& exec, const CellGrid& accepted,
                      const Velocity3D::const_type& velocity,
                      const Acceleration3D::const_type& acceleration, double dt,
                      const Velocity3D& staged_position, const Velocity3D& half_velocity,
-                     const std::array<double, 3>& gravity, bool fixed_walls) {
-    if (auto s = check_step(accepted, dt, gravity, fixed_walls); !s.ok())
+                     const std::array<double, 3>& gravity) {
+    if (auto s = check_step(dt, gravity); !s.ok())
         return s;
     const auto& position = accepted.fields().position;
     const auto n = position.extent(0);
@@ -117,17 +114,6 @@ Status kick_drift_3d(const Kokkos::Serial& exec, const CellGrid& accepted,
         overlaps(half_velocity, acceleration))
         return {StatusCode::invalid_argument,
                 "Verlet drift fields have invalid extents, storage or output overlap"};
-    if (owned.extent(0) != n) {
-        const auto flags = accepted.fields().ghost;
-        Kokkos::parallel_for("sph.verlet.fixed_wall_positions", Policy(exec, 0, n),
-                             [&](std::size_t slot) {
-                                 if (flags(slot))
-                                     for (int axis = 0; axis < 3; ++axis) {
-                                         staged_position(slot, axis) = position(slot, axis);
-                                         half_velocity(slot, axis) = 0;
-                                     }
-                             });
-    }
     std::size_t invalid{};
     Kokkos::parallel_reduce(
         "sph.verlet.kick_drift", Policy(exec, 0, owned.extent(0)),
@@ -156,9 +142,8 @@ Status kick_drift_3d(const Kokkos::Serial& exec, const CellGrid& accepted,
 Status finish_kick_3d(const Kokkos::Serial& exec, const CellGrid& refreshed,
                       const Velocity3D::const_type& half_velocity,
                       const Acceleration3D::const_type& refreshed_acceleration, double dt,
-                      const Velocity3D& velocity, const std::array<double, 3>& gravity,
-                      bool fixed_walls) {
-    if (auto s = check_step(refreshed, dt, gravity, fixed_walls); !s.ok())
+                      const Velocity3D& velocity, const std::array<double, 3>& gravity) {
+    if (auto s = check_step(dt, gravity); !s.ok())
         return s;
     const auto& old_slot = refreshed.sorted_to_input();
     const auto owned = refreshed.owned_slots();

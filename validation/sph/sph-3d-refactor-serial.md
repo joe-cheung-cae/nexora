@@ -32,3 +32,11 @@
 | 第 2 步 | 9 / 9 | 1 / 1,728 | 20 / 18 | 196,696 |
 
 历史 6³ 轨迹的全程成功预算下界为 133,076 B，低 1 B 时首步预算拒绝。历史数值文件由独立代理从冻结提交复现，集成方复核 Git 摘要及两份运行清单。原始发现列表、构建及运行日志、CSV、Kokkos 事件和预算探测记录位于本机 `results/sph-refactor-execution/`。[历史轨迹](hydrostatic-continuity-repair.md#solver-cleanup-trajectory)
+
+## M1 EOS 与固定壁采样
+
+Tait EOS、Adami 外推和固定壁运动学进入方法目标。压力共享同一对称力核，普通 ghost 按自身支撑域重构。新增 `nexora_sph_tests.SphAdamiWall.WallPressureAndForcesMatchIndependentReference`，逐输入独立对照 double 壁压、窄化后系数、流体表压及加速度。依赖守卫和安装消费限制新私有头。
+
+Serial 验证器在禁网环境执行。Debug float 在 2026-11-24T14:30:00+08:00 完成，常规 CTest 133/133，搬迁消费 1/1，三维发现 60 项。Release double 在 2026-11-24T14:29:44+08:00 完成，常规 CTest 131/131，搬迁消费 1/1，三维发现 59 项。两组一维均 7/7，依赖检查和 Reference Decimal oracle 均通过。Release double 的 6³ 轨迹复现三份完整 CSV 及 `steps.csv` 的所有数值列，受控字节逐步增加 23,360 B，对应 584 个固定壁记录各 40 B。
+
+独立审查在 Release double 另跑 20 项 Adami、压力与连续性用例，未发现需修复问题。单独删去异 ID 重合流体的 `W(0)` 后，新用例在两份输入均检出壁压、系数和加速度误差。恢复原实现复测通过。验证器与审查日志位于本机 `results/sph-refactor-execution/m1/`。

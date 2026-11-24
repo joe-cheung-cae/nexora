@@ -1,6 +1,7 @@
 #include "cell_grid_oracle.hpp"
 #include <gtest/gtest.h>
 #include <limits>
+#include <methods/sph/AdamiWallPressure3D.hpp>
 #include <nexora/simulation/Simulation.hpp>
 #include <numbers>
 #include <participants/sph/Participant3D.hpp>
@@ -75,77 +76,173 @@ TEST(SphAdamiWall, GravityOnlyMatchesFreeFall) {
     EXPECT_TRUE(simulation.finalize().ok());
 }
 
-// The local all-pairs reference keeps the wall at its original coordinates in
-// every snapshot. A detached dry wall exercises the empty support case.
-void check_wall_forces(const sph::Snapshot3D& snapshot, std::vector<Particle> particles,
-                       const sph::WcsphVerletParameters& parameters) {
+struct WallForceReference {
+    std::map<std::uint64_t, real> fluid_pressure;
+    std::map<std::uint64_t, long double> wall_pressure;
+    std::map<std::uint64_t, double> coefficient;
+    std::map<std::uint64_t, std::array<long double, 3>> acceleration;
+};
+
+WallForceReference independent_wall_forces(
+    const std::vector<Particle>& particles, const std::map<std::uint64_t, real>& density,
+    const sph::WcsphVerletParameters& parameters) {
     constexpr long double pi = std::numbers::pi_v<long double>;
-    std::map<std::uint64_t, long double> rho, pressure;
-    std::map<std::uint64_t, std::size_t> rows;
-    for (std::size_t row = 0; row < snapshot.row_count(); ++row)
-        ASSERT_TRUE(rows.emplace(snapshot.row_id(row), row).second);
-    for (auto& p : particles)
-        if (!p.ghost) {
-            ASSERT_TRUE(rows.contains(p.id));
-            p.position = checked(snapshot.position(rows.at(p.id)));
-        }
     const long double rho0 = parameters.eos.reference_density;
     const long double gamma = parameters.eos.gamma;
+    const long double h = parameters.smoothing_length;
     const long double bulk = rho0 * std::pow(parameters.eos.sound_speed, 2) / gamma;
-    // Independently re-evaluate the EOS, wall extrapolation and pair forces at
-    // the evolved fluid density. Continuity has its own time-integration oracle.
-    for (const auto& [id, row] : rows) {
-        rho[id] = snapshot.density(row);
-        pressure[id] = static_cast<real>(bulk * (std::pow(rho[id] / rho0, gamma) - 1));
-    }
     const auto distance = [](const Particle& a, const Particle& b) {
         return std::hypot(static_cast<long double>(a.position[0]) - b.position[0],
                           static_cast<long double>(a.position[1]) - b.position[1],
                           static_cast<long double>(a.position[2]) - b.position[2]);
     };
+    const auto coefficient = [](real p, real rho) { return double(p) / (double(rho) * rho); };
+    WallForceReference result;
+    for (const auto& [id, rho] : density) {
+        const auto p = static_cast<real>(bulk * (std::pow(rho / rho0, gamma) - 1));
+        result.fluid_pressure.emplace(id, p);
+        result.coefficient.emplace(id, coefficient(p, rho));
+    }
     for (const auto& wall : particles) {
         if (!wall.ghost)
             continue;
         long double weight_sum{}, weighted_pressure{};
-        for (const auto& f : particles) {
-            const auto r = distance(wall, f);
-            if (f.ghost || r >= 2)
+        for (const auto& fluid : particles) {
+            const auto q = distance(wall, fluid) / h;
+            if (fluid.ghost || q >= 2)
                 continue;
             const auto weight =
-                (std::pow(2 - r, 3) - 4 * std::pow(std::max(1 - r, 0.L), 3)) / (4 * pi);
+                (std::pow(2 - q, 3) - 4 * std::pow(std::max(1 - q, 0.L), 3)) / (4 * pi);
             long double head{};
             for (int k = 0; k < 3; ++k)
                 head += parameters.gravity[k] *
-                        (static_cast<long double>(wall.position[k]) - f.position[k]);
+                        (static_cast<long double>(wall.position[k]) - fluid.position[k]);
             weight_sum += weight;
-            weighted_pressure += weight * (pressure.at(f.id) + rho.at(f.id) * head);
+            weighted_pressure += weight *
+                (result.fluid_pressure.at(fluid.id) + density.at(fluid.id) * head);
         }
         if (weight_sum > 0) {
-            pressure[wall.id] = weighted_pressure / weight_sum;
-            rho[wall.id] = rho0 * std::pow(1 + pressure.at(wall.id) / bulk, 1 / gamma);
+            const long double raw = weighted_pressure / weight_sum;
+            const auto p = static_cast<real>(raw);
+            const auto rho = static_cast<real>(rho0 * std::pow(1 + p / bulk, 1 / gamma));
+            result.wall_pressure.emplace(wall.id, raw);
+            result.coefficient.emplace(wall.id, coefficient(p, rho));
         }
     }
-    for (const auto& f : particles) {
-        if (f.ghost)
+    for (const auto& fluid : particles) {
+        if (fluid.ghost)
             continue;
-        std::array<long double, 3> a{};
+        std::array<long double, 3> acceleration{};
         for (const auto& other : particles) {
-            const auto r = distance(f, other);
-            if (r == 0 || r >= 2)
+            const auto q = distance(fluid, other) / h;
+            if (q == 0 || q >= 2)
                 continue;
-            const auto grad = r < 1 ? (3 - 2.25L * r) / pi : .75L * (2 - r) * (2 - r) / (pi * r);
-            const auto coefficient = other.mass * grad *
-                                     (pressure.at(f.id) / std::pow(rho.at(f.id), 2) +
-                                      pressure.at(other.id) / std::pow(rho.at(other.id), 2));
+            const auto grad = q < 1 ? (3 - 2.25L * q) / pi : .75L * (2 - q) * (2 - q) / (pi * q);
+            const auto pair = other.mass * grad / std::pow(h, 5) *
+                              (result.coefficient.at(fluid.id) + result.coefficient.at(other.id));
             for (int k = 0; k < 3; ++k)
-                a[k] += coefficient * (static_cast<long double>(f.position[k]) - other.position[k]);
+                acceleration[k] += pair *
+                    (static_cast<long double>(fluid.position[k]) - other.position[k]);
         }
-        const auto row = rows.at(f.id);
-        const auto epsilon = std::numeric_limits<real>::epsilon();
-        EXPECT_NEAR(checked(snapshot.pressure(row)), pressure.at(f.id), 64 * epsilon * bulk);
+        result.acceleration.emplace(fluid.id, acceleration);
+    }
+    return result;
+}
+
+void expect_wall_reference(const sph::Snapshot3D& snapshot, const WallForceReference& reference,
+                           const sph::WcsphVerletParameters& parameters) {
+    const double eps = std::numeric_limits<real>::epsilon();
+    const double c2 = parameters.eos.sound_speed * parameters.eos.sound_speed;
+    const double pressure_scale = parameters.eos.reference_density * c2 / parameters.eos.gamma;
+    ASSERT_EQ(snapshot.row_count(), reference.fluid_pressure.size());
+    for (std::size_t row = 0; row < snapshot.row_count(); ++row) {
+        const auto id = snapshot.row_id(row);
+        ASSERT_TRUE(reference.fluid_pressure.contains(id));
+        EXPECT_NEAR(checked(snapshot.pressure(row)), reference.fluid_pressure.at(id),
+                    64 * eps * pressure_scale);
         const auto observed = checked(snapshot.pressure_acceleration(row));
+        const auto& expected = reference.acceleration.at(id);
         for (int k = 0; k < 3; ++k)
-            EXPECT_NEAR(observed[k], a[k], 128 * epsilon * std::max(bulk / rho0, std::abs(a[k])));
+            EXPECT_NEAR(observed[k], expected[k], 128 * eps *
+                        std::max<long double>(c2 / parameters.eos.gamma, std::abs(expected[k])));
+    }
+}
+
+// The all-pairs reference leaves the detached dry wall at its original coordinates.
+void check_wall_forces(const sph::Snapshot3D& snapshot, std::vector<Particle> particles,
+                       const sph::WcsphVerletParameters& parameters) {
+    std::map<std::uint64_t, real> density;
+    std::map<std::uint64_t, std::size_t> rows;
+    for (std::size_t row = 0; row < snapshot.row_count(); ++row) {
+        ASSERT_TRUE(rows.emplace(snapshot.row_id(row), row).second);
+        density.emplace(snapshot.row_id(row), snapshot.density(row));
+    }
+    for (auto& particle : particles)
+        if (!particle.ghost) {
+            ASSERT_TRUE(rows.contains(particle.id));
+            particle.position = checked(snapshot.position(rows.at(particle.id)));
+        }
+    expect_wall_reference(snapshot, independent_wall_forces(particles, density, parameters),
+                          parameters);
+}
+
+TEST(SphAdamiWall, WallPressureAndForcesMatchIndependentReference) {
+    const std::vector<Particle> fluid{
+        {{.875, .5, 0}, 2.5, 20, 0}, {{.125, 0, 0}, 1.5, 40, 0}};
+    const Particle wall{{.125, 0, 0}, 4, 99, 1};
+    auto particles = fluid;
+    particles.push_back(wall);
+    const sph::WcsphVerletParameters parameters{{1, 2, 3}, .75, {-.25, .125, -.375}, 1.25};
+    const sph::TaitEos eos(parameters.eos);
+    const std::array<double, 3> fixed_acceleration{};
+    const Kokkos::Serial exec;
+    const auto grid = checked(sph::CellGrid::build(exec, Fields(particles).get(), 64, {},
+                                                   parameters.smoothing_length));
+    const auto& sources = grid.fields();
+    const auto owned = grid.owned_slots();
+    sph::CellGrid::Indices::non_const_type row_of_slot("wall_test.row_of_slot", particles.size());
+    LocalIndex wall_slot{};
+    for (std::size_t slot = 0; slot < particles.size(); ++slot)
+        if (sources.ids(slot) == wall.id)
+            wall_slot = static_cast<LocalIndex>(slot);
+    ASSERT_EQ(sources.ids(wall_slot), wall.id);
+    for (std::size_t row = 0; row < fluid.size(); ++row)
+        row_of_slot(owned(row)) = static_cast<LocalIndex>(row);
+
+    const Fields fluid_fields(fluid), wall_fields({wall});
+    const sph::FixedWallParticles3D boundary{wall_fields.position, wall_fields.mass, wall_fields.ids};
+    const sph::Velocity3D velocity("wall_test.velocity", fluid.size());
+    for (const real coincident_density : {real{1.125}, real{1.375}}) {
+        SCOPED_TRACE(coincident_density);
+        // The offset fluid marks the wall. Only the coincident fluid's density changes.
+        const std::map<std::uint64_t, real> density{{20, real{1.25}}, {40, coincident_density}};
+        const auto reference = independent_wall_forces(particles, density, parameters);
+        sph::Values owned_density("wall_test.owned_density", fluid.size());
+        sph::Values owned_pressure("wall_test.owned_pressure", fluid.size());
+        sph::Values input_density("wall_test.input_density", fluid.size());
+        for (std::size_t row = 0; row < fluid.size(); ++row) {
+            const auto id = sources.ids(owned(row));
+            owned_density(row) = density.at(id);
+            owned_pressure(row) = reference.fluid_pressure.at(id);
+            input_density(row) = density.at(fluid[row].id);
+        }
+        const double raw = sph::wall_pressure(grid, wall_slot, row_of_slot, owned_density,
+                                               owned_pressure, fixed_acceleration, parameters.gravity);
+        const auto coefficient = sph::wall_coefficient(grid, wall_slot, row_of_slot, owned_density,
+                                                       owned_pressure, fixed_acceleration,
+                                                       parameters.gravity, eos);
+        ASSERT_TRUE(coefficient.has_value());
+        EXPECT_NEAR(raw, reference.wall_pressure.at(wall.id),
+                    32 * std::numeric_limits<double>::epsilon());
+        EXPECT_NEAR(*coefficient, reference.coefficient.at(wall.id),
+                    16 * std::numeric_limits<real>::epsilon());
+
+        sph::Participant3D participant(fluid_fields.get(), 64, parameters, velocity, input_density,
+                                       boundary);
+        Simulation simulation(participant);
+        ASSERT_TRUE(simulation.initialize().ok());
+        expect_wall_reference(checked(participant.snapshot()), reference, parameters);
+        EXPECT_TRUE(simulation.finalize().ok());
     }
 }
 
@@ -165,7 +262,10 @@ TEST(SphAdamiWall, FixedSourcesMatchIndependentWallForcesAcrossRestore) {
     Simulation simulation(participant);
     ASSERT_TRUE(simulation.initialize().ok());
     ASSERT_TRUE(simulation.prepare().ok());
-    fixed.position(0, 2) = 10; // caller may reuse these buffers after initialization
+    // Caller may reuse all wall input buffers after initialization.
+    fixed.position(0, 2) = 10;
+    fixed.mass(0) = 7;
+    fixed.ids(0) = 33;
     fluid.insert(fluid.end(), walls.begin(), walls.end());
     const auto initial = checked(participant.snapshot());
     ASSERT_EQ(initial.row_count(), 2u);

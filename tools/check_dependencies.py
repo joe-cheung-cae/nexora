@@ -125,6 +125,14 @@ FIXED_CSR_CONSUMERS = {
     "nexora_sph_benchmark": Path("benchmarks/sph/sph_benchmark.cpp"),
 }
 SPH_CELL_GRID_TEST = Path("tests/methods/sph/cell_grid_tests.cpp")
+SPH_ADAMI_TEST = SPH_CELL_GRID_TEST.with_name("adami_wall_tests.cpp")
+SPH_ADAMI_HEADER = "methods/sph/AdamiWallPressure3D.hpp"
+SPH_ADAMI_CONSUMERS = {
+    SPH_ADAMI_TEST,
+    Path("src") / SPH_ADAMI_HEADER,
+    Path("src") / Path(SPH_ADAMI_HEADER).with_suffix(".cpp"),
+    Path(*SPH_METHOD_DIR) / "Pressure3D.cpp",
+}
 SPH_PRESSURE_TEST = SPH_CELL_GRID_TEST.with_name("pressure_3d_tests.cpp")
 SPH_VERLET_TEST = SPH_CELL_GRID_TEST.with_name("verlet_window_tests.cpp")
 SPH_HYDROSTATIC_INITIAL_TEST = SPH_CELL_GRID_TEST.with_name("hydrostatic_initial_tests.cpp")
@@ -138,7 +146,7 @@ SPH_TARGET_DIRS = {
     **{target: source.parent for target, source in FIXED_CSR_CONSUMERS.items()},
 }
 SPH_PRESSURE_ORACLE = SPH_CELL_GRID_TEST.with_name("wcsph_oracle.hpp")
-SPH_WINDOW_TESTS = {SPH_CELL_GRID_TEST.with_name("adami_wall_tests.cpp"),
+SPH_WINDOW_TESTS = {SPH_ADAMI_TEST,
                     SPH_CELL_GRID_TEST.with_name("hydrostatic_tank_tests.cpp"),
                     SPH_VERLET_TEST, SPH_HYDROSTATIC_INITIAL_TEST, SPH_CONTINUITY_TEST}
 SPH_GRID_ORACLE = SPH_CELL_GRID_TEST.with_name("cell_grid_oracle.hpp")
@@ -210,7 +218,17 @@ def check_kokkos_header(relative: Path, scope: str, module: str, header: str) ->
 
 def check_internal_include(relative: Path, scope: str, header: str) -> list[str]:
     """Enforce downward use of implementation-only headers."""
-    parts = [part for part in header.replace("\\", "/").split("/") if part not in {"", "."}]
+    spelling = header.replace("\\", "/")
+    parts = [part for part in spelling.split("/") if part not in {"", "."}]
+    if parts and (parts[0] in {"methods", "participants"} or
+                  Path(parts[-1]).name == Path(SPH_ADAMI_HEADER).name or
+                  parts[0] == ".."):
+        source_root = ROOT / "src"
+        for include_dir in (ROOT / relative.parent, source_root):
+            resolved = (include_dir / spelling).resolve()
+            if resolved.is_file() and resolved.is_relative_to(source_root):
+                parts = list(resolved.relative_to(source_root).parts)
+                break
     if not parts:
         return []
     location = relative.parts
@@ -227,6 +245,10 @@ def check_internal_include(relative: Path, scope: str, header: str) -> list[str]
         if relative.parent == FIXED_CSR_DIR or relative in FIXED_CSR_CONSUMERS.values():
             return []
         return [f"{relative}: {header} is private to the fixed CSR fixture, test and benchmark"]
+    if parts[-1] == Path(SPH_ADAMI_HEADER).name:
+        if "/".join(parts) == SPH_ADAMI_HEADER and relative in SPH_ADAMI_CONSUMERS:
+            return []
+        return [f"{relative}: {header} is private to Adami pressure evaluation and its regression"]
     if parts[-1] == SPH_PRESSURE_ORACLE.name:
         if relative in {SPH_PRESSURE_TEST, SPH_VERLET_TEST}:
             return []
@@ -543,6 +565,23 @@ def policy_self_test() -> list[str]:
                  *FIXED_CSR_CONSUMERS.values()):
         if not check_internal_include(path, path.parts[0], "participants/sph/Participant3D.hpp"):
             failures.append(f"checker self-test failed to reject the SPH participant in {path}")
+    for path in SPH_ADAMI_CONSUMERS:
+        if check_internal_include(path, path.parts[0], SPH_ADAMI_HEADER):
+            failures.append(f"checker self-test failed to allow Adami pressure use in {path}")
+    if check_internal_include(SPH_ADAMI_TEST, "tests", f"../../../src/{SPH_ADAMI_HEADER}"):
+        failures.append("checker self-test failed to allow relative Adami test include")
+    if check_internal_include(Path(*SPH_METHOD_DIR) / "Pressure3D.cpp", "src",
+                              Path(SPH_ADAMI_HEADER).name):
+        failures.append("checker self-test failed to allow local Adami pressure include")
+    for path in (sph_method, sph_participant, SPH_CELL_GRID_TEST, SPH_GRID_ORACLE,
+                 REFERENCE_COMMAND_SOURCE, Path("include/nexora/core/Types.hpp"),
+                 package_consumer, *FIXED_CSR_CONSUMERS.values()):
+        relative_header = "../" * len(path.parent.parts) + "src/" + SPH_ADAMI_HEADER
+        for header in (SPH_ADAMI_HEADER, relative_header):
+            if not check_internal_include(path, path.parts[0], header):
+                failures.append(f"checker self-test failed to keep Adami pressure out of {path}")
+    if not check_internal_include(sph_method, "src", "../../participants/sph/Participant3D.hpp"):
+        failures.append("checker self-test failed to reject a relative method-to-participant include")
     cell_grid_header = "methods/sph/neighbors/CellGrid.hpp"
     if check_internal_include(SPH_CELL_GRID_TEST, "tests", cell_grid_header):
         failures.append("checker self-test failed to allow the SPH cell-grid test to include internals")

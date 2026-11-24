@@ -1,10 +1,13 @@
 #include "Pressure3D.hpp"
 
+#include "AdamiWallPressure3D.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <optional>
 
 namespace nexora::sph {
 namespace {
@@ -22,41 +25,26 @@ bool fits_real(double value) {
     return Kokkos::abs(value) <= std::numeric_limits<real>::max();
 }
 
-// log1p and expm1 retain small pressure perturbations near equilibrium.
-double tait_pressure(double rho, const WcsphParameters& p, double bulk_modulus) {
-    const double difference = rho - p.reference_density;
-    const double log_ratio = Kokkos::abs(difference) <= .5 * p.reference_density
-                                 ? Kokkos::log1p(difference / p.reference_density)
-                                 : Kokkos::log(rho / p.reference_density);
-    return bulk_modulus * Kokkos::expm1(p.gamma * log_ratio);
+bool prepare_source(const TaitEos& eos, real rho, real& pressure, double& coefficient) {
+    if (!Kokkos::isfinite(rho) || rho <= 0)
+        return false;
+    const double raw = eos.pressure(rho);
+    if (!fits_real(raw))
+        return false;
+    pressure = static_cast<real>(raw);
+    coefficient = double(pressure) / (double(rho) * rho);
+    return true;
 }
 
-double inverse_tait(double pressure, const WcsphParameters& p, double bulk_modulus) {
-    return p.reference_density * Kokkos::exp(Kokkos::log1p(pressure / bulk_modulus) / p.gamma);
-}
-
-double wall_pressure(const CellGrid& grid, LocalIndex wall, const std::array<double, 3>& gravity,
-                     const Kokkos::View<LocalIndex*, Kokkos::HostSpace>& fluid_row,
-                     const Values::const_type& density, const Values& pressure) {
-    double numerator = 0;
-    double weights = 0;
-    const auto& fields = grid.fields();
-    const double h = grid.smoothing_length();
-    grid.for_each_neighbor_of_slot(wall, [&](LocalIndex f, double d2) {
-        if (fields.ghost(f))
-            return;
-        // The common h^-3 normalization cancels in the weighted wall average.
-        const double w = m4_weight_3d(Kokkos::sqrt(d2) / h);
-        const auto row = fluid_row(f);
-        double head = 0;
-        for (int axis = 0; axis < 3; ++axis) {
-            const double dx = double(fields.position(wall, axis)) - fields.position(f, axis);
-            head += gravity[axis] * dx;
-        }
-        numerator += (pressure(row) + density(row) * head) * w;
-        weights += w;
-    });
-    return numerator / weights;
+std::optional<double> ghost_source_coefficient(const CellGrid& grid, LocalIndex slot,
+                                                const TaitEos& eos) {
+    const double density = density_at_slot_3d(grid, slot);
+    real pressure{};
+    double coefficient{};
+    if (!fits_real(density) ||
+        !prepare_source(eos, static_cast<real>(density), pressure, coefficient))
+        return std::nullopt;
+    return coefficient;
 }
 
 bool contributes(double distance_squared, double support_squared) {
@@ -83,29 +71,18 @@ acceleration_at_slot(const CellGrid& grid, LocalIndex i,
     return a;
 }
 
-} // namespace
+struct WallSources {
+    const WallAcceleration3D::const_type& acceleration;
+    const std::array<double, 3>& gravity;
+};
 
-std::size_t pressure_workspace_bytes_per_source(bool has_ghosts, bool fixed_walls) {
-    const auto per_ghost = sizeof(std::uint8_t) + (fixed_walls ? sizeof(LocalIndex) : 0);
-    return sizeof(double) + (has_ghosts ? per_ghost : 0);
-}
-
-Status WcsphParameters::validate() const {
-    if (!std::isfinite(reference_density) || reference_density <= 0 ||
-        !std::isfinite(sound_speed) || sound_speed <= 0 || !std::isfinite(gamma) || gamma <= 0)
-        return {StatusCode::invalid_argument,
-                "WCSPH reference density, sound speed and gamma must be finite and positive"};
-    return {};
-}
-
-Status evaluate_pressure_3d(const Kokkos::Serial& exec, const CellGrid& grid,
-                            const WcsphParameters& parameters, const Values::const_type& density,
-                            const Values& pressure, const Acceleration3D& acceleration,
-                            const std::array<double, 3>* wall_gravity) {
-    if (auto s = parameters.validate(); !s.ok())
+Status evaluate(const Kokkos::Serial& exec, const CellGrid& grid, const TaitEos& eos,
+                const Values::const_type& density, const Values& pressure,
+                const Acceleration3D& acceleration, const std::optional<WallSources>& walls) {
+    if (auto s = eos.validate(); !s.ok())
         return s;
-    if (wall_gravity && !std::all_of(wall_gravity->begin(), wall_gravity->end(),
-                                     [](double x) { return std::isfinite(x); }))
+    if (walls && !std::all_of(walls->gravity.begin(), walls->gravity.end(),
+                              [](double x) { return std::isfinite(x); }))
         return {StatusCode::invalid_argument, "wall gravity must be finite"};
     const auto& rows = grid.owned_slots();
     const auto count = rows.extent(0);
@@ -119,14 +96,14 @@ Status evaluate_pressure_3d(const Kokkos::Serial& exec, const CellGrid& grid,
     if (!count)
         return {};
     const auto n = grid.fields().ids.extent(0);
+    if (walls && n != count &&
+        (walls->acceleration.extent(0) != n || !walls->acceleration.data()))
+        return {StatusCode::invalid_argument, "Adami wall acceleration must follow source slots"};
     const auto& ghost = grid.fields().ghost;
     const double h = grid.smoothing_length();
     const double support = grid.support_radius();
     const double support_squared = support * support;
     const double inverse_h5 = 1 / (h * h * h * h * h);
-    const double bulk_modulus =
-        parameters.reference_density * parameters.sound_speed * parameters.sound_speed /
-        parameters.gamma;
     try {
         Kokkos::View<double*, Kokkos::HostSpace> coefficient(
             Kokkos::view_alloc(exec, Kokkos::WithoutInitializing,
@@ -138,13 +115,13 @@ Status evaluate_pressure_3d(const Kokkos::Serial& exec, const CellGrid& grid,
         // and coincident ghosts need no pressure or reconstruction of their own density.
         const Policy owned(exec, 0, count);
         if (n != count) {
-            if (wall_gravity)
+            if (walls)
                 fluid_row = decltype(fluid_row)(
                     Kokkos::view_alloc(exec, Kokkos::WithoutInitializing, "sph.wall.fluid_row"), n);
             needed = decltype(needed)(Kokkos::view_alloc(exec, "sph.pressure.needed_ghost"), n);
             Kokkos::parallel_for("sph.pressure.mark_ghosts", owned, [&](std::size_t row) {
                 const auto i = rows(row);
-                if (wall_gravity)
+                if (walls)
                     fluid_row(i) = static_cast<LocalIndex>(row);
                 grid.for_each_neighbor_of_slot(i, [&](LocalIndex j, double d2) {
                     if (ghost(j) && contributes(d2, support_squared))
@@ -152,21 +129,11 @@ Status evaluate_pressure_3d(const Kokkos::Serial& exec, const CellGrid& grid,
                 });
             });
         }
-        const auto prepare_source = [&](LocalIndex slot, double rho, real& p) {
-            if (!Kokkos::isfinite(rho) || rho <= 0)
-                return false;
-            const double raw = tait_pressure(rho, parameters, bulk_modulus);
-            if (!fits_real(raw))
-                return false;
-            p = static_cast<real>(raw);
-            coefficient(slot) = double(p) / (rho * rho);
-            return true;
-        };
         std::size_t invalid{};
         Kokkos::parallel_reduce(
             "sph.pressure.owned_eos", owned,
             [&](std::size_t row, std::size_t& errors) {
-                if (!prepare_source(rows(row), density(row), pressure(row)))
+                if (!prepare_source(eos, density(row), pressure(row), coefficient(rows(row))))
                     ++errors;
             },
             invalid);
@@ -174,40 +141,32 @@ Status evaluate_pressure_3d(const Kokkos::Serial& exec, const CellGrid& grid,
             return {StatusCode::numerical_failure,
                     "invalid owned WCSPH density or pressure exceeds real range"};
         if (n != count) {
+            const CellGrid::Indices row_of_slot = fluid_row;
+            const Values::const_type owned_pressure = pressure;
             Kokkos::parallel_reduce(
                 "sph.pressure.ghost_eos", Policy(exec, 0, n),
                 [&](std::size_t slot, std::size_t& errors) {
                     if (!needed(slot))
                         return;
                     const auto j = static_cast<LocalIndex>(slot);
-                    if (wall_gravity) {
-                        const double raw =
-                            wall_pressure(grid, j, *wall_gravity, fluid_row, density, pressure);
-                        if (!fits_real(raw)) {
-                            ++errors;
-                            return;
-                        }
-                        const real p = static_cast<real>(raw);
-                        const double rho = inverse_tait(p, parameters, bulk_modulus);
-                        if (!fits_real(rho) || static_cast<real>(rho) <= 0) {
-                            ++errors;
-                            return;
-                        }
-                        const double wall_density = static_cast<real>(rho);
-                        coefficient(j) = double(p) / (wall_density * wall_density);
-                        return;
-                    }
-                    const double rho = density_at_slot_3d(grid, j);
-                    real p{};
-                    if (!fits_real(rho) || !prepare_source(j, static_cast<real>(rho), p))
+                    const auto source = walls
+                        ? wall_coefficient(
+                              grid, j, row_of_slot, density, owned_pressure,
+                              {walls->acceleration(j, 0), walls->acceleration(j, 1),
+                               walls->acceleration(j, 2)},
+                              walls->gravity, eos)
+                        : ghost_source_coefficient(grid, j, eos);
+                    if (source)
+                        coefficient(j) = *source;
+                    else
                         ++errors;
                 },
                 invalid);
             if (invalid)
                 return {StatusCode::numerical_failure,
-                        wall_gravity ? "invalid Adami wall pressure or inverse Tait density"
-                                     : "invalid reconstructed ghost WCSPH density or pressure "
-                                       "exceeds real range"};
+                        walls ? "invalid Adami wall pressure or inverse Tait density"
+                              : "invalid reconstructed ghost WCSPH density or pressure "
+                                "exceeds real range"};
         }
         const decltype(coefficient)::const_type force_coefficient = coefficient;
         Kokkos::parallel_reduce(
@@ -234,4 +193,26 @@ Status evaluate_pressure_3d(const Kokkos::Serial& exec, const CellGrid& grid,
         return {StatusCode::execution_failure, "cannot evaluate WCSPH pressure acceleration"};
     }
 }
+} // namespace
+
+std::size_t pressure_workspace_bytes_per_source(bool has_ghosts, bool adami_walls) {
+    const auto per_ghost = sizeof(std::uint8_t) + (adami_walls ? sizeof(LocalIndex) : 0);
+    return sizeof(double) + (has_ghosts ? per_ghost : 0);
+}
+
+Status evaluate_pressure_3d(const Kokkos::Serial& exec, const CellGrid& grid, const TaitEos& eos,
+                            const Values::const_type& density, const Values& pressure,
+                            const Acceleration3D& acceleration) {
+    return evaluate(exec, grid, eos, density, pressure, acceleration, std::nullopt);
+}
+
+Status evaluate_pressure_3d(const Kokkos::Serial& exec, const CellGrid& grid, const TaitEos& eos,
+                            const Values::const_type& density, const Values& pressure,
+                            const Acceleration3D& acceleration,
+                            const WallAcceleration3D::const_type& wall_acceleration,
+                            const std::array<double, 3>& gravity) {
+    return evaluate(exec, grid, eos, density, pressure, acceleration,
+                    WallSources{wall_acceleration, gravity});
+}
+
 } // namespace nexora::sph

@@ -22,6 +22,7 @@ string(CONCAT private_header_pattern
     "/(FieldIssuer|ExternalField|TransportBuilder|TransportReceiver|"
     "EntityCapacity|EntityOrder|Permutation|CsrAdjacency|StructureState|ResourceBudget|"
     "fixed_csr/.*|sph_fixture|Density|Density3D|Participant|Participant3D|Geometry3D|GeometryVersions3D|Pressure3D|Verlet3D|cell_grid_oracle|wcsph_oracle|"
+    "AdamiWallPressure3D|TaitEos|SphBoundary|"
     "(methods|participants)/(reference|sph)/.*)[.]hpp$")
 list(FILTER private_headers INCLUDE REGEX "${private_header_pattern}")
 if(private_headers)
