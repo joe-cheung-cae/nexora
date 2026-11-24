@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 #include <iomanip>
 #include <limits>
+#include <methods/sph/Verlet3D.hpp>
 #include <nexora/simulation/Simulation.hpp>
 #include <numbers>
 #include <participants/sph/Participant3D.hpp>
@@ -15,6 +16,15 @@ sph::Values initial_density(std::initializer_list<real> entries) {
     sph::Values result("continuity_test.density", entries.size());
     std::copy(entries.begin(), entries.end(), result.data());
     return result;
+}
+
+TEST(SphVerletOperators, CflReductionIncludesNonfiniteVelocityAmongFiniteRows) {
+    Kokkos::Serial exec;
+    sph::Velocity3D velocity("test.cfl_velocity", 2);
+    velocity(0, 1) = std::numeric_limits<real>::quiet_NaN();
+    velocity(1, 2) = 1;
+    EXPECT_EQ(sph::cfl_step_3d(exec, velocity, 1, 1).status().code(),
+              StatusCode::numerical_failure);
 }
 
 TEST(SphContinuity, StationaryUniformDensityIsIndependentOfKernelMassSum) {
@@ -180,7 +190,7 @@ void check_density_failure(real initial, real mass, real speed, double failed_dt
     ASSERT_LE(failed_dt, participant.time_constraint(0).maximum_step);
     const auto failure = sim.advance(failed_dt);
     EXPECT_EQ(failure.code(), StatusCode::numerical_failure);
-    EXPECT_NE(failure.message().find("corrected WCSPH density"), std::string::npos)
+    EXPECT_NE(failure.message().find("owned WCSPH density"), std::string::npos)
         << failure.message();
     EXPECT_EQ(sim.time().accepted_steps, 0u);
     const auto restored = checked(participant.snapshot());

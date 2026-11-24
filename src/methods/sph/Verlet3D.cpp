@@ -143,18 +143,13 @@ Status kick_drift_3d(const Kokkos::Serial& exec, const CellGrid& accepted,
                 }
                 const real half = static_cast<real>(kicked);
                 const double drifted = Kokkos::fma(dt, double(half), double(position(slot, axis)));
-                if (!fits_real(drifted)) {
-                    ++errors;
-                    continue;
-                }
                 half_velocity(slot, axis) = half;
-                staged_position(slot, axis) = static_cast<real>(drifted);
+                staged_position(slot, axis) = narrow_step_value(drifted);
             }
         },
         invalid);
     if (invalid)
-        return {StatusCode::numerical_failure,
-                "Verlet half velocity or trial position exceeds real range"};
+        return {StatusCode::numerical_failure, "Verlet half velocity exceeds real range"};
     return {};
 }
 
@@ -174,23 +169,12 @@ Status finish_kick_3d(const Kokkos::Serial& exec, const CellGrid& refreshed,
         overlaps(velocity, refreshed.fields().position))
         return {StatusCode::invalid_argument,
                 "Verlet final kick fields have invalid extents, storage or output overlap"};
-    std::size_t invalid{};
-    Kokkos::parallel_reduce(
-        "sph.verlet.finish_kick", Policy(exec, 0, n),
-        [&](std::size_t i, std::size_t& errors) {
-            for (int axis = 0; axis < 3; ++axis) {
-                const double kicked = Kokkos::fma(
-                    .5 * dt, refreshed_acceleration(i, axis) + gravity[axis],
-                    double(half_velocity(old_slot(owned(i)), axis)));
-                if (fits_real(kicked))
-                    velocity(i, axis) = static_cast<real>(kicked);
-                else
-                    ++errors;
-            }
-        },
-        invalid);
-    if (invalid)
-        return {StatusCode::numerical_failure, "Verlet final velocity exceeds real range"};
+    Kokkos::parallel_for("sph.verlet.finish_kick", Policy(exec, 0, n), [&](std::size_t i) {
+        for (int axis = 0; axis < 3; ++axis)
+            velocity(i, axis) = narrow_step_value(Kokkos::fma(
+                .5 * dt, refreshed_acceleration(i, axis) + gravity[axis],
+                double(half_velocity(old_slot(owned(i)), axis))));
+    });
     return {};
 }
 
@@ -215,7 +199,10 @@ Result<double> cfl_step_3d(const Kokkos::Serial& exec, const Velocity3D::const_t
                 const double y = velocity(i, 1);
                 const double z = velocity(i, 2);
                 const double square = x * x + y * y + z * z;
-                maximum = std::max(maximum, square);
+                // A NaN row must also yield no usable acoustic step.
+                maximum = std::max(maximum, Kokkos::isnan(square)
+                                                ? std::numeric_limits<double>::infinity()
+                                                : square);
             },
             Kokkos::Max<double>(largest_square));
     }

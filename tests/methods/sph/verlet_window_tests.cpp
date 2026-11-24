@@ -427,6 +427,49 @@ TEST(SphVerletWindow, GridCapacityFailureRestoresAllFieldsAndAllowsShorterStep) 
     ASSERT_NO_FATAL_FAILURE(check_trajectory(before, initial, parameters.eos, 0));
 }
 
+TEST(SphVerletWindow, DriftOverflowRestoresAndSmallerStepSucceeds) {
+    Fields fields({{{0, 0, 0}, 1, 11, 0}});
+    const double gravity = std::numeric_limits<real>::max() / 4;
+    const sph::WcsphVerletParameters parameters{{1, 1, 1}, 1, {gravity, 0, 0}, 8};
+    sph::Velocity3D velocity("test.velocity", 1);
+    sph::Values density("test.density", 1);
+    density(0) = 1;
+    sph::Participant3D participant(fields.get(), 1, parameters, velocity, density);
+    Simulation simulation(participant);
+    ASSERT_TRUE(simulation.initialize().ok());
+    ASSERT_TRUE(simulation.prepare().ok());
+    const auto before = checked(participant.snapshot());
+    ASSERT_EQ(simulation.advance(4).code(), StatusCode::numerical_failure);
+    EXPECT_EQ(checked(participant.snapshot()).stamp, before.stamp);
+    EXPECT_EQ(simulation.time().accepted_time, 0);
+    const double dt = std::ldexp(1.0, -std::numeric_limits<real>::max_exponent / 2);
+    ASSERT_TRUE(simulation.advance(dt).ok());
+    const auto after = checked(participant.snapshot());
+    EXPECT_EQ(checked(after.position(0))[0], static_cast<real>(.5 * dt * gravity * dt));
+    EXPECT_EQ(checked(after.velocity(0))[0], static_cast<real>(gravity * dt));
+    ASSERT_TRUE(simulation.finalize().ok());
+}
+
+#if !NEXORA_ENABLE_DOUBLE_PRECISION
+TEST(SphVerletWindow, DriftJustAboveFloatRangeCannotRoundBackToLargestPosition) {
+    const real largest = std::numeric_limits<real>::max();
+    Fields fields({{{largest, 0, 0}, 1, 11, 0}});
+    sph::Velocity3D velocity("test.velocity", 1);
+    sph::Values density("test.density", 1);
+    density(0) = 1;
+    const sph::WcsphVerletParameters parameters{{1, 1, 1}, 1, {0x1p100, 0, 0}, 0x1p70};
+    sph::Participant3D participant(fields.get(), 1, parameters, velocity, density);
+    Simulation simulation(participant);
+    ASSERT_TRUE(simulation.initialize().ok());
+    ASSERT_TRUE(simulation.prepare().ok());
+    // The double drift is FLT_MAX + 2^99, below the midpoint for rounding to infinity.
+    EXPECT_EQ(simulation.advance(1).code(), StatusCode::numerical_failure);
+    EXPECT_EQ(simulation.time().accepted_steps, 0u);
+    EXPECT_EQ(checked(checked(participant.snapshot()).position(0))[0], largest);
+    ASSERT_TRUE(simulation.finalize().ok());
+}
+#endif
+
 TEST(SphVerletWindow, OwnsInitialBuffersDuringBallisticStep) {
     const sph::WcsphVerletParameters parameters{{1, .0625, 3}, .5};
     const Trajectory initial{{{{0, 0, 0}, 1, 11, 0}}, {{11, {.125, 0, 0}}}};

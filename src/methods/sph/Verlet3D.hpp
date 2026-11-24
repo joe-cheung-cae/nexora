@@ -3,12 +3,24 @@
 #include "Pressure3D.hpp"
 
 #include <array>
+#include <limits>
+#include <type_traits>
 
 namespace nexora::sph {
 
 using Velocity3D = Acceleration3D;
 
 using DensityRate3D = Kokkos::View<double*, Kokkos::HostSpace>;
+
+// Keep overflow visible to the next operator even when a value just above FLT_MAX
+// would round back to a finite float.
+KOKKOS_INLINE_FUNCTION real narrow_step_value(double value) {
+    if constexpr (std::is_same_v<real, float>) {
+        if (Kokkos::abs(value) > std::numeric_limits<float>::max())
+            value = Kokkos::copysign(std::numeric_limits<double>::infinity(), value);
+    }
+    return static_cast<real>(value);
+}
 
 // Velocity follows sorted source slots. Ghost slots represent stationary fixed walls.
 // Output rates follow owned rows.
@@ -39,7 +51,7 @@ Status finish_kick_3d(const Kokkos::Serial&, const CellGrid& refreshed,
                       const Velocity3D& velocity, const std::array<double, 3>& gravity = {},
                       bool fixed_walls = false);
 
-// Maximum acoustic step for constant h. Input velocities must be finite and follow owned rows.
+// Maximum acoustic step for constant h. A nonfinite owned velocity yields no usable step.
 // Empty and stationary fields give C*h/c0. C is an explicit safety factor in (0,1].
 Result<double> cfl_step_3d(const Kokkos::Serial&, const Velocity3D::const_type& velocity,
                            double sound_speed, double cfl_coefficient, double smoothing_length = 1);

@@ -384,9 +384,12 @@ Snapshot3D Participant3D::integrate(FieldStamp stamp, double dt) {
             throw Failure{kicked};
         const auto& old_fields = before.fields();
         const ParticleFields3D updated{position, old_fields.mass, old_fields.ids, old_fields.ghost};
-        return require(prepare_geometry_3d(*exec_, updated, max_cells_, budget_,
-                                           parameters_.smoothing_length,
-                                           accepted_->geometry_.get()));
+        auto next = prepare_geometry_3d(*exec_, updated, max_cells_, budget_,
+                                        parameters_.smoothing_length, accepted_->geometry_.get());
+        // Only the positions change between these two grids.
+        if (!next.ok() && next.status().code() == StatusCode::invalid_argument)
+            throw Failure{{StatusCode::numerical_failure, "invalid drifted WCSPH position"}};
+        return require(std::move(next));
     }();
     const auto& refreshed = geometry->grid;
     const auto old_owned = before.owned_slots();
@@ -453,21 +456,11 @@ Snapshot3D Participant3D::integrate(FieldStamp stamp, double dt) {
         const auto to_old = refreshed.sorted_to_input();
         // Refreshed input slots are accepted sorted slots. This permutation transports
         // both accepted density and accepted rate with the same particle through a rebuild.
-        Kokkos::parallel_reduce(
-            "sph.continuity.correct_density", policy,
-            [&](std::size_t row, std::size_t& errors) {
-                const auto previous = old_row(to_old(new_owned(row)));
-                const double value = Kokkos::fma(
-                    .5 * dt, rate_n(previous) + rate_star(row), double(rho(previous)));
-                if (value > 0 && value <= std::numeric_limits<real>::max() &&
-                    static_cast<real>(value) > 0)
-                    corrected(row) = static_cast<real>(value);
-                else
-                    ++errors;
-            },
-            invalid);
-        if (invalid)
-            throw Failure{{StatusCode::numerical_failure, "invalid corrected WCSPH density"}};
+        Kokkos::parallel_for("sph.continuity.correct_density", policy, [&](std::size_t row) {
+            const auto previous = old_row(to_old(new_owned(row)));
+            corrected(row) = narrow_step_value(Kokkos::fma(
+                .5 * dt, rate_n(previous) + rate_star(row), double(rho(previous))));
+        });
     }
     const Values::const_type completed = corrected;
     auto result = compute(std::move(geometry), stamp, half_velocity, dt, &completed, &work);

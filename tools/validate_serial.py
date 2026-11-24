@@ -534,6 +534,8 @@ def verify_precision(args, profile, precision):
         "nexora_sph_tests.SphWcsphOperators.LinearEquationOfStateResolvesBothSidesOfRestDensity",
         "nexora_sph_tests.SphWcsphOperators.UnequalMassPairAnalyticDirectionAndForceBalanceIncludingTension",
         "nexora_sph_tests.SphVerletWindow.UniformVelocityCrossesCellsAndStrictCfl",
+        "nexora_sph_tests.SphVerletWindow.DriftOverflowRestoresAndSmallerStepSucceeds",
+        "nexora_sph_tests.SphVerletOperators.CflReductionIncludesNonfiniteVelocityAmongFiniteRows",
         "nexora_sph_tests.SphVerletWindow.UnequalMassTrajectoryMatchesIndependentCsrAndMomentum",
         "nexora_sph_tests.SphVerletWindow.NoninitialRestoreAndSmallerRetryPreserveHeldSnapshots",
         "nexora_sph_tests.SphVerletWindow.SnapshotRecordScopesAndRestoreRetryWithAndWithoutTrialReaders",
@@ -549,7 +551,8 @@ def verify_precision(args, profile, precision):
         "nexora_data_uninitialized_tests.DataPreinitialization.ExternalFieldRequiresInitializedRuntime",
         "nexora_reference_uninitialized_tests.ReferenceUninitialized.RejectUninitializedRuntime",
         mpi_test,
-    ])
+    ] + (["nexora_sph_tests.SphVerletWindow.DriftJustAboveFloatRangeCannotRoundBackToLargestPosition"]
+         if precision == "float" else []))
     test_log = build / "Testing/Temporary/LastTest.log"
     shutil.copyfile(test_log, logs / "reference-ctest.log")
     command([sys.executable, ROOT / "tools/check_reference_precision.py", "--log", test_log,
