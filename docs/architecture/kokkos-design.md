@@ -499,7 +499,7 @@ public:
 } // namespace nexora
 ```
 
-这些 host 契约不暴露 engine SDK 或 GPU 类型。共享值类型 `TimeInterval` 已在参考状态切片中从 `participant/TimeConstraint.hpp` 原样移至 `core/Time.hpp`，原头兼容包含，`requested_step/duration()` 语义不变；TimeConstraint 仍属于 participant。MbdAdvanceReport 仍是拟议类型，由 participant 转成 TrialReport，engine API 无须依赖 participant。snapshot 的具体机械数据接口明确 units/frame、取矩点、姿态约定、wrench/impulse 和时间区间；FP64、重力、压力等已有约定继续保留。每个 PhysicalObjectId 的运动/惯性 owner 唯一，每个接触 pair 的 contact owner 唯一：DEM 积分自由颗粒，MBD 积分机构，流体边界只采样运动并返还载荷，避免重复重力、惯性与接触力。
+这些 host 契约不暴露 engine SDK 或 GPU 类型。共享值类型 `TimeInterval` 已在参考状态切片中从 `participant/TimeConstraint.hpp` 原样移至 `core/Time.hpp`，原头兼容包含，`requested_step/duration()` 语义不变；TimeConstraint 仍属于 participant。MbdAdvanceReport 仍是拟议类型，由 participant 将引擎完成情况转换为试算的 Status，engine API 无须依赖 participant。snapshot 的具体机械数据接口明确 units/frame、取矩点、姿态约定、wrench/impulse 和时间区间；FP64、重力、压力等已有约定继续保留。每个 PhysicalObjectId 的运动/惯性 owner 唯一，每个接触 pair 的 contact owner 唯一：DEM 积分自由颗粒，MBD 积分机构，流体边界只采样运动并返还载荷，避免重复重力、惯性与接触力。
 
 Nexora 自有 MBD 数值数组与批量算子同样采用 Kokkos。经批准的完整外部引擎（Chrono/Newton 等候选）可以保有内部数据和运行时；只交换必要领域端口快照，必要时显式复制。它不能接管 SPH/FVM 的通用 kernel 执行。引擎替换涉及 formulation/精度/恢复/许可证的独立评审，不能因 API 适配成功自动获准。**Warp 仅允许作为经批准的完整外部引擎的内部依赖**；不得通过外部应用、服务、worker 或进程包装，重新建立 Nexora 通用算子 provider 或第二套计算基础设施。进程隔离不改变此职责边界。
 

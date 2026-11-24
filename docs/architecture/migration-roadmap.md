@@ -2,7 +2,7 @@
 
 > **Serial CPU 基础、参考状态生命周期、CPU 字段访问与本地传输已实现；本次明确授权提前删除旧 core 数值容器与 exec 层，完整迁移和 P1 验收仍开放。** 以下盘点以 bootstrap 为历史基线，当前 `data` 公开传递 Kokkos，`data_schema` 与 `participant_api` 无 Kokkos 传递编译依赖。当前接口见 [core 数据结构](core-data-structures.md)，历史运行证据见 [CPU 切片验证](kokkos-cpu-slice-validation.md)和[参考生命周期验证](reference-lifecycle-validation.md)。OpenMP/GPU 未实现；旧 CUDA 源休眠，旧 GPU 选项任意值均拒绝；可选 MPI smoke 未验证。
 
-当前架构入口为 [架构总览](overview.md)，执行、字段和存储契约见 [Kokkos 设计](kokkos-design.md)，首阶段工作和验收见 [Phase 1 设计](phase-1-design-review.md)。下文用 `P1-01`–`P1-11` 表示首期计划任务。远期机械与外部集成的 50 个历史 ID 见[后续任务对照](follow-on-task-plan.md)。共享值类型 `TimeInterval` 已在步骤 2 移至 `core/Time.hpp`，保留原类型与 duration 语义和旧头兼容包含；`TimeConstraint` 及 `TrialReport` 保留 participant 职责，MBD engine 的独立报告仍为后续目标。
+当前架构入口为 [架构总览](overview.md)，执行、字段和存储契约见 [Kokkos 设计](kokkos-design.md)，首阶段工作和验收见 [Phase 1 设计](phase-1-design-review.md)。下文用 `P1-01`–`P1-11` 表示首期计划任务。远期机械与外部集成的 50 个历史 ID 见[后续任务对照](follow-on-task-plan.md)。共享值类型 `TimeInterval` 已在步骤 2 移至 `core/Time.hpp`，保留原类型与 duration 语义和旧头兼容包含；时间约束和试算返回的 `Status` 由 participant 提供，MBD engine 的独立报告仍为后续目标。
 
 <a id="source-inventory"></a>
 ## 源码现状与类型去向

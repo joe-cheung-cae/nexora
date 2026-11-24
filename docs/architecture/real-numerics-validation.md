@@ -8,7 +8,7 @@
 
 - reference 的 x/q accepted/trial Views、配置数组、lambda、算子 dt 与中间量、发送及接收载荷统一为 `nexora::real`；保持 `d=dt*lambda*x`、`trial_x=x-d`、`trial_q=q+d` 的顺序和物理约定。
 - `FieldDescriptor` 默认采用 `real_scalar_type`，随构建为 float32/float64；实际字段描述符和 payload dtype 一致。整数 ID 保持 uint64；外部显式 dtype 的校验仍保留，错精度负例按配置选择另一种类型。
-- double 保留于 `TimeInterval`、时间戳/有效期、accepted 时钟、TrialReport reached_time 和时间协调。请求时间步先通过 double 稳定性检查，再校验 real 转换范围、有限正值和 real 有效因子，成功后保存本窗口已验证的 real dt。转换溢出、归零或有效因子下溢均在分配 trial、增加 attempt 前拒绝，不提交状态。
+- double 保留于 `TimeInterval`、时间戳/有效期、accepted 时钟和时间协调。请求时间步先通过 double 稳定性检查，再校验 real 转换范围、有限正值和 real 有效因子，成功后保存本窗口已验证的 real dt。转换溢出、归零或有效因子下溢均在分配 trial、增加 attempt 前拒绝，不提交状态。
 - data 的字段访问、归约、外部 owner、pack/unpack 及相应测试改用 real。整数探针和独立测试 oracle 不属于数值状态。原有 lease、独立 trial、旧快照、失败恢复和重放契约保持。
 
 实现见 [State](../../src/methods/reference/State.cpp)、[Participant](../../src/participants/reference/Participant.cpp) 和 [FieldDescriptor](../../include/nexora/data/FieldDescriptor.hpp)。精度开关仍为 `NEXORA_ENABLE_DOUBLE_PRECISION`，默认 OFF/float，ON/double；安装包配置与冲突拒绝不变。

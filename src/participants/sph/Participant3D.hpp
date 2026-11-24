@@ -90,7 +90,7 @@ class Participant3D final : public ParticipantIF {
     Status initialize(double initial_time) override;
     Status prepare() override;
     Status begin_window(const TimeInterval& interval) override;
-    Result<TrialReport> advance_trial(const TimeInterval& interval) override;
+    Status advance_trial(const TimeInterval& interval) override;
     Status prepare_commit(const TimeInterval& interval) override;
     Status commit_window(const TimeInterval& interval) override;
     Status restore_window() override;

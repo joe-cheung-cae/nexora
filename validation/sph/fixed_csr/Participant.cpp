@@ -278,7 +278,7 @@ Status Participant::begin_window(const TimeInterval& interval) {
     return {};
 }
 
-Result<TrialReport> Participant::advance_trial(const TimeInterval& interval) {
+Status Participant::advance_trial(const TimeInterval& interval) {
     if (stage_ != Stage::open || !matches(interval))
         return Status{StatusCode::invalid_state, "no matching open SPH window"};
     stage_ = Stage::failed;
@@ -313,7 +313,7 @@ Result<TrialReport> Participant::advance_trial(const TimeInterval& interval) {
         trial_.emplace(std::move(candidate));
         trial_issuer_.emplace(std::move(issuer));
         stage_ = Stage::advanced;
-        return TrialReport{interval.end, true};
+        return {};
     } catch (const Failure& failure) {
         return failure.status;
     } catch (const std::bad_alloc&) {

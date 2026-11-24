@@ -549,11 +549,11 @@ Status Participant3D::begin_window(const TimeInterval& interval) {
     return {};
 }
 
-Result<TrialReport> Participant3D::advance_trial(const TimeInterval& interval) {
+Status Participant3D::advance_trial(const TimeInterval& interval) {
     if (stage_ != Stage::open || !matches(interval))
         return Status{StatusCode::invalid_state, "no matching open 3D SPH window"};
     stage_ = Stage::failed;
-    return guarded([&]() -> Result<TrialReport> {
+    return guarded([&]() -> Status {
         auto stamp = accepted_->stamp;
         stamp.accepted = false;
         stamp.time = {interval.end, stamp.accepted_version.value() + 1, 0, 0};
@@ -561,7 +561,7 @@ Result<TrialReport> Participant3D::advance_trial(const TimeInterval& interval) {
         stamp.trial = {stamp.time.window, attempt_, 0, 0};
         trial_.emplace(integrate(stamp, interval.duration()));
         stage_ = Stage::advanced;
-        return TrialReport{interval.end, true};
+        return {};
     });
 }
 
