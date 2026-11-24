@@ -310,7 +310,7 @@ Snapshot3D Participant3D::compute(std::shared_ptr<const Geometry3D> geometry, Fi
             Kokkos::parallel_for("sph.continuity.initial_density", Policy(*exec_, 0, rows),
                                  [&](std::size_t row) { out(row) = seed(input(owned(row))); });
         } else {
-            const auto evaluated = evaluate_density_3d(*exec_, geometry->grid, write.view());
+            const auto evaluated = evaluate_density_3d(*exec_, geometry->grid.neighbors(), write.view());
             if (!evaluated.ok())
                 throw Failure{evaluated};
         }
@@ -345,10 +345,10 @@ Snapshot3D Participant3D::compute(std::shared_ptr<const Geometry3D> geometry, Fi
             write_field(acceleration, acceleration_field(FieldAccess::overwrite), stamp);
         const TaitEos eos(parameters_.eos);
         auto evaluated = walls
-            ? evaluate_pressure_3d(*exec_, geometry->grid, eos, density_read.view(),
+            ? evaluate_pressure_3d(*exec_, geometry->grid.neighbors(), eos, density_read.view(),
                                    pressure_write.view(), acceleration_write.view(),
                                    wall_acceleration, parameters_.gravity)
-            : evaluate_pressure_3d(*exec_, geometry->grid, eos, density_read.view(),
+            : evaluate_pressure_3d(*exec_, geometry->grid.neighbors(), eos, density_read.view(),
                                    pressure_write.view(), acceleration_write.view());
         if (!evaluated.ok())
             throw Failure{std::move(evaluated)};
@@ -483,7 +483,7 @@ Snapshot3D Participant3D::integrate(FieldStamp stamp, double dt) {
         if (walls)
             sample_fixed_walls(*exec_, *walls, before.fields(), "sph.wall.sample_old_velocity",
                                write_wall_velocity);
-        auto status = continuity_rate_3d(*exec_, before, velocity, rate_n);
+        auto status = continuity_rate_3d(*exec_, before.neighbors(), velocity, rate_n);
         if (!status.ok())
             throw Failure{status};
         const auto to_new = refreshed.input_to_sorted();
@@ -508,7 +508,7 @@ Snapshot3D Participant3D::integrate(FieldStamp stamp, double dt) {
         if (walls)
             sample_fixed_walls(*exec_, *walls, refreshed.fields(), "sph.wall.sample_new_velocity",
                                write_wall_velocity);
-        status = continuity_rate_3d(*exec_, refreshed, velocity, rate_star);
+        status = continuity_rate_3d(*exec_, refreshed.neighbors(), velocity, rate_star);
         if (!status.ok())
             throw Failure{status};
         const auto to_old = refreshed.sorted_to_input();

@@ -2,6 +2,7 @@
 #include <Kokkos_Core.hpp>
 #include <gtest/gtest.h>
 #include <methods/sph/Density3D.hpp>
+#include <methods/sph/Verlet3D.hpp>
 #include <methods/sph/neighbors/CellGrid.hpp>
 #include <participants/sph/Geometry3D.hpp>
 
@@ -12,6 +13,8 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <optional>
+#include <string_view>
 #include <numeric>
 #include <random>
 #include <stdexcept>
@@ -47,7 +50,7 @@ void compare(const sph::CellGrid& grid, const std::vector<Particle>& input,
         for (int k = 0; k < 3; ++k)
             EXPECT_EQ(packed.position(slot, k), source.position[k]);
     }
-    const auto density = checked(sph::evaluate_density_3d(exec, grid));
+    const auto density = checked(sph::evaluate_density_3d(exec, grid.neighbors()));
     ASSERT_EQ(density.extent(0), owned.extent(0));
     std::vector<std::uint64_t> seen_owned;
     for (std::size_t row = 0; row < owned.extent(0); ++row) {
@@ -57,7 +60,7 @@ void compare(const sph::CellGrid& grid, const std::vector<Particle>& input,
         const auto id = packed.ids(slot);
         seen_owned.push_back(id);
         std::vector<std::uint64_t> neighbors;
-        grid.for_each_neighbor(row, [&](LocalIndex other, double r2) {
+        grid.neighbors().for_each_neighbor(row, [&](LocalIndex other, double r2) {
             ASSERT_LT(static_cast<std::size_t>(other), input.size());
             EXPECT_NE(packed.ids(other), id);
             EXPECT_GE(r2, 0);
@@ -87,6 +90,329 @@ void compare(const sph::CellGrid& grid, const std::vector<Particle>& input,
     std::sort(seen_owned.begin(), seen_owned.end());
     EXPECT_EQ(std::adjacent_find(seen_owned.begin(), seen_owned.end()), seen_owned.end());
 }
+// Record actual Serial allocation lifetimes. The selected eight-particle fixture has
+// aligned payloads, so Kokkos profiling bytes equal the independently computed sizes.
+class GridAllocations {
+  public:
+    struct Event {
+        bool allocated;
+        std::string label;
+        const void* address;
+        std::size_t bytes, controlled;
+    };
+    explicit GridAllocations(const detail::ResourceBudget& budget)
+        : budget_(budget), previous_(Kokkos::Tools::Experimental::get_callbacks()) {
+        active_ = this;
+        using namespace Kokkos::Tools::Experimental;
+        set_allocate_data_callback(record<true>);
+        set_deallocate_data_callback(record<false>);
+    }
+    ~GridAllocations() {
+        Kokkos::Tools::Experimental::set_callbacks(previous_);
+        active_ = nullptr;
+        EXPECT_FALSE(failed_);
+    }
+    std::size_t count(std::size_t begin, std::string_view label, bool allocated = true) const {
+        return std::count_if(events.begin() + begin, events.end(), [&](const auto& e) {
+            return e.allocated == allocated && e.label == label;
+        });
+    }
+    std::size_t first(std::size_t begin, std::string_view label, bool allocated) const {
+        const auto it = std::find_if(events.begin() + begin, events.end(), [&](const auto& e) {
+            return e.allocated == allocated && e.label == label;
+        });
+        return it - events.begin();
+    }
+    // Pair each deallocation with its original allocation, even across pointer reuse.
+    std::size_t peak_bytes() const {
+        std::map<const void*, Event> live;
+        std::size_t bytes = 0, peak = 0;
+        for (const auto& e : events) {
+            if (e.allocated) {
+                EXPECT_TRUE(live.emplace(e.address, e).second);
+                bytes += e.bytes;
+                peak = std::max(peak, bytes);
+                EXPECT_LE(bytes, e.controlled);
+            } else {
+                EXPECT_LE(bytes, e.controlled) << e.label;
+                const auto found = live.find(e.address);
+                if (found == live.end()) {
+                    ADD_FAILURE() << "unmatched deallocation " << e.label;
+                    continue;
+                }
+                EXPECT_EQ(found->second.bytes, e.bytes);
+                EXPECT_EQ(found->second.label, e.label);
+                bytes -= e.bytes;
+                live.erase(found);
+            }
+        }
+        return peak;
+    }
+    std::vector<Event> events;
+
+  private:
+    template <bool Allocate>
+    static void record(Kokkos::Tools::SpaceHandle, const char* name, const void* address,
+                       std::uint64_t bytes) noexcept {
+        const std::string_view label(name);
+        if (!label.starts_with("sph.grid.") || label == "sph.grid.density")
+            return;
+        try {
+            active_->events.push_back({Allocate, name, address, bytes, active_->budget_.usage().controlled_bytes});
+        } catch (...) {
+            active_->failed_ = true;
+        }
+    }
+    inline static GridAllocations* active_{};
+    const detail::ResourceBudget& budget_;
+    Kokkos::Tools::Experimental::EventSet previous_;
+    bool failed_{};
+};
+
+std::vector<Particle> budget_particles() {
+    std::vector<Particle> result;
+    for (std::uint64_t i = 0; i < 8; ++i)
+        result.push_back({{real(i) * real{.625}, 0, 0}, real(i + 1), 101 + i, 0});
+    return result;
+}
+
+TEST(SphCellGrid, AdmissionPrecedesRemapAndFollowsSharedQueryLifetime) {
+    using Grid = sph::CellGrid;
+    using Group = Grid::StorageGroup;
+    using Request = std::pair<Group, std::size_t>;
+    constexpr std::size_t limit = 4096, n = 8;
+    constexpr std::size_t values = n * 4 * sizeof(real), mappings = n * 2 * sizeof(LocalIndex);
+    constexpr std::size_t cells = n * (sizeof(std::uint64_t) + sizeof(std::uint8_t) + sizeof(LocalIndex)) +
+                                  4 * sizeof(LocalIndex);
+    // Size of the actual (cell, id, input slot) key, including ABI padding.
+    struct Key { std::size_t cell; std::uint64_t id; LocalIndex input; };
+    Kokkos::Serial exec;
+    detail::ResourceBudget budget({0, limit});
+    GridAllocations trace(budget);
+    std::vector<Request> requests;
+    const auto admit = [&](Group group, std::size_t bytes) {
+        requests.emplace_back(group, bytes);
+        return budget.reserve(bytes);
+    };
+    auto input = budget_particles();
+    auto reordered = input;
+    std::reverse(reordered.begin(), reordered.end());
+    const Fields original(input), permuted(reordered);
+    std::optional<sph::NeighborView3D> held_query;
+    {
+        const auto old = checked(Grid::build(exec, original.get(), 3, admit));
+        const std::vector<Request> rebuild{{Group::values, values}, {Group::cells, cells},
+                                           {Group::permutations, mappings}, {Group::sort_keys, n * sizeof(Key)}};
+        EXPECT_EQ(requests, rebuild);
+        const auto retained = values + cells + mappings;
+        ASSERT_EQ(budget.usage().controlled_bytes, retained);
+        EXPECT_EQ(trace.peak_bytes(), retained + n * sizeof(Key));
+        held_query = old.neighbors();
+
+        auto occupied = checked(budget.reserve(limit - retained - (mappings - 1)));
+        const auto mark = trace.events.size();
+        requests.clear();
+        EXPECT_EQ(old.update(exec, permuted.get(), 3, admit).status().code(), StatusCode::resource_exhausted);
+        EXPECT_EQ(requests, (std::vector<Request>{{Group::permutations, mappings}}));
+        EXPECT_EQ(trace.events.size(), mark);
+        EXPECT_EQ(limit - budget.usage().controlled_bytes, mappings - 1);
+        ASSERT_NO_FATAL_FAILURE(compare(old, input, exec));
+
+        occupied.reset();
+        requests.clear();
+        const auto remap = checked(old.update(exec, permuted.get(), 3, admit));
+        EXPECT_EQ(requests, (std::vector<Request>{{Group::permutations, mappings}, {Group::values, values}}));
+        EXPECT_EQ(trace.count(mark, "sph.grid.to_input"), 1u);
+        EXPECT_EQ(trace.count(mark, "sph.grid.from_input"), 1u);
+        EXPECT_EQ(old.cell_begin().data(), remap.cell_begin().data());
+        EXPECT_EQ(budget.usage().controlled_bytes, retained + mappings + values);
+        requests.clear();
+        const auto reuse = checked(remap.update(exec, permuted.get(), 3, admit));
+        EXPECT_EQ(requests, (std::vector<Request>{{Group::values, values}}));
+        EXPECT_EQ(remap.sorted_to_input().data(), reuse.sorted_to_input().data());
+        EXPECT_EQ(remap.input_to_sorted().data(), reuse.input_to_sorted().data());
+        EXPECT_EQ(budget.usage().controlled_bytes, retained + mappings + 2 * values);
+        ASSERT_NO_FATAL_FAILURE(compare(reuse, reordered, exec));
+    }
+    // Stencils retain values and cells. Neither input permutation is needed after grid destruction.
+    EXPECT_EQ(budget.usage().controlled_bytes, cells + values);
+    const auto rho = checked(sph::evaluate_density_3d(exec, *held_query));
+    const auto oracle = explicit_csr(input);
+    for (std::size_t r = 0; r < n; ++r) {
+        const auto id = held_query->fields().ids(held_query->owned_slots()(r));
+        EXPECT_NEAR(rho(r), oracle.density.at(id), 4 * std::numeric_limits<real>::epsilon() * rho(r));
+    }
+    held_query.reset();
+    EXPECT_EQ(budget.usage().controlled_bytes, 0u);
+    EXPECT_EQ(trace.peak_bytes(), std::max(cells + values + mappings + n * sizeof(Key),
+                                          cells + 3 * values + 2 * mappings));
+}
+
+TEST(SphCellGrid, AssignmentKeepsReplacedArraysChargedUntilDeallocation) {
+    Kokkos::Serial exec;
+    detail::ResourceBudget budget;
+    GridAllocations trace(budget);
+    const auto admit = [&](sph::CellGrid::StorageGroup, std::size_t bytes) {
+        return budget.reserve(bytes);
+    };
+    const Fields input(budget_particles());
+    {
+        auto current = checked(sph::CellGrid::build(exec, input.get(), 3, admit));
+        auto query = current.neighbors();
+        auto replacement = checked(sph::CellGrid::build(exec, input.get(), 3, admit));
+        current = std::move(replacement); // original permutations lose their last holder
+        query = current.neighbors();      // original packed values and cells lose theirs
+    }
+    // Each callback, including deallocation, sees at least its current live payload charged.
+    EXPECT_GT(trace.peak_bytes(), 0u);
+    EXPECT_EQ(budget.usage().controlled_bytes, 0u);
+}
+
+TEST(SphCellGrid, RebuildFallbackAndComparisonRespectScratchLifetimes) {
+    constexpr std::size_t limit = 8192, n = 8;
+    struct Key { std::size_t cell; std::uint64_t id; LocalIndex input; };
+    struct ById { std::uint64_t id; LocalIndex slot; };
+    Kokkos::Serial exec;
+    detail::ResourceBudget budget({0, limit});
+    GridAllocations trace(budget);
+    auto original = budget_particles();
+    auto crossing = original;
+    std::swap(crossing.front().position, crossing.back().position);
+    std::reverse(crossing.begin(), crossing.end());
+    const Fields before(original), after(crossing);
+    auto initial = checked(sph::prepare_geometry_3d(exec, before.get(), 3, budget, 1));
+    const auto retained = budget.usage().controlled_bytes;
+    const auto update = [&] { return sph::prepare_geometry_3d(exec, after.get(), 3, budget, 1, initial.get()); };
+    // Rebuild outputs fit, but adding its keys would exceed the available bytes by one.
+    auto occupied = checked(budget.reserve(limit - 2 * retained - n * sizeof(Key) + 1));
+    auto mark = trace.events.size();
+    ASSERT_EQ(update().status().code(), StatusCode::resource_exhausted);
+    EXPECT_EQ(trace.count(mark, "sph.grid.to_input"), 1u); // remap probe only
+    EXPECT_EQ(trace.count(mark, "sph.grid.from_input"), 1u);
+    EXPECT_EQ(trace.count(mark, "sph.grid.keys"), 0u);
+    EXPECT_EQ(trace.count(mark, "sph.grid.position"), 0u);
+    occupied.reset();
+    EXPECT_EQ(budget.usage().controlled_bytes, retained);
+
+    // Rebuild (including keys) now fits. The genuinely reordered ID comparison does not.
+    occupied = checked(budget.reserve(limit - 2 * retained - 2 * n * sizeof(ById) + 1));
+    mark = trace.events.size();
+    ASSERT_EQ(update().status().code(), StatusCode::resource_exhausted);
+    ASSERT_EQ(trace.count(mark, "sph.grid.keys"), 1u);
+    EXPECT_EQ(trace.count(mark, "sph.grid.to_input"), 2u);
+    EXPECT_EQ(trace.count(mark, "sph.grid.from_input"), 2u);
+    EXPECT_EQ(trace.count(mark, "sph.grid.old_by_id"), 0u);
+    EXPECT_EQ(trace.count(mark, "sph.grid.new_by_id"), 0u);
+    const auto keys = trace.first(mark, "sph.grid.keys", true);
+    EXPECT_LT(trace.first(mark, "sph.grid.to_input", false), keys);
+    EXPECT_LT(trace.first(mark, "sph.grid.from_input", false), keys);
+    occupied.reset();
+    EXPECT_EQ(budget.usage().controlled_bytes, retained);
+    ASSERT_NO_FATAL_FAILURE(compare(initial->grid, original, exec));
+    EXPECT_EQ(initial->topology.value(), 1u);
+    EXPECT_EQ(initial->geometry.value(), 1u);
+    EXPECT_EQ(initial->layout.value(), 1u);
+
+    mark = trace.events.size();
+    auto candidate = checked(update());
+    EXPECT_EQ(trace.count(mark, "sph.grid.old_by_id"), 1u);
+    EXPECT_EQ(trace.count(mark, "sph.grid.new_by_id"), 1u);
+    EXPECT_EQ(trace.peak_bytes(), 2 * retained + 2 * n * sizeof(ById));
+    EXPECT_EQ(budget.usage().controlled_bytes, 2 * retained);
+    EXPECT_EQ(candidate->topology, initial->topology);
+    EXPECT_EQ(candidate->geometry.value(), 2u);
+    EXPECT_EQ(candidate->layout.value(), 2u);
+    ASSERT_NO_FATAL_FAILURE(compare(candidate->grid, crossing, exec));
+    const auto rebuilt = checked(sph::CellGrid::build(exec, after.get(), 3));
+    ASSERT_NO_FATAL_FAILURE(compare(rebuilt, crossing, exec));
+    for (std::size_t s = 0; s < n; ++s)
+        EXPECT_EQ(candidate->grid.sorted_to_input()(s), rebuilt.sorted_to_input()(s));
+    candidate.reset();
+    initial.reset();
+    EXPECT_EQ(budget.usage().controlled_bytes, 0u);
+}
+
+TEST(SphCellGrid, NeighborViewPreservesCallbackOrder) {
+    using Neighbors = std::vector<std::pair<std::uint64_t, double>>;
+    const Neighbors expected{{90, 1.0 / 16}, {10, 9.0 / 64}};
+    enum class Center { fluid, wall, ghost };
+    for (auto center : {Center::fluid, Center::wall, Center::ghost}) {
+        std::vector<Particle> input{{{.75, 0, 0}, 3, 90, 0}, {{1.375, 0, 0}, 1, 10, 0},
+                                    {{1, 0, 0}, 2, 50, std::uint8_t(center != Center::fluid)}};
+        if (center == Center::ghost)
+            std::rotate(input.begin(), input.end() - 1, input.end());
+        for (int permutation = 0; permutation < 2; ++permutation) {
+            const auto grid = checked(sph::CellGrid::build(Kokkos::Serial{}, Fields(input).get(), 2, {}, .5));
+            const auto& query = grid.neighbors();
+            const auto index = std::find_if(input.begin(), input.end(), [](auto p) { return p.id == 50; }) - input.begin();
+            const auto slot = grid.input_to_sorted()(index);
+            Neighbors actual;
+            const auto append = [&](LocalIndex j, double d2) { actual.emplace_back(query.fields().ids(j), d2); };
+            query.for_each_neighbor_of_slot(slot, append);
+            EXPECT_EQ(actual, expected);
+            if (center == Center::fluid) {
+                const auto rows = query.owned_slots();
+                const auto row = std::find(rows.data(), rows.data() + rows.extent(0), slot) - rows.data();
+                ASSERT_LT(std::size_t(row), rows.extent(0));
+                actual.clear();
+                query.for_each_neighbor(row, append);
+                EXPECT_EQ(actual, expected);
+            }
+            // Wall input stays behind the fluid prefix.
+            std::reverse(input.begin(), center == Center::wall ? input.end() - 1 : input.end());
+        }
+    }
+}
+
+TEST(SphCellGrid, IsolatedMassAndSmoothingLengthSetSelfDensity) {
+    Kokkos::Serial exec;
+    const auto grid = checked(sph::CellGrid::build(exec, Fields({{{.25, 1, 0}, 5, 6, 0}}).get(), 1, {}, .5));
+    const auto& query = grid.neighbors();
+    std::size_t callbacks = 0;
+    query.for_each_neighbor(0, [&](LocalIndex, double) { ++callbacks; });
+    EXPECT_EQ(callbacks, 0u);
+    const auto rho = checked(sph::evaluate_density_3d(exec, query));
+    EXPECT_NEAR(rho(0), 40 / std::numbers::pi, 40 * std::numeric_limits<real>::epsilon());
+}
+
+TEST(SphCellGrid, PairMirrorsAndRelativeVelocityReversalMatchAnalyticRatesAndForces) {
+    // For h=1 at unit separation W=1/(4*pi) and |dW/dr|=3/(4*pi).
+    // Velocities are centered on the same mass-weighted mean of 1.
+    Kokkos::Serial exec;
+    const double pi = std::numbers::pi;
+    const double gradient = 3 / (4 * pi);
+    for (const auto [mirror, relative] : {std::pair{1, 1}, {-1, 1}, {1, -1}}) {
+        const std::vector<Particle> pair{{{real(mirror), 0, 0}, 2, 22, 0}, {{0, 0, 0}, 1, 11, 0}};
+        const auto grid = checked(sph::CellGrid::build(exec, Fields(pair).get(), 10));
+        const auto& query = grid.neighbors();
+        sph::Velocity3D velocity("test.velocity", 2);
+        for (LocalIndex s = 0; s < 2; ++s)
+            velocity(s, 0) = mirror * (1 + relative * (query.fields().ids(s) == 11 ? 2 : -1));
+        const auto rho = checked(sph::evaluate_density_3d(exec, query));
+        sph::DensityRate3D rate("test.rate", 2);
+        ASSERT_TRUE(sph::continuity_rate_3d(exec, query, velocity, rate).ok());
+        sph::Values pressure("test.pressure", 2);
+        sph::Acceleration3D acceleration("test.acceleration", 2);
+        const sph::WcsphParameters parameters{.25, 2, 1};
+        ASSERT_TRUE(sph::evaluate_pressure_3d(exec, query, sph::TaitEos(parameters), rho, pressure, acceleration).ok());
+        const double rho_a = real(1.5 / pi), rho_b = real(2.25 / pi);
+        const double p_a = real(4 * (rho_a - .25)), p_b = real(4 * (rho_b - .25));
+        const double coefficient = p_a / (rho_a * rho_a) + p_b / (rho_b * rho_b);
+        for (std::size_t row = 0; row < 2; ++row) {
+            const bool a = query.fields().ids(query.owned_slots()(row)) == 11;
+            const double neighbor_mass = a ? 2 : 1;
+            const double expected_rate = relative * 3 * neighbor_mass * gradient;
+            EXPECT_NEAR(rate(row), expected_rate, 4 * std::numeric_limits<double>::epsilon() * std::abs(expected_rate));
+            EXPECT_EQ(rho(row), a ? rho_a : rho_b);
+            EXPECT_GT(pressure(row), 0);
+            const double force = (a ? -mirror : mirror) * neighbor_mass * gradient * coefficient;
+            EXPECT_NEAR(acceleration(row, 0), force, 8 * std::numeric_limits<real>::epsilon() * std::abs(force));
+            EXPECT_EQ(acceleration(row, 1), 0);
+            EXPECT_EQ(acceleration(row, 2), 0);
+        }
+    }
+}
+
 TEST(SphCellGrid, ThreeDimensionalShuffledStableIdsAndGhosts) {
     std::vector<Particle> particles;
     std::mt19937 random(32091);
@@ -205,7 +531,7 @@ TEST(SphCellGrid, CaseSupportControlsCellsPhysicalDistanceAndUpdates) {
     EXPECT_EQ(grid.support_radius(), 1.5);
     EXPECT_EQ(grid.cell_begin().extent(0), 3U);
     std::vector<std::uint64_t> ids;
-    grid.for_each_neighbor(0, [&](LocalIndex slot, double distance_squared) {
+    grid.neighbors().for_each_neighbor(0, [&](LocalIndex slot, double distance_squared) {
         ids.push_back(grid.fields().ids(slot));
         EXPECT_EQ(distance_squared, 2.25);
     });
@@ -319,8 +645,8 @@ TEST(SphCellGrid, CrossStepReuseAndRebuildMatchesExplicitCsr) {
     EXPECT_EQ(first.input_to_sorted().data(), reused.input_to_sorted().data());
     EXPECT_NE(first.fields().position.data(), reused.fields().position.data());
     ASSERT_NO_FATAL_FAILURE(compare(reused, within, exec));
-    const auto before = checked(sph::evaluate_density_3d(exec, first));
-    const auto after = checked(sph::evaluate_density_3d(exec, reused));
+    const auto before = checked(sph::evaluate_density_3d(exec, first.neighbors()));
+    const auto after = checked(sph::evaluate_density_3d(exec, reused.neighbors()));
     EXPECT_NE(before(0), after(0));
     // Both particles retain their cells, but one support edge enters and another leaves.
     EXPECT_NE(explicit_csr(initial).ids, explicit_csr(within).ids);

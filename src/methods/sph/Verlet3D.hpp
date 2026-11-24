@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Pressure3D.hpp"
+#include "neighbors/CellGrid.hpp"
 
 #include <array>
 #include <limits>
@@ -24,7 +25,7 @@ KOKKOS_INLINE_FUNCTION real narrow_step_value(double value) {
 
 // Velocity follows sorted source slots, including wall slots.
 // Output rates follow owned rows.
-Status continuity_rate_3d(const Kokkos::Serial&, const CellGrid&,
+Status continuity_rate_3d(const Kokkos::Serial&, const NeighborView3D&,
                           const Velocity3D::const_type& velocity, const DensityRate3D& rate);
 
 struct WcsphVerletParameters {

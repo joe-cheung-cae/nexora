@@ -5,7 +5,7 @@
 #include <numbers>
 
 namespace nexora::sph {
-double density_at_slot_3d(const CellGrid& grid, LocalIndex self) {
+double density_at_slot_3d(const NeighborView3D& grid, LocalIndex self) {
     const auto& mass = grid.fields().mass;
     const double h = grid.smoothing_length();
     double sum = mass(self) * std::numbers::inv_pi;
@@ -15,7 +15,7 @@ double density_at_slot_3d(const CellGrid& grid, LocalIndex self) {
     return sum / (h * h * h);
 }
 
-Result<Values> evaluate_density_3d(const Kokkos::Serial& exec, const CellGrid& grid) {
+Result<Values> evaluate_density_3d(const Kokkos::Serial& exec, const NeighborView3D& grid) {
     try {
         Values density(Kokkos::view_alloc(exec, Kokkos::WithoutInitializing, "sph.grid.density"),
                        grid.owned_slots().extent(0));
@@ -29,7 +29,7 @@ Result<Values> evaluate_density_3d(const Kokkos::Serial& exec, const CellGrid& g
     }
 }
 
-Status evaluate_density_3d(const Kokkos::Serial& exec, const CellGrid& grid,
+Status evaluate_density_3d(const Kokkos::Serial& exec, const NeighborView3D& grid,
                            const Values& density) {
     const auto rows = grid.owned_slots();
     if (rows.extent(0) != density.extent(0))

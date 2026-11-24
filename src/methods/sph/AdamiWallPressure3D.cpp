@@ -4,7 +4,7 @@
 
 namespace nexora::sph {
 
-double wall_pressure(const CellGrid& grid, LocalIndex wall, const CellGrid::Indices& row_of_slot,
+double wall_pressure(const NeighborView3D& grid, LocalIndex wall, const NeighborView3D::Indices& row_of_slot,
                      const Values::const_type& density, const Values::const_type& pressure,
                      const std::array<double, 3>& wall_acceleration,
                      const std::array<double, 3>& gravity) {
@@ -29,8 +29,8 @@ double wall_pressure(const CellGrid& grid, LocalIndex wall, const CellGrid::Indi
     return numerator / weights;
 }
 
-std::optional<double> wall_coefficient(const CellGrid& grid, LocalIndex wall,
-                                       const CellGrid::Indices& row_of_slot,
+std::optional<double> wall_coefficient(const NeighborView3D& grid, LocalIndex wall,
+                                       const NeighborView3D::Indices& row_of_slot,
                                        const Values::const_type& density,
                                        const Values::const_type& pressure,
                                        const std::array<double, 3>& wall_acceleration,

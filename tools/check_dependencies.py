@@ -118,6 +118,7 @@ RESOURCE_BUDGET_HEADER = "participants/ResourceBudget.hpp"
 RESOURCE_BUDGET_CONSUMERS = {
     Path("src/participants/reference/Participant.hpp"),
     FIXED_CSR_PARTICIPANT,
+    Path(*SPH_PARTICIPANT_DIR) / "GeometryVersions3D.hpp",
     Path(*SPH_PARTICIPANT_DIR) / "Geometry3D.hpp",
 }
 FIXED_CSR_CONSUMERS = {
@@ -258,6 +259,12 @@ def check_internal_include(relative: Path, scope: str, header: str) -> list[str]
                         SPH_TANK_TRAJECTORY, SPH_TANK_FIXTURE, *SPH_WINDOW_TESTS}:
             return []
         return [f"{relative}: {header} is private to the 3D SPH regression tests"]
+    if relative == Path(*SPH_PARTICIPANT_DIR) / "GeometryVersions3D.hpp" and parts[-1] == "CellGrid.hpp":
+        return [f"{relative}: geometry version comparison uses particle fields and layout indices"]
+    if parts[-1] in {"NeighborView3D.hpp", "ParticleFields3D.hpp"}:
+        if location[:3] in {SPH_METHOD_DIR, SPH_PARTICIPANT_DIR} or relative == SPH_CELL_GRID_TEST:
+            return []
+        return [f"{relative}: {header} is private to 3D SPH methods and their assembly"]
     if parts[-1] == "ResourceBudget.hpp":
         if "/".join(parts) == RESOURCE_BUDGET_HEADER and relative in RESOURCE_BUDGET_CONSUMERS:
             return []
@@ -582,6 +589,16 @@ def policy_self_test() -> list[str]:
                 failures.append(f"checker self-test failed to keep Adami pressure out of {path}")
     if not check_internal_include(sph_method, "src", "../../participants/sph/Participant3D.hpp"):
         failures.append("checker self-test failed to reject a relative method-to-participant include")
+    for header in ("methods/sph/ParticleFields3D.hpp", "methods/sph/neighbors/NeighborView3D.hpp"):
+        for path in (sph_method, sph_participant, SPH_CELL_GRID_TEST):
+            if check_internal_include(path, path.parts[0], header):
+                failures.append(f"checker self-test failed to allow {header} in {path}")
+        for path in (REFERENCE_COMMAND_SOURCE, package_consumer, SPH_VERLET_TEST):
+            if not check_internal_include(path, path.parts[0], header):
+                failures.append(f"checker self-test failed to reject {header} in {path}")
+    for header in ("methods/sph/neighbors/CellGrid.hpp", "CellGrid.hpp"):
+        if not check_internal_include(Path(*SPH_PARTICIPANT_DIR) / "GeometryVersions3D.hpp", "src", header):
+            failures.append(f"checker self-test failed to keep {header} out of geometry comparison")
     cell_grid_header = "methods/sph/neighbors/CellGrid.hpp"
     if check_internal_include(SPH_CELL_GRID_TEST, "tests", cell_grid_header):
         failures.append("checker self-test failed to allow the SPH cell-grid test to include internals")

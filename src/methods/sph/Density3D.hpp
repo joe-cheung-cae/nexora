@@ -1,6 +1,7 @@
 #pragma once
 
-#include "neighbors/CellGrid.hpp"
+#include "neighbors/NeighborView3D.hpp"
+#include <nexora/core/Result.hpp>
 
 #include <numbers>
 
@@ -29,15 +30,15 @@ KOKKOS_INLINE_FUNCTION double m4_negative_radial_derivative_over_q_3d(double q) 
 }
 
 // Double-precision sum in sorted-neighbor order; callers check the result before narrowing.
-double density_at_slot_3d(const CellGrid& grid, LocalIndex slot);
+double density_at_slot_3d(const NeighborView3D& grid, LocalIndex slot);
 
 // Reference density for the three-dimensional M4 kernel. Output row i
 // belongs to grid.owned_slots()(i). The returned allocation is independent of
 // the grid and is available on the host after the Serial reduction completes.
-Result<Values> evaluate_density_3d(const Kokkos::Serial& exec, const CellGrid& grid);
+Result<Values> evaluate_density_3d(const Kokkos::Serial& exec, const NeighborView3D& grid);
 
 // The window owns a disjoint, writable trial allocation. A failed evaluation
 // may have written some rows; discard that trial before publishing a snapshot.
-Status evaluate_density_3d(const Kokkos::Serial& exec, const CellGrid& grid, const Values& output);
+Status evaluate_density_3d(const Kokkos::Serial& exec, const NeighborView3D& grid, const Values& output);
 
 } // namespace nexora::sph

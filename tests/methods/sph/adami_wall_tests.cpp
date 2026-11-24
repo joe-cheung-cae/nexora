@@ -226,9 +226,9 @@ TEST(SphAdamiWall, WallPressureAndForcesMatchIndependentReference) {
             owned_pressure(row) = reference.fluid_pressure.at(id);
             input_density(row) = density.at(fluid[row].id);
         }
-        const double raw = sph::wall_pressure(grid, wall_slot, row_of_slot, owned_density,
+        const double raw = sph::wall_pressure(grid.neighbors(), wall_slot, row_of_slot, owned_density,
                                                owned_pressure, fixed_acceleration, parameters.gravity);
-        const auto coefficient = sph::wall_coefficient(grid, wall_slot, row_of_slot, owned_density,
+        const auto coefficient = sph::wall_coefficient(grid.neighbors(), wall_slot, row_of_slot, owned_density,
                                                        owned_pressure, fixed_acceleration,
                                                        parameters.gravity, eos);
         ASSERT_TRUE(coefficient.has_value());

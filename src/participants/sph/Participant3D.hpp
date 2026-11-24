@@ -36,7 +36,7 @@ class Snapshot3D {
     Result<std::array<real, 3>> velocity(std::size_t row) const;
     template <class Callback> void for_each_neighbor(std::size_t row, Callback&& visit) const {
         const auto& grid = geometry_->grid;
-        grid.for_each_neighbor(row, [&](LocalIndex slot, double squared_distance) {
+        grid.neighbors().for_each_neighbor(row, [&](LocalIndex slot, double squared_distance) {
             visit(grid.fields().ids(slot), squared_distance);
         });
     }

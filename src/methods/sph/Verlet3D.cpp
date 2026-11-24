@@ -50,7 +50,7 @@ bool fits_real(double value) {
 }
 } // namespace
 
-Status continuity_rate_3d(const Kokkos::Serial& exec, const CellGrid& grid,
+Status continuity_rate_3d(const Kokkos::Serial& exec, const NeighborView3D& grid,
                           const Velocity3D::const_type& velocity, const DensityRate3D& rate) {
     const auto& sources = grid.fields();
     const auto owned = grid.owned_slots();

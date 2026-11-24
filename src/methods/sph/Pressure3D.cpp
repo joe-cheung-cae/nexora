@@ -36,7 +36,7 @@ bool prepare_source(const TaitEos& eos, real rho, real& pressure, double& coeffi
     return true;
 }
 
-std::optional<double> ghost_source_coefficient(const CellGrid& grid, LocalIndex slot,
+std::optional<double> ghost_source_coefficient(const NeighborView3D& grid, LocalIndex slot,
                                                 const TaitEos& eos) {
     const double density = density_at_slot_3d(grid, slot);
     real pressure{};
@@ -52,7 +52,7 @@ bool contributes(double distance_squared, double support_squared) {
 }
 
 std::array<double, 3>
-acceleration_at_slot(const CellGrid& grid, LocalIndex i,
+acceleration_at_slot(const NeighborView3D& grid, LocalIndex i,
                      const Kokkos::View<const double*, Kokkos::HostSpace>& force_coefficient,
                      double support_squared, double inverse_h5) {
     const auto& position = grid.fields().position;
@@ -76,7 +76,7 @@ struct WallSources {
     const std::array<double, 3>& gravity;
 };
 
-Status evaluate(const Kokkos::Serial& exec, const CellGrid& grid, const TaitEos& eos,
+Status evaluate(const Kokkos::Serial& exec, const NeighborView3D& grid, const TaitEos& eos,
                 const Values::const_type& density, const Values& pressure,
                 const Acceleration3D& acceleration, const std::optional<WallSources>& walls) {
     if (auto s = eos.validate(); !s.ok())
@@ -141,7 +141,7 @@ Status evaluate(const Kokkos::Serial& exec, const CellGrid& grid, const TaitEos&
             return {StatusCode::numerical_failure,
                     "invalid owned WCSPH density or pressure exceeds real range"};
         if (n != count) {
-            const CellGrid::Indices row_of_slot = fluid_row;
+            const NeighborView3D::Indices row_of_slot = fluid_row;
             const Values::const_type owned_pressure = pressure;
             Kokkos::parallel_reduce(
                 "sph.pressure.ghost_eos", Policy(exec, 0, n),
@@ -200,13 +200,13 @@ std::size_t pressure_workspace_bytes_per_source(bool has_ghosts, bool adami_wall
     return sizeof(double) + (has_ghosts ? per_ghost : 0);
 }
 
-Status evaluate_pressure_3d(const Kokkos::Serial& exec, const CellGrid& grid, const TaitEos& eos,
+Status evaluate_pressure_3d(const Kokkos::Serial& exec, const NeighborView3D& grid, const TaitEos& eos,
                             const Values::const_type& density, const Values& pressure,
                             const Acceleration3D& acceleration) {
     return evaluate(exec, grid, eos, density, pressure, acceleration, std::nullopt);
 }
 
-Status evaluate_pressure_3d(const Kokkos::Serial& exec, const CellGrid& grid, const TaitEos& eos,
+Status evaluate_pressure_3d(const Kokkos::Serial& exec, const NeighborView3D& grid, const TaitEos& eos,
                             const Values::const_type& density, const Values& pressure,
                             const Acceleration3D& acceleration,
                             const WallAcceleration3D::const_type& wall_acceleration,

@@ -222,7 +222,7 @@ WallSet expected_wall(const WallSet& solid, const std::array<real, 3>& position,
 WallSet observed_wall(const sph::CellGrid& grid, std::size_t row, double dx) {
     WallSet observed;
     const auto& fields = grid.fields();
-    grid.for_each_neighbor(row, [&](LocalIndex slot, double d2) {
+    grid.neighbors().for_each_neighbor(row, [&](LocalIndex slot, double d2) {
         if (fields.ghost(slot) && d2 < grid.support_radius() * grid.support_radius()) {
             LatticeIndex index;
             for (int axis = 0; axis < 3; ++axis)

@@ -1,6 +1,7 @@
 #pragma once
 
-#include "neighbors/CellGrid.hpp"
+#include "ParticleFields3D.hpp"
+#include <nexora/core/Result.hpp>
 
 #include <array>
 

@@ -23,7 +23,7 @@ struct PressureEvaluation {
                                    acceleration_values(row, 2)};
     }
     template <class Visitor> void for_each_neighbor(std::size_t row, Visitor&& visit) const {
-        grid.for_each_neighbor(row, [&](LocalIndex slot, double d2) {
+        grid.neighbors().for_each_neighbor(row, [&](LocalIndex slot, double d2) {
             visit(grid.fields().ids(slot), d2);
         });
     }
@@ -35,10 +35,10 @@ PressureEvaluation evaluate_pressure(const std::vector<Particle>& input,
     Fields fields(input);
     auto grid = checked(previous ? previous->grid.update(exec, fields.get(), 1000)
                                  : sph::CellGrid::build(exec, fields.get(), 1000));
-    auto density = checked(sph::evaluate_density_3d(exec, grid));
+    auto density = checked(sph::evaluate_density_3d(exec, grid.neighbors()));
     sph::Values pressure("test.pressure", density.extent(0));
     sph::Acceleration3D acceleration("test.acceleration", density.extent(0));
-    const auto status = sph::evaluate_pressure_3d(exec, grid, sph::TaitEos(parameters), density, pressure,
+    const auto status = sph::evaluate_pressure_3d(exec, grid.neighbors(), sph::TaitEos(parameters), density, pressure,
                                                  acceleration);
     if (!status.ok())
         throw std::runtime_error(status.message());
@@ -182,13 +182,13 @@ TEST(SphWcsphOperators, RejectsInvalidParameters) {
     Kokkos::Serial exec;
     Fields fields({{{0, 0, 0}, 1, 1, 0}, {{1, 0, 0}, 2, 2, 0}});
     const auto grid = checked(sph::CellGrid::build(exec, fields.get(), 100));
-    const auto density = checked(sph::evaluate_density_3d(exec, grid));
+    const auto density = checked(sph::evaluate_density_3d(exec, grid.neighbors()));
     sph::Values pressure("test.pressure", 2);
     sph::Acceleration3D acceleration("test.acceleration", 2);
     for (const auto parameters : {sph::WcsphParameters{0, 1, 3}, sph::WcsphParameters{1, 0, 3},
                                   sph::WcsphParameters{1, 1, 0}}) {
         EXPECT_EQ(parameters.validate().code(), StatusCode::invalid_argument);
-        EXPECT_EQ(sph::evaluate_pressure_3d(exec, grid, sph::TaitEos(parameters), density, pressure, acceleration)
+        EXPECT_EQ(sph::evaluate_pressure_3d(exec, grid.neighbors(), sph::TaitEos(parameters), density, pressure, acceleration)
                       .code(), StatusCode::invalid_argument);
     }
 }

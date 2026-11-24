@@ -4,16 +4,23 @@
 #include <cstddef>
 #include <cstdint>
 #include <data/EntityCapacity.hpp>
-#include <methods/sph/neighbors/CellGrid.hpp>
+#include <methods/sph/ParticleFields3D.hpp>
+#include <participants/ResourceBudget.hpp>
 
 namespace nexora::sph {
 
-inline Status update_geometry_versions(const Kokkos::Serial& exec, const CellGrid& before,
-                                       const CellGrid& after, TopologyVersion& topology,
+struct GeometryLayout3D {
+    ParticleFields3D fields;
+    Kokkos::View<const LocalIndex*, Kokkos::HostSpace> owned_slots, sorted_to_input, input_to_sorted;
+};
+
+inline Status update_geometry_versions(const Kokkos::Serial& exec, const GeometryLayout3D& before,
+                                       const GeometryLayout3D& after, const detail::ResourceBudget& budget,
+                                       TopologyVersion& topology,
                                        GeometryVersion& geometry, LayoutVersion& layout) {
     using Policy = Kokkos::RangePolicy<Kokkos::Serial, Kokkos::IndexType<std::size_t>>;
-    const auto& old_fields = before.fields();
-    const auto& new_fields = after.fields();
+    const auto& old_fields = before.fields;
+    const auto& new_fields = after.fields;
     const auto n = new_fields.ids.extent(0);
     const bool resized = old_fields.ids.extent(0) != n;
     // Topology describes the particle domain and ownership. Neighbor edges can
@@ -23,10 +30,10 @@ inline Status update_geometry_versions(const Kokkos::Serial& exec, const CellGri
     bool layout_changed = resized;
     if (!resized) {
         const Policy slots(exec, 0, n);
-        const auto old_rows = before.owned_slots();
-        const auto new_rows = after.owned_slots();
-        const auto old_input = before.sorted_to_input();
-        const auto new_input = after.sorted_to_input();
+        const auto old_rows = before.owned_slots;
+        const auto new_rows = after.owned_slots;
+        const auto old_input = before.sorted_to_input;
+        const auto new_input = after.sorted_to_input;
         bool slots_changed = false;
         layout_changed = old_rows.extent(0) != new_rows.extent(0);
         if (old_fields.ids.data() != new_fields.ids.data() ||
@@ -54,8 +61,8 @@ inline Status update_geometry_versions(const Kokkos::Serial& exec, const CellGri
         } else {
             // A rebuilt grid can put the same IDs into unrelated sorted slots.
             // First try aligning by input order, which often remains stable.
-            const auto old_slots = before.input_to_sorted();
-            const auto new_slots = after.input_to_sorted();
+            const auto old_slots = before.input_to_sorted;
+            const auto new_slots = after.input_to_sorted;
             bool input_ids_changed = false;
             Kokkos::parallel_for("sph.grid.compare_input_ids", slots, [&](std::size_t i) {
                 input_ids_changed |= old_fields.ids(old_slots(i)) != new_fields.ids(new_slots(i));
@@ -69,6 +76,12 @@ inline Status update_geometry_versions(const Kokkos::Serial& exec, const CellGri
                     std::uint64_t id;
                     LocalIndex slot;
                 };
+                const auto bytes = detail::checked_array_bytes(n, 2 * sizeof(ParticleSlot));
+                if (!bytes.ok())
+                    return bytes.status();
+                auto ticket = budget.reserve(bytes.value());
+                if (!ticket.ok())
+                    return ticket.status();
                 using ById = Kokkos::View<ParticleSlot*, Kokkos::HostSpace>;
                 const ById old_by_id(
                     Kokkos::view_alloc(exec, Kokkos::WithoutInitializing, "sph.grid.old_by_id"), n);
@@ -94,6 +107,7 @@ inline Status update_geometry_versions(const Kokkos::Serial& exec, const CellGri
                         geometry_changed = true;
                     }
                 });
+                exec.fence("sph.grid.geometry_comparison_complete");
             }
         }
     }

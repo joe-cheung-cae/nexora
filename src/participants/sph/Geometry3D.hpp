@@ -7,8 +7,6 @@
 namespace nexora::sph {
 
 struct Geometry3D {
-    // Copies of a ticket follow exactly the Views that share that allocation group.
-    detail::ResourceBudget::Ticket values, cells, permutations;
     CellGrid grid;
     TopologyVersion topology{1};
     GeometryVersion geometry{1};
