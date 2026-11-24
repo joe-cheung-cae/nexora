@@ -153,15 +153,19 @@ Result<bool> CellGrid::try_reuse(const Kokkos::Serial& exec, const ParticleField
         from_input = inverse;
     }
 
-    auto values_ticket = reserve_group(admit, StorageGroup::values, {{n, 4 * sizeof(real)}});
-    if (!values_ticket.ok())
-        return values_ticket.status();
+    auto position = reserve_group(admit, StorageGroup::position, {{n, 3 * sizeof(real)}});
+    if (!position.ok())
+        return position.status();
+    auto mass = reserve_group(admit, StorageGroup::mass, {{n, sizeof(real)}});
+    if (!mass.ok())
+        return mass.status();
 
     const PackedValues values(exec, n);
     Kokkos::parallel_for("sph.grid.refresh_values", particles,
                          [&](std::size_t s) { values.gather(s, input, to_input(s)); });
     exec.fence("sph.grid.updated_snapshot_ready");
-    query_.values_ticket_ = std::move(values_ticket).value();
+    query_.field_storage_ = {std::move(position).value(), std::move(mass).value(),
+                             old.query_.field_storage_[2]};
     query_.cells_ticket_ = old.query_.cells_ticket_;
     permutations_ticket_ = std::move(permutations_ticket);
     query_.fields_ = {values.position, values.mass, old.query_.fields_.ids, old.query_.fields_.ghost};
@@ -252,11 +256,18 @@ Result<CellGrid> CellGrid::prepare(const Kokkos::Serial& exec, const ParticleFie
             if (reuse.value())
                 return grid;
         }
-        auto values_ticket = reserve_group(admit, StorageGroup::values, {{n, 4 * sizeof(real)}});
-        if (!values_ticket.ok())
-            return values_ticket.status();
+        auto position = reserve_group(admit, StorageGroup::position, {{n, 3 * sizeof(real)}});
+        if (!position.ok())
+            return position.status();
+        auto mass = reserve_group(admit, StorageGroup::mass, {{n, sizeof(real)}});
+        if (!mass.ok())
+            return mass.status();
+        auto identity = reserve_group(admit, StorageGroup::identity,
+                                      {{n, sizeof(std::uint64_t) + sizeof(std::uint8_t)}});
+        if (!identity.ok())
+            return identity.status();
         auto cells_ticket = reserve_group(admit, StorageGroup::cells,
-            {{n, sizeof(std::uint64_t) + sizeof(std::uint8_t)}, {owned, sizeof(LocalIndex)},
+            {{owned, sizeof(LocalIndex)},
              {cells + 1, sizeof(LocalIndex)}});
         if (!cells_ticket.ok())
             return cells_ticket.status();
@@ -266,7 +277,8 @@ Result<CellGrid> CellGrid::prepare(const Kokkos::Serial& exec, const ParticleFie
         auto keys_ticket = reserve_group(admit, StorageGroup::sort_keys, {{n, sizeof(SortEntry)}});
         if (!keys_ticket.ok())
             return keys_ticket.status();
-        grid.query_.values_ticket_ = std::move(values_ticket).value();
+        grid.query_.field_storage_ = {std::move(position).value(), std::move(mass).value(),
+                                      std::move(identity).value()};
         grid.query_.cells_ticket_ = std::move(cells_ticket).value();
         grid.permutations_ticket_ = std::move(permutations).value();
 

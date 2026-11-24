@@ -4,11 +4,20 @@
 #include <methods/sph/AdamiWallPressure3D.hpp>
 #include <nexora/simulation/Simulation.hpp>
 #include <numbers>
-#include <participants/sph/Participant3D.hpp>
+#include <participants/sph/WcsphParticipant3D.hpp>
 
 namespace {
 using namespace nexora;
 using namespace sph_test;
+
+std::vector<sph::CommittedRow3D> committed_rows(const sph::WcsphParticipant3D& participant) {
+    std::vector<sph::CommittedRow3D> rows;
+    const auto status =
+        participant.visit_committed_rows([&](sph::CommittedRow3D row) { rows.push_back(row); });
+    if (!status.ok())
+        throw std::runtime_error(status.message());
+    return rows;
+}
 
 TEST(SphAdamiWall, InitialAdamiFieldsAndAcousticBoundScaleWithSmoothingLength) {
     struct Initial {
@@ -26,16 +35,15 @@ TEST(SphAdamiWall, InitialAdamiFieldsAndAcousticBoundScaleWithSmoothingLength) {
         sph::Values density("test.scaled_physical_density", 2);
         density(0) = fluid.mass(0) / volume;
         density(1) = fluid.mass(1) / volume;
-        sph::Participant3D participant(fluid.get(), 100, parameters, velocity, density, boundary);
+        sph::WcsphParticipant3D participant(fluid.get(), 100, parameters, velocity, density, boundary);
         Simulation simulation(participant);
         ASSERT_TRUE(simulation.initialize().ok());
-        const auto snapshot = checked(participant.snapshot());
-        ASSERT_EQ(snapshot.row_count(), reference.size());
+        const auto rows = committed_rows(participant);
+        ASSERT_EQ(rows.size(), reference.size());
         EXPECT_EQ(participant.time_constraint(0).maximum_step, .25 * h / 4);
-        for (std::size_t row = 0; row < reference.size(); ++row) {
-            const auto i = snapshot.row_id(row) == 10 ? 0 : 1;
-            const Initial observed{snapshot.density(row), checked(snapshot.pressure(row)),
-                                   h * checked(snapshot.pressure_acceleration(row))[0]};
+        for (const auto& row : rows) {
+            const auto i = row.id == 10 ? 0 : 1;
+            const Initial observed{row.density, row.pressure, h * row.pressure_acceleration[0]};
             if (h == 1) {
                 reference[i] = observed;
                 EXPECT_NE(observed.acceleration, 0);
@@ -56,7 +64,7 @@ TEST(SphAdamiWall, GravityOnlyMatchesFreeFall) {
     const std::array<double, 3> initial_velocity{2, 1, -1};
     for (int axis = 0; axis < 3; ++axis)
         velocity(0, axis) = static_cast<real>(initial_velocity[axis]);
-    sph::Participant3D participant(fluid.get(), 512, {{1, 2, 2}, .8, gravity}, velocity, fluid.mass);
+    sph::WcsphParticipant3D participant(fluid.get(), 512, {{1, 2, 2}, .8, gravity}, velocity, fluid.mass);
     Simulation simulation(participant);
     ASSERT_TRUE(simulation.initialize().ok());
     ASSERT_TRUE(simulation.prepare().ok());
@@ -64,10 +72,11 @@ TEST(SphAdamiWall, GravityOnlyMatchesFreeFall) {
         constexpr double dt = 1. / 32;
         ASSERT_TRUE(simulation.advance(dt).ok());
         const double t = step * dt;
-        const auto snapshot = checked(participant.snapshot());
-        const auto x = checked(snapshot.position(0));
-        const auto v = checked(snapshot.velocity(0));
-        EXPECT_EQ(checked(snapshot.pressure_acceleration(0)), (std::array<real, 3>{}));
+        const auto rows = committed_rows(participant);
+        ASSERT_EQ(rows.size(), 1u);
+        const auto& x = rows.front().position;
+        const auto& v = rows.front().velocity;
+        EXPECT_EQ(rows.front().pressure_acceleration, (std::array<real, 3>{}));
         for (int axis = 0; axis < 3; ++axis) {
             EXPECT_EQ(v[axis], initial_velocity[axis] + gravity[axis] * t);
             EXPECT_EQ(x[axis], initial_velocity[axis] * t + .5 * gravity[axis] * t * t);
@@ -149,18 +158,18 @@ WallForceReference independent_wall_forces(
     return result;
 }
 
-void expect_wall_reference(const sph::Snapshot3D& snapshot, const WallForceReference& reference,
+void expect_wall_reference(const std::vector<sph::CommittedRow3D>& rows, const WallForceReference& reference,
                            const sph::WcsphVerletParameters& parameters) {
     const double eps = std::numeric_limits<real>::epsilon();
     const double c2 = parameters.eos.sound_speed * parameters.eos.sound_speed;
     const double pressure_scale = parameters.eos.reference_density * c2 / parameters.eos.gamma;
-    ASSERT_EQ(snapshot.row_count(), reference.fluid_pressure.size());
-    for (std::size_t row = 0; row < snapshot.row_count(); ++row) {
-        const auto id = snapshot.row_id(row);
+    ASSERT_EQ(rows.size(), reference.fluid_pressure.size());
+    for (const auto& row : rows) {
+        const auto id = row.id;
         ASSERT_TRUE(reference.fluid_pressure.contains(id));
-        EXPECT_NEAR(checked(snapshot.pressure(row)), reference.fluid_pressure.at(id),
+        EXPECT_NEAR(row.pressure, reference.fluid_pressure.at(id),
                     64 * eps * pressure_scale);
-        const auto observed = checked(snapshot.pressure_acceleration(row));
+        const auto observed = row.pressure_acceleration;
         const auto& expected = reference.acceleration.at(id);
         for (int k = 0; k < 3; ++k)
             EXPECT_NEAR(observed[k], expected[k], 128 * eps *
@@ -169,20 +178,20 @@ void expect_wall_reference(const sph::Snapshot3D& snapshot, const WallForceRefer
 }
 
 // The all-pairs reference leaves the detached dry wall at its original coordinates.
-void check_wall_forces(const sph::Snapshot3D& snapshot, std::vector<Particle> particles,
+void check_wall_forces(const std::vector<sph::CommittedRow3D>& rows, std::vector<Particle> particles,
                        const sph::WcsphVerletParameters& parameters) {
     std::map<std::uint64_t, real> density;
-    std::map<std::uint64_t, std::size_t> rows;
-    for (std::size_t row = 0; row < snapshot.row_count(); ++row) {
-        ASSERT_TRUE(rows.emplace(snapshot.row_id(row), row).second);
-        density.emplace(snapshot.row_id(row), snapshot.density(row));
+    std::map<std::uint64_t, std::array<real, 3>> positions;
+    for (const auto& row : rows) {
+        ASSERT_TRUE(positions.emplace(row.id, row.position).second);
+        density.emplace(row.id, row.density);
     }
     for (auto& particle : particles)
         if (!particle.ghost) {
-            ASSERT_TRUE(rows.contains(particle.id));
-            particle.position = checked(snapshot.position(rows.at(particle.id)));
+            ASSERT_TRUE(positions.contains(particle.id));
+            particle.position = positions.at(particle.id);
         }
-    expect_wall_reference(snapshot, independent_wall_forces(particles, density, parameters),
+    expect_wall_reference(rows, independent_wall_forces(particles, density, parameters),
                           parameters);
 }
 
@@ -237,11 +246,11 @@ TEST(SphAdamiWall, WallPressureAndForcesMatchIndependentReference) {
         EXPECT_NEAR(*coefficient, reference.coefficient.at(wall.id),
                     16 * std::numeric_limits<real>::epsilon());
 
-        sph::Participant3D participant(fluid_fields.get(), 64, parameters, velocity, input_density,
+        sph::WcsphParticipant3D participant(fluid_fields.get(), 64, parameters, velocity, input_density,
                                        boundary);
         Simulation simulation(participant);
         ASSERT_TRUE(simulation.initialize().ok());
-        expect_wall_reference(checked(participant.snapshot()), reference, parameters);
+        expect_wall_reference(committed_rows(participant), reference, parameters);
         EXPECT_TRUE(simulation.finalize().ok());
     }
 }
@@ -258,7 +267,7 @@ TEST(SphAdamiWall, FixedSourcesMatchIndependentWallForcesAcrossRestore) {
     sph::Values initial_density("wall_test.initial_density", fluid.size());
     initial_density(0) = real{1.125};
     initial_density(1) = real{1.25};
-    sph::Participant3D participant(input.get(), 4096, parameters, velocity, initial_density, boundary);
+    sph::WcsphParticipant3D participant(input.get(), 4096, parameters, velocity, initial_density, boundary);
     Simulation simulation(participant);
     ASSERT_TRUE(simulation.initialize().ok());
     ASSERT_TRUE(simulation.prepare().ok());
@@ -267,29 +276,34 @@ TEST(SphAdamiWall, FixedSourcesMatchIndependentWallForcesAcrossRestore) {
     fixed.mass(0) = 7;
     fixed.ids(0) = 33;
     fluid.insert(fluid.end(), walls.begin(), walls.end());
-    const auto initial = checked(participant.snapshot());
-    ASSERT_EQ(initial.row_count(), 2u);
+    const auto initial = committed_rows(participant);
+    ASSERT_EQ(initial.size(), 2u);
     ASSERT_NO_FATAL_FAILURE(check_wall_forces(initial, fluid, parameters));
-    for (std::size_t row = 0; row < initial.row_count(); ++row) {
-        const double vx = initial.row_id(row) == 33 ? 5 : 0;
-        EXPECT_EQ(initial.density(row), initial.row_id(row) == 33 ? 1.125 : 1.25);
-        EXPECT_EQ(checked(initial.velocity(row))[0], vx);
+    for (const auto& row : initial) {
+        const double vx = row.id == 33 ? 5 : 0;
+        EXPECT_EQ(row.density, row.id == 33 ? 1.125 : 1.25);
+        EXPECT_EQ(row.velocity[0], vx);
     }
     ASSERT_TRUE(simulation.begin_window(.05).ok());
     ASSERT_TRUE(simulation.advance_trial().ok());
-    const auto trial = checked(participant.trial_snapshot(checked(participant.trial_stamp())));
-    ASSERT_NO_FATAL_FAILURE(check_wall_forces(trial, fluid, parameters));
     ASSERT_TRUE(simulation.restore_window().ok());
-    const auto restored = checked(participant.snapshot());
-    for (std::size_t row = 0; row < initial.row_count(); ++row) {
-        EXPECT_EQ(restored.row_id(row), initial.row_id(row));
-        EXPECT_EQ(restored.density(row), initial.density(row));
-        EXPECT_EQ(checked(restored.position(row)), checked(initial.position(row)));
-        EXPECT_EQ(checked(restored.velocity(row)), checked(initial.velocity(row)));
-    }
+    EXPECT_EQ(committed_rows(participant), initial);
+
+    // Inspect the same endpoint through an independent publication from the initial state.
+    const Fields direct_wall(walls);
+    const sph::FixedWallParticles3D direct_boundary{direct_wall.position, direct_wall.mass,
+                                                   direct_wall.ids};
+    sph::WcsphParticipant3D direct(input.get(), 4096, parameters, velocity, initial_density,
+                                   direct_boundary);
+    Simulation direct_sim(direct);
+    ASSERT_TRUE(direct_sim.initialize().ok());
+    ASSERT_TRUE(direct_sim.prepare().ok());
+    ASSERT_TRUE(direct_sim.advance(.05).ok());
+    ASSERT_NO_FATAL_FAILURE(check_wall_forces(committed_rows(direct), fluid, parameters));
+    ASSERT_TRUE(direct_sim.finalize().ok());
+
     ASSERT_TRUE(simulation.advance(.025).ok());
-    ASSERT_NO_FATAL_FAILURE(check_wall_forces(checked(participant.snapshot()), fluid, parameters));
-    ASSERT_NO_FATAL_FAILURE(check_wall_forces(trial, fluid, parameters));
+    ASSERT_NO_FATAL_FAILURE(check_wall_forces(committed_rows(participant), fluid, parameters));
     EXPECT_TRUE(simulation.finalize().ok());
 }
 
@@ -299,15 +313,15 @@ TEST(SphAdamiWall, RejectsInvalidGravityWallIdentityAndGhostFluid) {
     const sph::FixedWallParticles3D boundary{wall.position, wall.mass, wall.ids};
     sph::WcsphVerletParameters parameters{{1, 2, 3}, .5};
     parameters.gravity[1] = std::numeric_limits<double>::infinity();
-    sph::Participant3D invalid_g(input.get(), 128, parameters, velocity, input.mass, boundary);
+    sph::WcsphParticipant3D invalid_g(input.get(), 128, parameters, velocity, input.mass, boundary);
     EXPECT_FALSE(invalid_g.initialize(0).ok());
     parameters.gravity[1] = 0;
     wall.ids(0) = 12;
-    sph::Participant3D duplicate(input.get(), 128, parameters, velocity, input.mass, boundary);
+    sph::WcsphParticipant3D duplicate(input.get(), 128, parameters, velocity, input.mass, boundary);
     EXPECT_FALSE(duplicate.initialize(0).ok());
     wall.ids(0) = 21;
     input.ghost(0) = 1;
-    sph::Participant3D ghost(input.get(), 128, parameters, velocity, input.mass, boundary);
+    sph::WcsphParticipant3D ghost(input.get(), 128, parameters, velocity, input.mass, boundary);
     EXPECT_FALSE(ghost.initialize(0).ok());
 }
 
@@ -317,19 +331,19 @@ TEST(SphAdamiWall, InverseEosFailureRetainsAcceptedStateForShorterRetry) {
     velocity(0, 2) = 3;
     const sph::WcsphVerletParameters parameters{{1, 1, 1}, 1, {0, 0, -10}};
     const sph::FixedWallParticles3D boundary{wall.position, wall.mass, wall.ids};
-    sph::Participant3D participant(fluid.get(), 128, parameters, velocity, fluid.mass, boundary);
+    sph::WcsphParticipant3D participant(fluid.get(), 128, parameters, velocity, fluid.mass, boundary);
     Simulation simulation(participant);
     ASSERT_TRUE(simulation.initialize().ok());
     ASSERT_TRUE(simulation.prepare().ok());
-    const auto accepted = checked(participant.snapshot());
+    const auto accepted = committed_rows(participant);
     // The longer step brings an overhead wall into support. Its extrapolated
     // pressure falls below -B, where the wall has no positive Tait density.
     const auto status = simulation.advance(.1);
     EXPECT_EQ(status.code(), StatusCode::numerical_failure);
     EXPECT_DOUBLE_EQ(simulation.time().accepted_time, 0);
-    EXPECT_EQ(checked(checked(participant.snapshot()).position(0)), checked(accepted.position(0)));
+    EXPECT_EQ(committed_rows(participant), accepted);
     ASSERT_TRUE(simulation.advance(.01).ok());
-    EXPECT_NEAR(checked(checked(participant.snapshot()).velocity(0))[2], 2.9,
+    EXPECT_NEAR(committed_rows(participant).at(0).velocity[2], 2.9,
                 4 * std::numeric_limits<real>::epsilon());
     EXPECT_TRUE(simulation.finalize().ok());
 }

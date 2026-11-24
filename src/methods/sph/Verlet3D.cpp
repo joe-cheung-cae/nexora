@@ -50,42 +50,6 @@ bool fits_real(double value) {
 }
 } // namespace
 
-Status continuity_rate_3d(const Kokkos::Serial& exec, const NeighborView3D& grid,
-                          const Velocity3D::const_type& velocity, const DensityRate3D& rate) {
-    const auto& sources = grid.fields();
-    const auto owned = grid.owned_slots();
-    if (!valid_fields(sources.ids.extent(0), velocity) || !valid_fields(owned.extent(0), rate) ||
-        overlaps(rate, velocity) || overlaps(rate, sources.mass) || overlaps(rate, sources.position))
-        return {StatusCode::invalid_argument, "continuity fields have invalid extents, storage or output overlap"};
-    const double h = grid.smoothing_length();
-    const double inverse_h5 = 1 / (h * h * h * h * h);
-    std::size_t invalid{};
-    Kokkos::parallel_reduce(
-        "sph.continuity.rate", Policy(exec, 0, owned.extent(0)),
-        [&](std::size_t row, std::size_t& errors) {
-            const auto i = owned(row);
-            double sum = 0;
-            grid.for_each_neighbor(row, [&](LocalIndex j, double d2) {
-                const double gradient =
-                    m4_negative_radial_derivative_over_q_3d(Kokkos::sqrt(d2) / h);
-                if (gradient == 0)
-                    return;
-                double dot = 0;
-                for (int axis = 0; axis < 3; ++axis) {
-                    const double vj = velocity(j, axis);
-                    const double dx = double(sources.position(j, axis)) - sources.position(i, axis);
-                    dot += (double(velocity(i, axis)) - vj) * dx;
-                }
-                sum += (dot * sources.mass(j)) * gradient * inverse_h5;
-            });
-            rate(row) = sum;
-            errors += !Kokkos::isfinite(sum);
-        }, invalid);
-    if (invalid)
-        return {StatusCode::numerical_failure, "nonfinite SPH continuity rate"};
-    return {};
-}
-
 Status WcsphVerletParameters::validate() const {
     if (auto status = eos.validate(); !status.ok())
         return status;

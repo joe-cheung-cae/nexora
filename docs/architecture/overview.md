@@ -42,9 +42,9 @@ Reference 的同步窗口同时推进主状态、replay history 和控制序列�
 
 P1-07 的 Serial 验证夹具用既有 Simulation 窗口运行固定 CSR 的一维 M₄ 密度与 owned 归约。逐行输出与普通 double 归约共享一次遍历。夹具 participant 负责稳定 ID、字段授权、行列重排和结果发布，跨窗口读者持有完整快照。私有目标 `nexora_sph_fixed_csr_fixture` 仅供一维测试及显式构建的 `nexora_sph_benchmark` 使用。[夹具源码](../../validation/sph/fixed_csr/) · [SPH Serial 验证](../../validation/sph/serial.md)
 
-给定三维粒子状态可直接建立或更新格索引，并调用密度和压力算子。静态验证通过 `CellGrid`、`prepare_geometry_3d` 和算子接口核对稳定 ID、邻居及数值。[格索引](../../validation/sph/cell-begin-serial.md) · [压力](../../validation/sph/wcsph-pressure-serial.md)
+给定三维粒子状态可直接建立或更新 `CellGrid`，以只读 `NeighborView3D` 调用密度、压力或连续性算子。格网和版本比较按实际分配前预留受控额度。四组静水初态直接运行密度和固定壁压力算子。[格索引](../../validation/sph/cell-begin-serial.md) · [重构验收](../../validation/sph/sph-3d-refactor-serial.md)
 
-私有 `sph::Participant3D` 承担三维 WCSPH 积分窗口。它接收全 owned 的流体初态和速度，可另供固定壁粒子与恒定重力。推进需要按输入流体顺序提供初始密度。每个接受步按稳定 ID 携带密度、位置和速度。无显式初始密度的重载用于初态核求和诊断。每个算例以 `WcsphVerletParameters::smoothing_length` 指定统一且固定的平滑长度，默认 1 m。格宽和核支持半径均为 `2h`，密度求和、压力加速度和声学 CFL 共享该尺度。漂移后按格归属复用或重建 `cellBegin`，在旧状态和新位置的预测速度上分别求连续性方程右端，以梯形公式更新密度，再计算 Tait 表压、Adami 湿壁状态和流体压力加速度。Velocity Verlet 的两次半步均使用压力加速度与重力之和，步长上限来自已提交速度的声学 CFL。流体位置、速度和力学字段一起提交，回滚保留原状态、时钟与 CFL 上限。[多步时间积分](../../validation/sph/wcsph-verlet-serial.md) · [固定壁与历史轨迹对照](../../validation/sph/adami-hydrostatic-serial.md) · [物理质量静水初态验收](../../validation/sph/hydrostatic-initial-resolution.md) · [原核求和轨迹](../../validation/sph/hydrostatic-trajectory-resolution.md) · [连续性密度与壁层验证](../../validation/sph/hydrostatic-continuity-repair.md)
+私有 `sph::WcsphParticipant3D` 拥有输入槽几何、owned 行表及显式初始化的四个流体字段，负责窗口授权、提交和恢复。`WcsphStep3D` 持有固定壁组、派生格网缓存和六个积分缓冲。统一固定平滑长度 h 由 `WcsphVerletParameters::smoothing_length` 给定，格宽及支持半径为 2h。两端连续性经稳定 ID 对齐后作梯形校正，压力用 Tait EOS 和 Adami 外推计算，Velocity Verlet 在两次半踢使用压力加速度和重力。参与者从候选终速求声学 CFL，提交后连同几何和字段发布。同步逐行及逐壁读取使用已提交几何和行表，驱逐格网后仍可读。回滚保留已提交的粒子值、行序、版本、时钟和步长约束。[重构验收](../../validation/sph/sph-3d-refactor-serial.md) · [固定壁历史对照](../../validation/sph/hydrostatic-continuity-repair.md#solver-cleanup-trajectory)
 
 CLI 的 `validate`、`plan` 和 `run` 共用版本化 Reference case 预检。`run` 装配现有 `Simulation` 与内部 Reference participant，并发布可核对的 accepted 数值摘要。 [case 格式与验证](reference-case.md)
 

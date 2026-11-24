@@ -12,9 +12,8 @@
 #include <limits>
 #include <locale>
 #include <methods/sph/Density3D.hpp>
-#include <nexora/simulation/Simulation.hpp>
+#include <methods/sph/Pressure3D.hpp>
 #include <numbers>
-#include <participants/sph/Participant3D.hpp>
 #include <vector>
 
 namespace {
@@ -91,20 +90,29 @@ void measure(TankCase fixture, std::ostream* csv) {
     const double h_cubed = h_squared * fixture.h;
     const int layers = wall_layers(fixture.h, dx);
     const auto tank = make_tank(fixture.n, fixture.h);
-    const Fields fluid(tank.fluid), wall(tank.wall);
-    const sph::Velocity3D rest("initial_tank.rest", tank.fluid.size());
-    const sph::WcsphVerletParameters parameters{eos, .5, {0, 0, -gravity}, fixture.h};
-    const sph::FixedWallParticles3D fixed{wall.position, wall.mass, wall.ids};
+    auto sources = tank.fluid;
+    sources.reserve(tank.fluid.size() + tank.wall.size());
+    for (auto wall : tank.wall) {
+        wall.ghost = 1;
+        sources.push_back(wall);
+    }
+    const Fields fields(sources);
+    const Kokkos::Serial exec;
+    const auto grid = checked(sph::CellGrid::build(exec, fields.get(), 10000, {}, fixture.h));
+    const auto neighbors = grid.neighbors();
+    const auto owned_count = neighbors.owned_slots().extent(0);
+    ASSERT_EQ(owned_count, tank.fluid.size());
+    const sph::Values densities("initial_tank.density", owned_count);
+    const sph::Values pressures("initial_tank.pressure", owned_count);
+    const sph::Acceleration3D accelerations("initial_tank.pressure_acceleration", owned_count);
+    const sph::WallAcceleration3D wall_acceleration("initial_tank.wall_acceleration", sources.size());
+    const auto density_status = sph::evaluate_density_3d(exec, neighbors, densities);
+    ASSERT_TRUE(density_status.ok()) << density_status.message();
+    const auto pressure_status = sph::evaluate_pressure_3d(
+        exec, neighbors, sph::TaitEos(eos), densities, pressures, accelerations, wall_acceleration,
+        {0, 0, -gravity});
+    ASSERT_TRUE(pressure_status.ok()) << pressure_status.message();
     const auto reference = reference_layers(fixture.n, layers, dx, fixture.h);
-    sph::Participant3D participant(fluid.get(), 10000, parameters, rest, fixed);
-    Simulation simulation(participant);
-    const auto initialized = simulation.initialize();
-    ASSERT_TRUE(initialized.ok()) << initialized.message();
-    const auto prepared = simulation.prepare();
-    ASSERT_TRUE(prepared.ok()) << prepared.message();
-    const auto state = checked(participant.snapshot());
-    ASSERT_EQ(state.row_count(), tank.fluid.size());
-    EXPECT_EQ(simulation.time().accepted_steps, 0);
 
     // IDs are consecutive within each source array, independent of packed cell order.
     const auto source_by_id = [&](std::uint64_t id) -> const Particle& {
@@ -116,26 +124,29 @@ void measure(TankCase fixture, std::ostream* csv) {
     double total_mass = 0;
     double pressure_error_sum = 0;
     double acceleration_error_sum = 0;
-    for (std::size_t row = 0; row < state.row_count(); ++row) {
-        const auto id = state.row_id(row);
+    const auto& packed = neighbors.fields();
+    for (std::size_t row = 0; row < owned_count; ++row) {
+        const auto slot = neighbors.owned_slots()(row);
+        const auto id = packed.ids(slot);
         SCOPED_TRACE(id);
         ASSERT_GT(id, 0);
         ASSERT_LE(id, tank.fluid.size());
         ASSERT_FALSE(seen[id - 1]);
         seen[id - 1] = true;
-        const auto position = checked(state.position(row));
+        const std::array position{packed.position(slot, 0), packed.position(slot, 1),
+                                  packed.position(slot, 2)};
         const auto& center = source_by_id(id);
         EXPECT_EQ(position, center.position);
-        const double density = state.density(row);
-        const double pressure = checked(state.pressure(row));
-        const auto ap = checked(state.pressure_acceleration(row));
+        const double density = densities(row);
+        const double pressure = pressures(row);
+        const std::array ap{accelerations(row, 0), accelerations(row, 1), accelerations(row, 2)};
 
         const double self_weight = sph::m4_weight_3d(0) / h_cubed;
         Moments observed{volume * self_weight, {}, center.mass * self_weight, 1};
         // Counts include self, wall sources and admitted q=2 neighbors, whose
         // spline weight and gradient are zero.
-        state.for_each_neighbor(row, [&](std::uint64_t source_id, double d2) {
-            const auto& source = source_by_id(source_id);
+        neighbors.for_each_neighbor(row, [&](LocalIndex source_slot, double d2) {
+            const auto& source = source_by_id(packed.ids(source_slot));
             const double q = std::sqrt(d2) / fixture.h;
             const double w = sph::m4_weight_3d(q) / h_cubed;
             const double dz = double(source.position[2]) - position[2];
@@ -178,7 +189,6 @@ void measure(TankCase fixture, std::ostream* csv) {
     EXPECT_NEAR(std::sqrt(pressure_error_sum / total_mass), fixture.pressure_rms_pa, 2);
     EXPECT_NEAR(std::sqrt(acceleration_error_sum / total_mass) / gravity,
                 fixture.acceleration_residual_rms_over_g, .002);
-    ASSERT_TRUE(simulation.finalize().ok());
 }
 
 using LatticeIndex = std::array<int, 3>;

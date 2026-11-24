@@ -4,7 +4,7 @@ add_library(nexora_methods_sph STATIC
     Pressure3D.cpp
     SphBoundary.cpp
     TaitEos.cpp
-    Verlet3D.cpp
+    Verlet3D.cpp Continuity3D.cpp Continuity3D.hpp
     ParticleFields3D.hpp
     neighbors/NeighborView3D.hpp
     neighbors/CellGrid.cpp)

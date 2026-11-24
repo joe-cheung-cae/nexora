@@ -7,7 +7,7 @@
 #include <limits>
 #include <nexora/simulation/Simulation.hpp>
 #include <numbers>
-#include <participants/sph/Participant3D.hpp>
+#include <participants/sph/WcsphParticipant3D.hpp>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -162,24 +162,27 @@ struct Observation {
     }
 };
 
-Observation observe(const sph::Snapshot3D& state, const Tank& tank) {
+Observation observe(sph::WcsphParticipant3D& participant, const Tank& tank) {
     Observation observed;
     observed.centers_by_id.resize(tank.fluid.size());
-    for (std::size_t row = 0; row < state.row_count(); ++row) {
-        const auto id = state.row_id(row);
-        const double mass = tank.fluid.at(id - 1).mass;
-        const auto x = checked(state.position(row));
-        const auto v = checked(state.velocity(row));
-        const auto a = checked(state.pressure_acceleration(row));
-        const double pressure = checked(state.pressure(row));
+    std::size_t row_count = 0;
+    const auto read = participant.visit_committed_rows([&](sph::CommittedRow3D row) {
+        ++row_count;
+        const auto id = row.id;
+        const double mass = row.mass;
+        EXPECT_EQ(mass, tank.fluid.at(id - 1).mass);
+        const auto& x = row.position;
+        const auto& v = row.velocity;
+        const auto& a = row.pressure_acceleration;
+        const double pressure = row.pressure;
         const auto finite = [](const Center& vector) {
             return std::all_of(vector.begin(), vector.end(),
                                [](real component) { return std::isfinite(component); });
         };
-        if (!std::isfinite(pressure) || !std::isfinite(state.density(row)) || !finite(x) ||
+        if (!std::isfinite(pressure) || !std::isfinite(row.density) || !finite(x) ||
             !finite(v) || !finite(a)) {
             ADD_FAILURE() << "Nonfinite tank fields for fluid particle " << id;
-            continue;
+            return;
         }
         const double reference_pressure = exact_pressure(x[2]);
         const double error = pressure - reference_pressure;
@@ -220,7 +223,9 @@ Observation observe(const sph::Snapshot3D& state, const Tank& tank) {
         observed.pressure.add(mass, error);
         observed.speed.add(mass, std::hypot(v[0], v[1], v[2]));
         observed.force_residual.add(mass, std::hypot(double(a[0]), double(a[1]), a[2] - g));
-    }
+    });
+    EXPECT_TRUE(read.ok()) << read.message();
+    EXPECT_EQ(row_count, tank.fluid.size());
     return observed;
 }
 
@@ -290,11 +295,14 @@ void run_tank(const Tank& tank, bool uncompensated) {
     const sph::WcsphVerletParameters parameters{eos, .5, {0, 0, -g}};
     const sph::FixedWallParticles3D fixed{wall.position, wall.mass, wall.ids};
     const Fields fluid(tank.fluid);
-    sph::Participant3D participant(fluid.get(), 10000, parameters, rest, fixed);
+    const sph::Values initial_density("tank.initial_density", tank.fluid.size());
+    for (std::size_t i = 0; i < tank.fluid.size(); ++i)
+        initial_density(i) = static_cast<real>(exact_density(tank.fluid[i].position[2]));
+    sph::WcsphParticipant3D participant(fluid.get(), 10000, parameters, rest, initial_density, fixed);
     Simulation simulation(participant);
     ASSERT_TRUE(simulation.initialize().ok());
     ASSERT_TRUE(simulation.prepare().ok());
-    const auto initial = observe(checked(participant.snapshot()), tank);
+    const auto initial = observe(participant, tank);
     record_endpoint(prefix + "initial", initial);
 
     constexpr double maximum_dt = 1. / 256;
@@ -318,9 +326,7 @@ void run_tank(const Tank& tank, bool uncompensated) {
         minimum_dt = std::min(minimum_dt, dt);
         const auto advance = simulation.advance(dt);
         ASSERT_TRUE(advance.ok()) << "time " << time << " s, " << advance.message();
-        const auto snapshot = checked(participant.snapshot());
-        ASSERT_EQ(snapshot.row_count(), tank.fluid.size());
-        last = observe(snapshot, tank);
+        last = observe(participant, tank);
         peak_rms_speed = std::max(peak_rms_speed, last.speed.rms());
         peak_max_speed = std::max(peak_max_speed, last.speed.max_absolute);
         peak_rms_pressure_error = std::max(peak_rms_pressure_error, last.pressure.rms());

@@ -11,7 +11,7 @@ namespace nexora::sph {
 class CellGrid {
   public:
     using Indices = NeighborView3D::Indices;
-    enum class StorageGroup { values, cells, permutations, sort_keys };
+    enum class StorageGroup { position, mass, identity, cells, permutations, sort_keys };
     using Ticket = std::shared_ptr<const void>;
     using AdmitStorage = std::function<Result<Ticket>(StorageGroup, std::size_t bytes)>;
 
@@ -37,6 +37,7 @@ class CellGrid {
     const NeighborView3D& neighbors() const { return query_; }
     double smoothing_length() const { return query_.smoothing_length(); }
     double support_radius() const { return query_.support_radius(); }
+    const std::array<Ticket, 3>& field_storage() const { return query_.field_storage_; }
     const ParticleFields3D& fields() const { return query_.fields(); }
     const Indices& owned_slots() const { return query_.owned_slots(); }
     const Indices& cell_begin() const { return query_.cell_begin_; }

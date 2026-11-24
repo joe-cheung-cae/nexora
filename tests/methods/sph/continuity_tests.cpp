@@ -5,8 +5,9 @@
 #include <methods/sph/Verlet3D.hpp>
 #include <nexora/simulation/Simulation.hpp>
 #include <numbers>
-#include <participants/sph/Participant3D.hpp>
+#include <participants/sph/WcsphParticipant3D.hpp>
 #include <sstream>
+#include <vector>
 
 namespace {
 using namespace nexora;
@@ -16,6 +17,14 @@ sph::Values initial_density(std::initializer_list<real> entries) {
     sph::Values result("continuity_test.density", entries.size());
     std::copy(entries.begin(), entries.end(), result.data());
     return result;
+}
+
+std::vector<sph::CommittedRow3D> committed_rows(sph::WcsphParticipant3D& participant) {
+    std::vector<sph::CommittedRow3D> rows;
+    const auto status = participant.visit_committed_rows(
+        [&](sph::CommittedRow3D row) { rows.push_back(row); });
+    EXPECT_TRUE(status.ok()) << status.message();
+    return rows;
 }
 
 TEST(SphVerletOperators, CflReductionIncludesNonfiniteVelocityAmongFiniteRows) {
@@ -31,18 +40,19 @@ TEST(SphContinuity, StationaryUniformDensityIsIndependentOfKernelMassSum) {
     Fields fields({{{0, 0, 0}, 2, 31, 0}, {{.5, 0, 0}, 3, 19, 0}});
     sph::Velocity3D velocity("continuity_test.velocity", 2);
     auto rho = initial_density({7, 7});
-    sph::Participant3D participant(fields.get(), 16, {{7, 1, 3}, 1}, velocity, rho);
+    sph::WcsphParticipant3D participant(fields.get(), 16, {{7, 1, 3}, 1}, velocity, rho);
     Simulation sim(participant);
     ASSERT_TRUE(sim.initialize().ok());
     rho(0) = 5;
     ASSERT_TRUE(sim.prepare().ok());
     ASSERT_TRUE(sim.advance(.25).ok());
-    const auto state = checked(participant.snapshot());
-    for (std::size_t row = 0; row < state.row_count(); ++row) {
-        EXPECT_EQ(state.density(row), 7);
-        EXPECT_EQ(checked(state.pressure(row)), 0);
-        EXPECT_EQ(checked(state.velocity(row)), (std::array<real, 3>{}));
-        EXPECT_EQ(state.mass(row), state.row_id(row) == 31 ? 2 : 3);
+    const auto rows = committed_rows(participant);
+    ASSERT_EQ(rows.size(), 2u);
+    for (const auto& row : rows) {
+        EXPECT_EQ(row.density, 7);
+        EXPECT_EQ(row.pressure, 0);
+        EXPECT_EQ(row.velocity, (std::array<real, 3>{}));
+        EXPECT_EQ(row.mass, row.id == 31 ? 2 : 3);
     }
     EXPECT_TRUE(sim.finalize().ok());
 }
@@ -57,8 +67,8 @@ TEST(SphContinuity, FixedWallCompressionAndExpansionFollowAnalyticRelativeVeloci
     for (real speed : {real{-.5}, real{0}, real{.5}}) {
         sph::Velocity3D velocity("continuity_test.velocity", 1);
         velocity(0, 0) = speed;
-        sph::Participant3D participant(fluid.get(), 16, parameters, velocity, initial_density({2}),
-                                       boundary);
+        sph::WcsphParticipant3D participant(fluid.get(), 16, parameters, velocity,
+                                            initial_density({2}), boundary);
         Simulation sim(participant);
         ASSERT_TRUE(sim.initialize().ok());
         ASSERT_TRUE(sim.prepare().ok());
@@ -67,13 +77,13 @@ TEST(SphContinuity, FixedWallCompressionAndExpansionFollowAnalyticRelativeVeloci
             const double q = separation / h;
             return 3 * speed * (3 * q - 2.25 * q * q) / (std::numbers::pi * h * h * h * h);
         };
-        const auto state = checked(participant.snapshot());
+        const auto rows = committed_rows(participant);
+        ASSERT_EQ(rows.size(), 1u);
         const double change = dt * .5 * (rate(1) + rate(1 - speed * dt));
-        EXPECT_NEAR(state.density(0), 2 + change, 4 * std::numeric_limits<real>::epsilon());
+        EXPECT_NEAR(rows[0].density, 2 + change, 4 * std::numeric_limits<real>::epsilon());
         if (speed != 0)
-            EXPECT_GT((state.density(0) - 2) * speed, 0);
-        EXPECT_EQ(state.row_count(), 1u);
-        EXPECT_EQ(state.mass(0), 2);
+            EXPECT_GT((rows[0].density - 2) * speed, 0);
+        EXPECT_EQ(rows[0].mass, 2);
         EXPECT_TRUE(sim.finalize().ok());
     }
 }
@@ -86,27 +96,27 @@ long double density_invariant_error(int steps) {
     sph::Velocity3D velocity("continuity_test.velocity", 2);
     velocity(0, 0) = .75;
     velocity(1, 0) = -.25;
-    sph::Participant3D participant(fields.get(), 32, {{2, real{.01}, 1}, 1}, velocity,
-                                   initial_density({2, 3}));
+    sph::WcsphParticipant3D participant(fields.get(), 32, {{2, real{.01}, 1}, 1}, velocity,
+                                        initial_density({2, 3}));
     Simulation sim(participant);
     EXPECT_TRUE(sim.initialize().ok());
     EXPECT_TRUE(sim.prepare().ok());
     const auto initial = explicit_csr(cloud);
     for (int n = 0; n < steps; ++n)
         EXPECT_TRUE(sim.advance(.75 / steps).ok());
-    const auto state = checked(participant.snapshot());
-    for (std::size_t row = 0; row < state.row_count(); ++row) {
-        const auto i = state.row_id(row) == 46 ? 0u : 1u;
-        cloud[i].position = checked(state.position(row));
-        EXPECT_EQ(state.mass(row), cloud[i].mass);
+    const auto rows = committed_rows(participant);
+    EXPECT_EQ(rows.size(), cloud.size());
+    for (const auto& row : rows) {
+        const auto i = row.id == 46 ? 0u : 1u;
+        cloud[i].position = row.position;
+        EXPECT_EQ(row.mass, cloud[i].mass);
     }
     const auto final = explicit_csr(cloud);
     long double error{};
-    for (std::size_t row = 0; row < state.row_count(); ++row) {
-        const auto id = state.row_id(row);
-        const auto exact_change = final.density.at(id) - initial.density.at(id);
+    for (const auto& row : rows) {
+        const auto exact_change = final.density.at(row.id) - initial.density.at(row.id);
         EXPECT_GT(std::abs(exact_change), .1L);
-        error = std::max(error, std::abs(state.density(row) - (id == 46 ? 2 : 3) - exact_change));
+        error = std::max(error, std::abs(row.density - (row.id == 46 ? 2 : 3) - exact_change));
     }
     EXPECT_TRUE(sim.finalize().ok());
     return error;
@@ -137,32 +147,38 @@ TEST(SphContinuity, CrossingParticlesPreserveUnequalMassAndDensityById) {
     velocity(0, 0) = -1;
     velocity(1, 0) = 1;
     const sph::WcsphVerletParameters parameters{{2, real{.001}, 1}, 1};
-    sph::Participant3D participant(fields.get(), 16, parameters, velocity, initial_density({2, 8}));
+    sph::WcsphParticipant3D participant(fields.get(), 16, parameters, velocity, initial_density({2, 8}));
     Simulation sim(participant);
     ASSERT_TRUE(sim.initialize().ok());
     ASSERT_TRUE(sim.prepare().ok());
-    const auto before = checked(participant.snapshot());
+    const auto before = committed_rows(participant);
     ASSERT_TRUE(sim.advance(.5).ok());
-    const auto after = checked(participant.snapshot());
-    EXPECT_NE(before.row_id(0), after.row_id(0));
-    for (std::size_t row = 0; row < after.row_count(); ++row) {
-        const bool first = after.row_id(row) == 73;
-        EXPECT_EQ(after.mass(row), first ? 2 : 5);
+    const auto after = committed_rows(participant);
+    ASSERT_EQ(before.size(), 2u);
+    ASSERT_EQ(after.size(), 2u);
+    EXPECT_NE(before[0].id, after[0].id);
+    for (const auto& row : after) {
+        const bool first = row.id == 73;
+        EXPECT_EQ(row.mass, first ? 2 : 5);
         // Endpoints are mirrored around the crossing in the ballistic limit,
         // so the endpoint rates cancel to within the small pressure correction.
-        EXPECT_NEAR(after.density(row), first ? 2 : 8, 1.e-5);
+        EXPECT_NEAR(row.density, first ? 2 : 8, 1.e-5);
     }
     EXPECT_TRUE(sim.finalize().ok());
 }
 
-TEST(SphContinuity, InvalidExplicitDensityAndExtentPublishNoSnapshot) {
+TEST(SphContinuity, InvalidExplicitDensityAndExtentPublishNoRows) {
     Fields fields({{{0, 0, 0}, 1, 31, 0}});
     sph::Velocity3D velocity("continuity_test.velocity", 1);
     const auto rejects = [&](const sph::Values& rho, StatusCode reason) {
-        sph::Participant3D participant(fields.get(), 16, {{1, 1, 1}, 1}, velocity, rho);
+        sph::WcsphParticipant3D participant(fields.get(), 16, {{1, 1, 1}, 1}, velocity, rho);
         Simulation sim(participant);
         EXPECT_EQ(sim.initialize().code(), reason);
-        EXPECT_FALSE(participant.snapshot().ok());
+        std::size_t visits = 0;
+        const auto status = participant.visit_committed_rows(
+            [&](sph::CommittedRow3D) { ++visits; });
+        EXPECT_EQ(status.code(), StatusCode::invalid_state);
+        EXPECT_EQ(visits, 0u);
         EXPECT_TRUE(sim.finalize().ok());
     };
     rejects(initial_density({1, 1}), StatusCode::invalid_argument);
@@ -179,36 +195,51 @@ void check_density_failure(real initial, real mass, real speed, double failed_dt
     velocity(1, 0) = -speed;
     const sph::WcsphVerletParameters parameters{{initial, real{.125}, 1}, 1};
     const auto rho = initial_density({initial, initial});
-    sph::Participant3D participant(fields.get(), 32, parameters, velocity, rho);
-    sph::Participant3D clean(fields.get(), 32, parameters, velocity, rho);
+    sph::WcsphParticipant3D participant(fields.get(), 32, parameters, velocity, rho);
+    sph::WcsphParticipant3D clean(fields.get(), 32, parameters, velocity, rho);
     Simulation sim(participant), clean_sim(clean);
     ASSERT_TRUE(sim.initialize().ok());
     ASSERT_TRUE(sim.prepare().ok());
     ASSERT_TRUE(clean_sim.initialize().ok());
     ASSERT_TRUE(clean_sim.prepare().ok());
-    const auto before = checked(participant.snapshot());
-    ASSERT_LE(failed_dt, participant.time_constraint(0).maximum_step);
+    const auto before = committed_rows(participant);
+    ASSERT_EQ(before.size(), 2u);
+    const auto bound = participant.time_constraint(0).maximum_step;
+    ASSERT_LE(failed_dt, bound);
     const auto failure = sim.advance(failed_dt);
     EXPECT_EQ(failure.code(), StatusCode::numerical_failure);
     EXPECT_NE(failure.message().find("owned WCSPH density"), std::string::npos)
         << failure.message();
     EXPECT_EQ(sim.time().accepted_steps, 0u);
-    const auto restored = checked(participant.snapshot());
-    EXPECT_EQ(before.stamp, restored.stamp);
-    for (std::size_t row = 0; row < restored.row_count(); ++row) {
-        EXPECT_EQ(restored.density(row), initial);
-        EXPECT_EQ(checked(restored.position(row)), checked(before.position(row)));
-        EXPECT_EQ(checked(restored.velocity(row)), checked(before.velocity(row)));
+    EXPECT_EQ(sim.time().accepted_time, 0);
+    EXPECT_EQ(participant.time_constraint(0).maximum_step, bound);
+    const auto restored = committed_rows(participant);
+    ASSERT_EQ(restored.size(), before.size());
+    for (std::size_t row = 0; row < restored.size(); ++row) {
+        EXPECT_EQ(restored[row].id, before[row].id);
+        EXPECT_EQ(restored[row].mass, before[row].mass);
+        EXPECT_EQ(restored[row].density, initial);
+        EXPECT_EQ(restored[row].position, before[row].position);
+        EXPECT_EQ(restored[row].velocity, before[row].velocity);
+        EXPECT_EQ(restored[row].pressure, before[row].pressure);
+        EXPECT_EQ(restored[row].pressure_acceleration, before[row].pressure_acceleration);
     }
     ASSERT_TRUE(sim.advance(retry_dt).ok());
     ASSERT_TRUE(clean_sim.advance(retry_dt).ok());
-    const auto retried = checked(participant.snapshot()), reference = checked(clean.snapshot());
-    for (std::size_t row = 0; row < retried.row_count(); ++row) {
-        EXPECT_EQ(retried.row_id(row), reference.row_id(row));
-        EXPECT_EQ(retried.density(row), reference.density(row));
-        EXPECT_EQ(checked(retried.velocity(row)), checked(reference.velocity(row)));
-        EXPECT_EQ(checked(retried.pressure(row)), checked(reference.pressure(row)));
+    const auto retried = committed_rows(participant), reference = committed_rows(clean);
+    ASSERT_EQ(retried.size(), 2u);
+    ASSERT_EQ(reference.size(), retried.size());
+    for (std::size_t row = 0; row < retried.size(); ++row) {
+        EXPECT_EQ(retried[row].id, reference[row].id);
+        EXPECT_EQ(retried[row].mass, reference[row].mass);
+        EXPECT_EQ(retried[row].density, reference[row].density);
+        EXPECT_EQ(retried[row].position, reference[row].position);
+        EXPECT_EQ(retried[row].velocity, reference[row].velocity);
+        EXPECT_EQ(retried[row].pressure, reference[row].pressure);
+        EXPECT_EQ(retried[row].pressure_acceleration, reference[row].pressure_acceleration);
     }
+    EXPECT_EQ(participant.time_constraint(retry_dt).maximum_step,
+              clean.time_constraint(retry_dt).maximum_step);
     EXPECT_TRUE(sim.finalize().ok());
     EXPECT_TRUE(clean_sim.finalize().ok());
 }

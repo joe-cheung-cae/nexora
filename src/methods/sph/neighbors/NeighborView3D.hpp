@@ -74,7 +74,7 @@ class NeighborView3D {
         using std::swap;
         swap(smoothing_length_, other.smoothing_length_);
         swap(radius_squared_, other.radius_squared_);
-        swap(values_ticket_, other.values_ticket_);
+        swap(field_storage_, other.field_storage_);
         swap(cells_ticket_, other.cells_ticket_);
         swap(fields_, other.fields_);
         swap(owned_slots_, other.owned_slots_);
@@ -91,7 +91,8 @@ class NeighborView3D {
 
     double smoothing_length_ = 1;
     double radius_squared_ = 4;
-    std::shared_ptr<const void> values_ticket_, cells_ticket_;
+    std::array<std::shared_ptr<const void>, 3> field_storage_; // position, mass, IDs/ghost
+    std::shared_ptr<const void> cells_ticket_;
     ParticleFields3D fields_;
     Indices owned_slots_, cell_begin_;
     std::array<std::int64_t, 3> origin_{};

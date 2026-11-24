@@ -11,8 +11,6 @@ namespace nexora::sph {
 
 using Velocity3D = Acceleration3D;
 
-using DensityRate3D = Kokkos::View<double*, Kokkos::HostSpace>;
-
 // Keep overflow visible to the next operator even when a value just above FLT_MAX
 // would round back to a finite float.
 KOKKOS_INLINE_FUNCTION real narrow_step_value(double value) {
@@ -22,11 +20,6 @@ KOKKOS_INLINE_FUNCTION real narrow_step_value(double value) {
     }
     return static_cast<real>(value);
 }
-
-// Velocity follows sorted source slots, including wall slots.
-// Output rates follow owned rows.
-Status continuity_rate_3d(const Kokkos::Serial&, const NeighborView3D&,
-                          const Velocity3D::const_type& velocity, const DensityRate3D& rate);
 
 struct WcsphVerletParameters {
     WcsphParameters eos;

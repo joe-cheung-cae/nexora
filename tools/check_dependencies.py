@@ -150,6 +150,14 @@ SPH_PRESSURE_ORACLE = SPH_CELL_GRID_TEST.with_name("wcsph_oracle.hpp")
 SPH_WINDOW_TESTS = {SPH_ADAMI_TEST,
                     SPH_CELL_GRID_TEST.with_name("hydrostatic_tank_tests.cpp"),
                     SPH_VERLET_TEST, SPH_HYDROSTATIC_INITIAL_TEST, SPH_CONTINUITY_TEST}
+SPH_PARTICIPANT_CONSUMERS = (SPH_WINDOW_TESTS - {SPH_HYDROSTATIC_INITIAL_TEST}) | {SPH_TANK_TRAJECTORY}
+SPH_PARTICIPANT_HEADER = "participants/sph/WcsphParticipant3D.hpp"
+SPH_STEP_HEADER = "participants/sph/WcsphStep3D.hpp"
+SPH_GEOMETRY_VERSIONS_HEADER = "participants/sph/GeometryVersions3D.hpp"
+SPH_GEOMETRY_SOURCES = {
+    Path(*SPH_PARTICIPANT_DIR) / name
+    for name in ("Geometry3D.hpp", "Geometry3D.cpp", "GeometryVersions3D.hpp")
+}
 SPH_GRID_ORACLE = SPH_CELL_GRID_TEST.with_name("cell_grid_oracle.hpp")
 DATA_PREINIT_TEST = Path("tests/data/preinitialization_tests.cpp")
 KOKKOS_VIEW_PROBE_CONSUMERS = {Path("tests/kokkos/kokkos_tests.cpp"),
@@ -259,7 +267,7 @@ def check_internal_include(relative: Path, scope: str, header: str) -> list[str]
                         SPH_TANK_TRAJECTORY, SPH_TANK_FIXTURE, *SPH_WINDOW_TESTS}:
             return []
         return [f"{relative}: {header} is private to the 3D SPH regression tests"]
-    if relative == Path(*SPH_PARTICIPANT_DIR) / "GeometryVersions3D.hpp" and parts[-1] == "CellGrid.hpp":
+    if relative in SPH_GEOMETRY_SOURCES and parts[-1] == "CellGrid.hpp":
         return [f"{relative}: geometry version comparison uses particle fields and layout indices"]
     if parts[-1] in {"NeighborView3D.hpp", "ParticleFields3D.hpp"}:
         if location[:3] in {SPH_METHOD_DIR, SPH_PARTICIPANT_DIR} or relative == SPH_CELL_GRID_TEST:
@@ -291,14 +299,16 @@ def check_internal_include(relative: Path, scope: str, header: str) -> list[str]
         if (location[:3] == SPH_PARTICIPANT_DIR
                 or (parts[0] == "methods"
                     and (location[:3] == SPH_METHOD_DIR or relative in {SPH_CELL_GRID_TEST, SPH_GRID_ORACLE}))
-                or (relative == SPH_CELL_GRID_TEST and parts == ["participants", "sph", "Geometry3D.hpp"])
+                or (relative == SPH_CELL_GRID_TEST and "/".join(parts) == SPH_GEOMETRY_VERSIONS_HEADER)
+                or (relative == SPH_VERLET_TEST and "/".join(parts) == SPH_STEP_HEADER)
                 or (relative == SPH_HYDROSTATIC_INITIAL_TEST
                     and parts == ["methods", "sph", "Density3D.hpp"])
-                or (relative in {SPH_PRESSURE_TEST, SPH_PRESSURE_ORACLE, SPH_TANK_FIXTURE}
+                or (relative in {SPH_PRESSURE_TEST, SPH_PRESSURE_ORACLE, SPH_TANK_FIXTURE,
+                                    SPH_HYDROSTATIC_INITIAL_TEST}
                     and parts == ["methods", "sph", "Pressure3D.hpp"])
                 or (relative == SPH_CONTINUITY_TEST and parts == ["methods", "sph", "Verlet3D.hpp"])
-                or (relative in {*SPH_WINDOW_TESTS, SPH_TANK_TRAJECTORY}
-                    and parts == ["participants", "sph", "Participant3D.hpp"])):
+                or (relative in SPH_PARTICIPANT_CONSUMERS
+                    and "/".join(parts) == SPH_PARTICIPANT_HEADER)):
             return []
         return [f"{relative}: forbidden internal include {header} from this module"]
 
@@ -494,7 +504,7 @@ def policy_self_test() -> list[str]:
     for header in PRIVATE_ENTITY_HEADERS:
         for path, scope in ((Path("src/data/TransportReceiver.hpp"), "src"),
                             (STRUCTURE_STATE, "src"),
-                            (Path("src/participants/sph/Participant3D.hpp"), "src"),
+                            (Path("src") / SPH_PARTICIPANT_HEADER, "src"),
                             (ENTITY_TOPOLOGY_TEST, "tests"), (STRUCTURE_FIXTURE, "tests")):
             if check_internal_include(path, scope, f"data/{header}"):
                 failures.append(f"checker self-test failed to allow {header} in {path}")
@@ -554,9 +564,9 @@ def policy_self_test() -> list[str]:
                               "tests", "methods/reference/State.hpp"):
         failures.append("checker self-test failed to allow reference tests to include internals")
     sph_method = Path("src/methods/sph/Density3D.hpp")
-    sph_participant = Path("src/participants/sph/Participant3D.hpp")
-    for path in SPH_WINDOW_TESTS:
-        if check_internal_include(path, "tests", "participants/sph/Participant3D.hpp"):
+    sph_participant = Path("src") / SPH_PARTICIPANT_HEADER
+    for path in SPH_PARTICIPANT_CONSUMERS:
+        if check_internal_include(path, "tests", SPH_PARTICIPANT_HEADER):
             failures.append(f"checker self-test failed to allow the 3D SPH window test in {path}")
     for path in (sph_participant, SPH_GRID_ORACLE, REFERENCE_COMMAND_SOURCE):
         if not check_internal_include(path, path.parts[0], SPH_GRID_ORACLE.name):
@@ -568,9 +578,9 @@ def policy_self_test() -> list[str]:
             failures.append(f"checker self-test failed to allow the SPH method in {path}")
     package_consumer = Path("tests/package/consumer/kokkos.cpp")
     for path in (sph_method, SPH_CELL_GRID_TEST, SPH_PRESSURE_TEST,
-                 REFERENCE_COMMAND_SOURCE, package_consumer,
+                 REFERENCE_COMMAND_SOURCE, package_consumer, SPH_HYDROSTATIC_INITIAL_TEST,
                  *FIXED_CSR_CONSUMERS.values()):
-        if not check_internal_include(path, path.parts[0], "participants/sph/Participant3D.hpp"):
+        if not check_internal_include(path, path.parts[0], SPH_PARTICIPANT_HEADER):
             failures.append(f"checker self-test failed to reject the SPH participant in {path}")
     for path in SPH_ADAMI_CONSUMERS:
         if check_internal_include(path, path.parts[0], SPH_ADAMI_HEADER):
@@ -587,7 +597,7 @@ def policy_self_test() -> list[str]:
         for header in (SPH_ADAMI_HEADER, relative_header):
             if not check_internal_include(path, path.parts[0], header):
                 failures.append(f"checker self-test failed to keep Adami pressure out of {path}")
-    if not check_internal_include(sph_method, "src", "../../participants/sph/Participant3D.hpp"):
+    if not check_internal_include(sph_method, "src", "../../" + SPH_PARTICIPANT_HEADER):
         failures.append("checker self-test failed to reject a relative method-to-participant include")
     for header in ("methods/sph/ParticleFields3D.hpp", "methods/sph/neighbors/NeighborView3D.hpp"):
         for path in (sph_method, sph_participant, SPH_CELL_GRID_TEST):
@@ -596,9 +606,24 @@ def policy_self_test() -> list[str]:
         for path in (REFERENCE_COMMAND_SOURCE, package_consumer, SPH_VERLET_TEST):
             if not check_internal_include(path, path.parts[0], header):
                 failures.append(f"checker self-test failed to reject {header} in {path}")
-    for header in ("methods/sph/neighbors/CellGrid.hpp", "CellGrid.hpp"):
-        if not check_internal_include(Path(*SPH_PARTICIPANT_DIR) / "GeometryVersions3D.hpp", "src", header):
-            failures.append(f"checker self-test failed to keep {header} out of geometry comparison")
+    for header in ("methods/sph/neighbors/CellGrid.hpp", "CellGrid.hpp",
+                   "../../methods/sph/neighbors/CellGrid.hpp"):
+        for path in SPH_GEOMETRY_SOURCES:
+            if not check_internal_include(path, "src", header):
+                failures.append(f"checker self-test failed to keep {header} out of {path}")
+    for name in ("Density3D.hpp", "Pressure3D.hpp"):
+        if check_internal_include(SPH_HYDROSTATIC_INITIAL_TEST, "tests", f"methods/sph/{name}"):
+            failures.append(f"checker self-test failed to allow direct {name} static diagnostics")
+    if check_internal_include(SPH_VERLET_TEST, "tests", SPH_STEP_HEADER):
+        failures.append("checker self-test failed to allow the real window observer")
+    if check_internal_include(SPH_CELL_GRID_TEST, "tests", SPH_GEOMETRY_VERSIONS_HEADER):
+        failures.append("checker self-test failed to allow the grid version regression")
+    for path in (SPH_ADAMI_TEST, SPH_TANK_TRAJECTORY, SPH_HYDROSTATIC_INITIAL_TEST,
+                 REFERENCE_COMMAND_SOURCE, package_consumer):
+        if not check_internal_include(path, path.parts[0], SPH_STEP_HEADER):
+            failures.append(f"checker self-test failed to keep the SPH stepper out of {path}")
+        if not check_internal_include(path, path.parts[0], "methods/sph/Continuity3D.hpp"):
+            failures.append(f"checker self-test failed to keep continuity internals out of {path}")
     cell_grid_header = "methods/sph/neighbors/CellGrid.hpp"
     if check_internal_include(SPH_CELL_GRID_TEST, "tests", cell_grid_header):
         failures.append("checker self-test failed to allow the SPH cell-grid test to include internals")

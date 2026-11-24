@@ -4,7 +4,8 @@
 #include <methods/sph/Density3D.hpp>
 #include <methods/sph/Verlet3D.hpp>
 #include <methods/sph/neighbors/CellGrid.hpp>
-#include <participants/sph/Geometry3D.hpp>
+#include <participants/sph/GeometryVersions3D.hpp>
+#include <methods/sph/Continuity3D.hpp>
 
 #include <algorithm>
 #include <array>
@@ -201,7 +202,8 @@ TEST(SphCellGrid, AdmissionPrecedesRemapAndFollowsSharedQueryLifetime) {
     std::optional<sph::NeighborView3D> held_query;
     {
         const auto old = checked(Grid::build(exec, original.get(), 3, admit));
-        const std::vector<Request> rebuild{{Group::values, values}, {Group::cells, cells},
+        const std::vector<Request> rebuild{{Group::position, 3 * n * sizeof(real)}, {Group::mass, n * sizeof(real)},
+                                           {Group::identity, 9 * n}, {Group::cells, cells - 9 * n},
                                            {Group::permutations, mappings}, {Group::sort_keys, n * sizeof(Key)}};
         EXPECT_EQ(requests, rebuild);
         const auto retained = values + cells + mappings;
@@ -221,14 +223,14 @@ TEST(SphCellGrid, AdmissionPrecedesRemapAndFollowsSharedQueryLifetime) {
         occupied.reset();
         requests.clear();
         const auto remap = checked(old.update(exec, permuted.get(), 3, admit));
-        EXPECT_EQ(requests, (std::vector<Request>{{Group::permutations, mappings}, {Group::values, values}}));
+        EXPECT_EQ(requests, (std::vector<Request>{{Group::permutations, mappings}, {Group::position, 3 * n * sizeof(real)}, {Group::mass, n * sizeof(real)}}));
         EXPECT_EQ(trace.count(mark, "sph.grid.to_input"), 1u);
         EXPECT_EQ(trace.count(mark, "sph.grid.from_input"), 1u);
         EXPECT_EQ(old.cell_begin().data(), remap.cell_begin().data());
         EXPECT_EQ(budget.usage().controlled_bytes, retained + mappings + values);
         requests.clear();
         const auto reuse = checked(remap.update(exec, permuted.get(), 3, admit));
-        EXPECT_EQ(requests, (std::vector<Request>{{Group::values, values}}));
+        EXPECT_EQ(requests, (std::vector<Request>{{Group::position, 3 * n * sizeof(real)}, {Group::mass, n * sizeof(real)}}));
         EXPECT_EQ(remap.sorted_to_input().data(), reuse.sorted_to_input().data());
         EXPECT_EQ(remap.input_to_sorted().data(), reuse.input_to_sorted().data());
         EXPECT_EQ(budget.usage().controlled_bytes, retained + mappings + 2 * values);
@@ -268,6 +270,38 @@ TEST(SphCellGrid, AssignmentKeepsReplacedArraysChargedUntilDeallocation) {
     EXPECT_EQ(budget.usage().controlled_bytes, 0u);
 }
 
+// Drive the method and the version comparator directly with the grid's actual stage layout.
+struct IndexedStage {
+    sph::CellGrid grid;
+    TopologyVersion topology{1};
+    GeometryVersion geometry{1};
+    LayoutVersion layout{1};
+};
+
+Result<std::shared_ptr<const IndexedStage>>
+indexed_stage(const Kokkos::Serial& exec, const sph::ParticleFields3D& input, std::size_t max_cells,
+              const detail::ResourceBudget& budget, double h, const IndexedStage* old = nullptr) {
+    const auto admit = [&](sph::CellGrid::StorageGroup, std::size_t bytes) { return budget.reserve(bytes); };
+    auto grid = old ? old->grid.update(exec, input, max_cells, admit)
+                    : sph::CellGrid::build(exec, input, max_cells, admit, h);
+    if (!grid.ok())
+        return grid.status();
+    IndexedStage result{std::move(grid).value()};
+    if (old) {
+        const auto layout = [](const sph::CellGrid& grid) -> sph::GeometryLayout3D {
+            return {grid.fields(), grid.owned_slots(), grid.sorted_to_input(), grid.input_to_sorted()};
+        };
+        result.topology = old->topology;
+        result.geometry = old->geometry;
+        result.layout = old->layout;
+        const auto compared = sph::update_geometry_versions(exec, layout(old->grid), layout(result.grid),
+            budget, result.topology, result.geometry, result.layout);
+        if (!compared.ok())
+            return compared;
+    }
+    return std::make_shared<const IndexedStage>(std::move(result));
+}
+
 TEST(SphCellGrid, RebuildFallbackAndComparisonRespectScratchLifetimes) {
     constexpr std::size_t limit = 8192, n = 8;
     struct Key { std::size_t cell; std::uint64_t id; LocalIndex input; };
@@ -280,9 +314,9 @@ TEST(SphCellGrid, RebuildFallbackAndComparisonRespectScratchLifetimes) {
     std::swap(crossing.front().position, crossing.back().position);
     std::reverse(crossing.begin(), crossing.end());
     const Fields before(original), after(crossing);
-    auto initial = checked(sph::prepare_geometry_3d(exec, before.get(), 3, budget, 1));
+    auto initial = checked(indexed_stage(exec, before.get(), 3, budget, 1));
     const auto retained = budget.usage().controlled_bytes;
-    const auto update = [&] { return sph::prepare_geometry_3d(exec, after.get(), 3, budget, 1, initial.get()); };
+    const auto update = [&] { return indexed_stage(exec, after.get(), 3, budget, 1, initial.get()); };
     // Rebuild outputs fit, but adding its keys would exceed the available bytes by one.
     auto occupied = checked(budget.reserve(limit - 2 * retained - n * sizeof(Key) + 1));
     auto mark = trace.events.size();
@@ -795,12 +829,12 @@ TEST(SphGeometry3D, UpdatesOwnGeometryAndRetainPreviousStates) {
     detail::ResourceBudget budget;
     const auto initial = initial_particles();
     Fields input(initial);
-    const auto first = checked(sph::prepare_geometry_3d(exec, input.get(), 1000, budget, 1));
+    const auto first = checked(indexed_stage(exec, input.get(), 1000, budget, 1));
     auto same_cell = initial;
     same_cell[0].position[0] = real{1.75};
     same_cell[1].mass = 5;
     Fields fields(same_cell);
-    const auto next = checked(sph::prepare_geometry_3d(exec, fields.get(), 1000, budget, 1,
+    const auto next = checked(indexed_stage(exec, fields.get(), 1000, budget, 1,
                                                        first.get()));
     // Geometry owns its values; caller reuse cannot change any retained result.
     fields.position(0, 0) = 100;
@@ -810,7 +844,7 @@ TEST(SphGeometry3D, UpdatesOwnGeometryAndRetainPreviousStates) {
     std::swap(crossing[0].position, crossing[1].position);
     std::swap(crossing[2].position, crossing[3].position);
     std::reverse(crossing.begin(), crossing.end());
-    const auto latest = checked(sph::prepare_geometry_3d(exec, Fields(crossing).get(), 1000,
+    const auto latest = checked(indexed_stage(exec, Fields(crossing).get(), 1000,
                                                          budget, 1, next.get()));
     EXPECT_NE(next->grid.cell_begin().data(), latest->grid.cell_begin().data());
     ASSERT_NO_FATAL_FAILURE(compare(latest->grid, crossing, exec));
@@ -821,9 +855,9 @@ TEST(SphGeometry3D, VersionsDescribeGeometryLayoutAndTopologySeparately) {
     Kokkos::Serial exec;
     detail::ResourceBudget budget;
     auto state = initial_particles();
-    auto previous = checked(sph::prepare_geometry_3d(exec, Fields(state).get(), 1000, budget, 1));
+    auto previous = checked(indexed_stage(exec, Fields(state).get(), 1000, budget, 1));
     const auto update = [&] {
-        auto geometry = checked(sph::prepare_geometry_3d(exec, Fields(state).get(), 1000,
+        auto geometry = checked(indexed_stage(exec, Fields(state).get(), 1000,
                                                          budget, 1, previous.get()));
         compare(geometry->grid, state, exec);
         return geometry;
@@ -868,11 +902,11 @@ TEST(SphGeometry3D, ThreeAxisCrossingAndInputReorderCompareGeometryById) {
                          static_cast<std::uint8_t>(i % 4 == 0)});
     Kokkos::Serial exec;
     detail::ResourceBudget budget;
-    const auto first = checked(sph::prepare_geometry_3d(exec, Fields(state).get(), 64, budget, 1));
+    const auto first = checked(indexed_stage(exec, Fields(state).get(), 64, budget, 1));
     auto crossing = state;
     std::swap(crossing.front().position, crossing.back().position);
     std::reverse(crossing.begin(), crossing.end());
-    const auto next = checked(sph::prepare_geometry_3d(exec, Fields(crossing).get(), 64,
+    const auto next = checked(indexed_stage(exec, Fields(crossing).get(), 64,
                                                        budget, 1, first.get()));
     EXPECT_EQ(next->geometry.value(), first->geometry.value() + 1);
     EXPECT_EQ(next->layout.value(), first->layout.value() + 1);
@@ -880,7 +914,7 @@ TEST(SphGeometry3D, ThreeAxisCrossingAndInputReorderCompareGeometryById) {
     ASSERT_NO_FATAL_FAILURE(compare(next->grid, crossing, exec));
     ASSERT_NO_FATAL_FAILURE(compare(first->grid, state, exec));
     std::reverse(crossing.begin(), crossing.end());
-    const auto reordered = checked(sph::prepare_geometry_3d(exec, Fields(crossing).get(), 64,
+    const auto reordered = checked(indexed_stage(exec, Fields(crossing).get(), 64,
                                                             budget, 1, next.get()));
     EXPECT_EQ(reordered->geometry, next->geometry);
     EXPECT_EQ(reordered->layout.value(), next->layout.value() + 1);

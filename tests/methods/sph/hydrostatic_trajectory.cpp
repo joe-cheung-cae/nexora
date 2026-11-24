@@ -8,7 +8,7 @@
 #include <iomanip>
 #include <iostream>
 #include <nexora/simulation/Simulation.hpp>
-#include <participants/sph/Participant3D.hpp>
+#include <participants/sph/WcsphParticipant3D.hpp>
 #include <string_view>
 
 namespace {
@@ -93,9 +93,9 @@ void run(int n, const std::filesystem::path& path) {
     // Escaped particles enlarge the occupied bounding box of the dense grid.
     // The admission limits bound its storage independently of physical inputs.
     constexpr std::size_t max_cells = 50000000;
-    constexpr sph::Participant3D::ResourceLimits limits{64, 1024ULL * 1024 * 1024};
-    sph::Participant3D participant(fluid.get(), max_cells, parameters, rest, initial_density, fixed,
-                                   ParticipantId{1}, limits);
+    constexpr sph::WcsphParticipant3D::ResourceLimits limits{64, 1024ULL * 1024 * 1024};
+    sph::WcsphParticipant3D participant(fluid.get(), max_cells, parameters, rest, initial_density,
+                                        fixed, ParticipantId{1}, limits);
     Simulation sim(participant);
     require(sim.initialize());
     require(sim.prepare());
@@ -118,53 +118,53 @@ void run(int n, const std::filesystem::path& path) {
         double mass_sum = 0, error_sum = 0, speed_sum = 0, max_speed = 0, net_acceleration_sum = 0;
         std::size_t inside = 0;
         std::array<Layer, 6> layers{};
-        {
-            const auto state = checked(participant.snapshot());
-            if (state.row_count() != tank.fluid.size())
-                throw std::runtime_error("missing fluid rows");
-            for (std::size_t row = 0; row < state.row_count(); ++row) {
-                const auto id = state.row_id(row);
-                const real mass = state.mass(row);
-                if (mass != tank.fluid.at(id - 1).mass)
-                    throw std::runtime_error("fluid mass changed at step " + std::to_string(step) +
-                                             " for ID " + std::to_string(id));
-                const auto x = checked(state.position(row)), v = checked(state.velocity(row));
-                const double rho = state.density(row), p = checked(state.pressure(row));
-                const auto ap = checked(state.pressure_acceleration(row));
-                const double acceleration = std::hypot(ap[0], ap[1], double(ap[2]) - g);
-                const double speed = std::hypot(v[0], v[1], v[2]);
-                const double reference = eos.reference_density * eos.sound_speed * eos.sound_speed /
-                                         eos.gamma *
-                                         std::expm1(eos.gamma / (eos.gamma - 1) *
-                                                    std::log1p(std::max(0., depth_term(x[2]))));
-                if (!std::isfinite(rho) || !std::isfinite(p) || !std::isfinite(speed) ||
-                    !std::isfinite(acceleration) ||
-                    !std::all_of(x.begin(), x.end(), [](double c) { return std::isfinite(c); }))
-                    throw std::runtime_error("nonfinite particle field");
-                mass_sum += mass;
-                error_sum += mass * (p - reference) * (p - reference);
-                speed_sum += mass * speed * speed;
-                const double acceleration_moment = mass * acceleration * acceleration;
-                net_acceleration_sum += acceleration_moment;
-                max_speed = std::max(max_speed, speed);
-                const auto d = distances(x);
-                crossings.observe(n, step, time, id, x, d, events);
-                if (x[2] <= length && *std::min_element(d.begin(), d.end()) >= 0) {
-                    ++inside;
-                    auto& bin = layers[std::min(5, static_cast<int>(x[2]))];
-                    ++bin.count;
-                    bin.mass += mass;
-                    bin.pressure_sum += mass * p;
-                    bin.reference_sum += mass * reference;
-                    bin.net_acceleration_sum += acceleration_moment;
-                }
-                if (save)
-                    frames << n << ',' << step << ',' << time << ',' << id << ',' << x[0] << ','
-                           << x[1] << ',' << x[2] << ',' << rho << ',' << p << ',' << speed << ','
-                           << (crossings.crossed[id - 1] != 0) << ',' << mass << ',' << ap[0] << ','
-                           << ap[1] << ',' << ap[2] << '\n';
+        std::size_t row_count = 0;
+        require(participant.visit_committed_rows([&](sph::CommittedRow3D row) {
+            ++row_count;
+            const auto id = row.id;
+            const real mass = row.mass;
+            if (mass != tank.fluid.at(id - 1).mass)
+                throw std::runtime_error("fluid mass changed at step " + std::to_string(step) +
+                                         " for ID " + std::to_string(id));
+            const auto& x = row.position;
+            const auto& v = row.velocity;
+            const double rho = row.density, p = row.pressure;
+            const auto& ap = row.pressure_acceleration;
+            const double acceleration = std::hypot(ap[0], ap[1], double(ap[2]) - g);
+            const double speed = std::hypot(v[0], v[1], v[2]);
+            const double reference = eos.reference_density * eos.sound_speed * eos.sound_speed /
+                                     eos.gamma *
+                                     std::expm1(eos.gamma / (eos.gamma - 1) *
+                                                std::log1p(std::max(0., depth_term(x[2]))));
+            if (!std::isfinite(rho) || !std::isfinite(p) || !std::isfinite(speed) ||
+                !std::isfinite(acceleration) ||
+                !std::all_of(x.begin(), x.end(), [](double c) { return std::isfinite(c); }))
+                throw std::runtime_error("nonfinite particle field");
+            mass_sum += mass;
+            error_sum += mass * (p - reference) * (p - reference);
+            speed_sum += mass * speed * speed;
+            const double acceleration_moment = mass * acceleration * acceleration;
+            net_acceleration_sum += acceleration_moment;
+            max_speed = std::max(max_speed, speed);
+            const auto d = distances(x);
+            crossings.observe(n, step, time, id, x, d, events);
+            if (x[2] <= length && *std::min_element(d.begin(), d.end()) >= 0) {
+                ++inside;
+                auto& bin = layers[std::min(5, static_cast<int>(x[2]))];
+                ++bin.count;
+                bin.mass += mass;
+                bin.pressure_sum += mass * p;
+                bin.reference_sum += mass * reference;
+                bin.net_acceleration_sum += acceleration_moment;
             }
-        }
+            if (save)
+                frames << n << ',' << step << ',' << time << ',' << id << ',' << x[0] << ','
+                       << x[1] << ',' << x[2] << ',' << rho << ',' << p << ',' << speed << ','
+                       << (crossings.crossed[id - 1] != 0) << ',' << mass << ',' << ap[0] << ','
+                       << ap[1] << ',' << ap[2] << '\n';
+        }));
+        if (row_count != tank.fluid.size())
+            throw std::runtime_error("missing fluid rows");
         steps << n << ',' << step << ',' << time << ',' << dt << ',' << bound << ','
               << std::sqrt(error_sum / mass_sum) << ',' << std::sqrt(speed_sum / mass_sum) << ','
               << max_speed << ',' << inside << ',' << crossings.unique_any;
