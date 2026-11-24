@@ -238,8 +238,8 @@ Status Participant::begin_window(const TimeInterval& i) {
     }
     return status;
 }
-Result<TrialReport> Participant::advance_trial(const TimeInterval& i) {
-    auto status = guarded([&] {
+Status Participant::advance_trial(const TimeInterval& i) {
+    return guarded([&] {
         if (!trial_access_ || state_.phase_ != State::Phase::open)
             return Status{StatusCode::invalid_state, "advance requires an open reference window"};
         // One grant set spans the relaxation kernel and its finite-value check.
@@ -265,9 +265,6 @@ Result<TrialReport> Participant::advance_trial(const TimeInterval& i) {
         }
         return advanced;
     });
-    if (!status.ok())
-        return status;
-    return TrialReport{i.end, true};
 }
 
 Result<FieldStamp> Participant::trial_input_stamp() const {

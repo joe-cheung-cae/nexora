@@ -92,18 +92,9 @@ Status Simulation::advance_trial() {
         return invalid_state("advance_trial requires an open window");
     }
     ++time_.trial_attempts;
-    auto trial = participant_.advance_trial(interval_);
-    if (!trial.ok()) {
-        return reject_trial(trial.status());
-    }
-    const auto& report = trial.value();
-    // A participant is given the exact endpoint; it must report that endpoint,
-    // including when it uses internal substeps. Do not silently accept a tail.
-    if (!report.physical_state_valid || !std::isfinite(report.reached_time) ||
-        report.reached_time != interval_.end) {
-        return reject_trial({StatusCode::numerical_failure,
-                             "trial did not reach its endpoint with a valid physical state"});
-    }
+    const auto status = participant_.advance_trial(interval_);
+    if (!status.ok())
+        return reject_trial(status);
     state_ = SimulationState::trial_advanced;
     return {};
 }

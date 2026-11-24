@@ -21,6 +21,7 @@ file(GLOB_RECURSE private_headers "${scratch}/relocated/*.hpp")
 string(CONCAT private_header_pattern
     "/(FieldIssuer|ExternalField|TransportBuilder|TransportReceiver|"
     "EntityCapacity|EntityOrder|Permutation|CsrAdjacency|StructureState|ResourceBudget|"
+    "fixed_csr/.*|sph_fixture|Density|Density3D|Participant|Participant3D|Geometry3D|GeometryVersions3D|Pressure3D|Verlet3D|cell_grid_oracle|wcsph_oracle|"
     "(methods|participants)/(reference|sph)/.*)[.]hpp$")
 list(FILTER private_headers INCLUDE REGEX "${private_header_pattern}")
 if(private_headers)
@@ -28,7 +29,7 @@ if(private_headers)
 endif()
 file(GLOB_RECURSE sph_artifacts "${scratch}/relocated/*")
 list(FILTER sph_artifacts INCLUDE REGEX
-    "/(lib)?nexora_(methods_sph|participants_sph|sph_tests|sph_benchmark)([.][^/]*)?$")
+    "/(lib)?nexora_(methods_sph|participants_sph|sph_fixed_csr_(fixture|tests)|sph_tests|sph_benchmark|sph_tank_trajectory)([.][^/]*)?$")
 if(sph_artifacts)
     message(FATAL_ERROR "Internal SPH artifacts leaked into the installation: ${sph_artifacts}")
 endif()

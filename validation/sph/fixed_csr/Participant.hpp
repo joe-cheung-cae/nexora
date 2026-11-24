@@ -11,7 +11,7 @@
 #include <span>
 #include <vector>
 
-namespace nexora::sph {
+namespace nexora::sph_fixture {
 
 struct Config {
     std::vector<GlobalEntityId> row_ids, column_ids;
@@ -88,7 +88,7 @@ class Participant final : public ParticipantIF {
     Status initialize(double initial_time) override;
     Status prepare() override;
     Status begin_window(const TimeInterval& interval) override;
-    Result<TrialReport> advance_trial(const TimeInterval& interval) override;
+    Status advance_trial(const TimeInterval& interval) override;
     Status prepare_commit(const TimeInterval& interval) override;
     Status commit_window(const TimeInterval& interval) override;
     Status restore_window() override;
@@ -103,15 +103,11 @@ class Participant final : public ParticipantIF {
     Result<Snapshot> trial_snapshot(const FieldStamp& expected) const;
     detail::ResourceBudget::Usage resource_usage() const { return budget_.usage(); }
 
-    enum class Fault { advance, prepare };
-    void fail_next(Fault fault) noexcept { fault_ = fault; }
-
   private:
     using Geometry = Snapshot::Geometry;
     enum class Stage { created, initialized, ready, open, advanced, precommitted, failed, finalized };
     static Snapshot layout_snapshot(const std::shared_ptr<const Geometry>& geometry);
     bool matches(const TimeInterval& interval) const noexcept;
-    bool consume_fault(Fault fault) noexcept;
     void close_window() noexcept;
 
     Config config_;
@@ -125,7 +121,6 @@ class Participant final : public ParticipantIF {
     Stage stage_ = Stage::created;
     TimeInterval interval_;
     std::uint64_t attempt_{};
-    std::optional<Fault> fault_;
 };
 
-} // namespace nexora::sph
+} // namespace nexora::sph_fixture

@@ -34,7 +34,6 @@ static_assert(!std::is_assignable_v<decltype(std::declval<Snapshot&>().q(0)), re
 static_assert(std::is_same_v<decltype(TimeConstraint::minimum_step), double>);
 static_assert(std::is_same_v<decltype(TimeConstraint::maximum_step), double>);
 static_assert(std::is_same_v<decltype(TimeConstraint::fixed_quantum), std::optional<double>>);
-static_assert(std::is_same_v<decltype(TrialReport::reached_time), double>);
 static_assert(std::is_same_v<decltype(FieldStamp::valid_from), double>);
 static_assert(std::is_same_v<decltype(FieldStamp::valid_until), double>);
 static_assert(std::is_same_v<decltype(TimeState::accepted_time), double>);
@@ -249,7 +248,7 @@ TEST(Reference, RejectInvalidInputs) {
     ASSERT_TRUE(participant.initialize(0.0).ok());
     ASSERT_EQ(participant.initialize(0.0).code(), StatusCode::invalid_state);
     ASSERT_TRUE(participant.prepare().ok());
-    ASSERT_EQ(participant.advance_trial(interval).status().code(), StatusCode::invalid_state);
+    ASSERT_EQ(participant.advance_trial(interval).code(), StatusCode::invalid_state);
     for (const auto& invalid :
          {TimeInterval{-1.0, -0.75, 0.25}, wrong_duration, TimeInterval{0.0, 0.25, 0.0},
           TimeInterval{0.0, time_infinity, 0.25}, TimeInterval{0.0, 1.25, 1.25}}) {
@@ -259,12 +258,8 @@ TEST(Reference, RejectInvalidInputs) {
     const auto accepted = snapshot(participant);
     ASSERT_TRUE(participant.begin_window(interval).ok());
     ASSERT_EQ(participant.begin_window(interval).code(), StatusCode::invalid_state);
-    ASSERT_EQ(participant.advance_trial(wrong_duration).status().code(),
-              StatusCode::invalid_argument);
-    const auto trial = participant.advance_trial(interval);
-    ASSERT_TRUE(trial.ok());
-    ASSERT_EQ(trial.value().reached_time, interval.end);
-    ASSERT_TRUE(trial.value().physical_state_valid);
+    ASSERT_EQ(participant.advance_trial(wrong_duration).code(), StatusCode::invalid_argument);
+    ASSERT_TRUE(participant.advance_trial(interval).ok());
     ASSERT_EQ(participant.commit_window(interval).code(), StatusCode::invalid_state);
     ASSERT_EQ(participant.prepare_commit(wrong_duration).code(), StatusCode::invalid_argument);
     ASSERT_TRUE(participant.prepare_commit(interval).ok());

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <nexora/core/Result.hpp>
+#include <nexora/core/Status.hpp>
 #include <nexora/participant/Port.hpp>
 #include <nexora/participant/TimeConstraint.hpp>
 
@@ -12,13 +12,8 @@ struct ParticipantCapabilities {
     bool rollback = false;
 };
 
-struct TrialReport {
-    double reached_time = 0.0;
-    bool physical_state_valid = false;
-};
-
 // All operations complete synchronously and report operational failure through
-// Status/Result. Implementations must not throw from these lifecycle methods.
+// Status. Implementations must not throw from these lifecycle methods.
 // This minimal API does not claim asynchronous, distributed or coupling support.
 class ParticipantIF {
   public:
@@ -34,9 +29,9 @@ class ParticipantIF {
     // Capture a complete accepted checkpoint. Failure leaves accepted state
     // unchanged and no open window. Only one checkpoint/window may be active.
     virtual Status begin_window(const TimeInterval& interval) = 0;
-    // Integrate using interval.duration(); absolute endpoints are rounded time
-    // labels, so subtracting them is not an equivalent duration calculation.
-    virtual Result<TrialReport> advance_trial(const TimeInterval& interval) = 0;
+    // Success completes the full interval.duration(). Absolute endpoints are rounded
+    // time labels, so subtracting them is not an equivalent duration calculation.
+    virtual Status advance_trial(const TimeInterval& interval) = 0;
 
     // Complete all fallible precommit work here. No accepted output is emitted.
     virtual Status prepare_commit(const TimeInterval& interval) = 0;

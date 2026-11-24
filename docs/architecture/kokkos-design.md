@@ -187,14 +187,14 @@ template<class Space> struct CsrAdjacency {
 
 | 方法 | 拓扑/状态归属与典型 Kokkos 布局 | 离散算子与恢复要点 |
 |---|---|---|
-| SPH | 粒子 SoA；位置可 `View<Real*[3], LayoutLeft, Space>` 或独立 x/y/z；CSR/压缩邻域；稳定粒子 ID | 邻域构建、密度、压力/相互作用、边界和归约；积分历史/自适应历史恢复，邻域按版本重建 |
+| SPH | 粒子 SoA（位置可用 `View<Real*[3], LayoutLeft, Space>` 或独立 x/y/z）和稳定粒子 ID。三维动态路径默认按格重排并直接遍历 [`cellBegin` 区间](migration-roadmap.md#sph-cell-begin) | 格索引供密度与压力/相互作用使用，积分后校验格归属。边界和归约遵循模型契约，恢复积分/自适应历史，按版本复用或重建索引 |
 | FVM | 单元主变量与面通量分开；owner/neighbour、patch、cell-face CSR，面面积向量与体积独立 | face flux → cell gather/累积；内部面方向一致、每面逻辑通量唯一；压力/速度/通量一致性按具体方案保留 |
 | FEM | DOF 向量、element connectivity、约束图；积分点可 rank 3/4（element, quadrature, component），稀疏块各自布局 | element apply/组装、边界约束、trace、材料积分；塑性等不可逆历史须 trial 分离，不能当缓存丢弃 |
 | LBM | block / lattice / direction 多维 populations，ping-pong 时间层；stencil、halo 与掩码 | collision/streaming/forcing；保存 parity、populations、边界与固定步长量子，宏观量按需重建 |
 | DEM | 粒子平动/旋转场；contact pair stable IDs、接触图；切向/滚动历史单独存储 | 搜索、接触力、积分；contact history、产生/消亡事件及 owner 迁移均影响恢复 |
 | MBD | body/joint/constraint graph；q/v 长度可以不同，约束乘子、积分器/控制历史由 engine 拥有 | 动力学引擎执行 formulation；participant 负责机械端口、时间和恢复认证，见 §9 |
 
-以下声明展示典型 SPH 与 FVM 类型边界，不固定维度、精度、公式或物理默认值；`Real` 必须来自获准的算例/模型。
+以下声明展示典型 SPH 与 FVM 类型边界。`SphKernelInput` 示意显式 CSR 对照路径的只读输入。三维动态密度的默认输入为按格排列的粒子字段、owned 目标映射和 `cellBegin`。具体维度、精度、公式及物理默认值由获准的算例/模型确定。
 
 ```cpp
 namespace nexora {
@@ -499,7 +499,7 @@ public:
 } // namespace nexora
 ```
 
-这些 host 契约不暴露 engine SDK 或 GPU 类型。共享值类型 `TimeInterval` 已在参考状态切片中从 `participant/TimeConstraint.hpp` 原样移至 `core/Time.hpp`，原头兼容包含，`requested_step/duration()` 语义不变；TimeConstraint 仍属于 participant。MbdAdvanceReport 仍是拟议类型，由 participant 转成 TrialReport，engine API 无须依赖 participant。snapshot 的具体机械数据接口明确 units/frame、取矩点、姿态约定、wrench/impulse 和时间区间；FP64、重力、压力等已有约定继续保留。每个 PhysicalObjectId 的运动/惯性 owner 唯一，每个接触 pair 的 contact owner 唯一：DEM 积分自由颗粒，MBD 积分机构，流体边界只采样运动并返还载荷，避免重复重力、惯性与接触力。
+这些 host 契约不暴露 engine SDK 或 GPU 类型。共享值类型 `TimeInterval` 已在参考状态切片中从 `participant/TimeConstraint.hpp` 原样移至 `core/Time.hpp`，原头兼容包含，`requested_step/duration()` 语义不变；TimeConstraint 仍属于 participant。MbdAdvanceReport 仍是拟议类型，由 participant 将引擎完成情况转换为试算的 Status，engine API 无须依赖 participant。snapshot 的具体机械数据接口明确 units/frame、取矩点、姿态约定、wrench/impulse 和时间区间；FP64、重力、压力等已有约定继续保留。每个 PhysicalObjectId 的运动/惯性 owner 唯一，每个接触 pair 的 contact owner 唯一：DEM 积分自由颗粒，MBD 积分机构，流体边界只采样运动并返还载荷，避免重复重力、惯性与接触力。
 
 Nexora 自有 MBD 数值数组与批量算子同样采用 Kokkos。经批准的完整外部引擎（Chrono/Newton 等候选）可以保有内部数据和运行时；只交换必要领域端口快照，必要时显式复制。它不能接管 SPH/FVM 的通用 kernel 执行。引擎替换涉及 formulation/精度/恢复/许可证的独立评审，不能因 API 适配成功自动获准。**Warp 仅允许作为经批准的完整外部引擎的内部依赖**；不得通过外部应用、服务、worker 或进程包装，重新建立 Nexora 通用算子 provider 或第二套计算基础设施。进程隔离不改变此职责边界。
 

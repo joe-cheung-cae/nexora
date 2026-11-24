@@ -1,8 +1,10 @@
 # P1-07 Serial SPH Release 精简前后配对复测
 
+本页保留一维固定 CSR 的历史配对实验。现行构建由一维测试与显式 benchmark 共用验证夹具。[现行夹具源码](fixed_csr/) · [Serial 验证](serial.md)
+
 ## 测量方法
 
-主实验于 `2026-11-19T11:46:43+08:00` 至 `2026-11-19T11:51:06+08:00` 在同一台 Apple M2 Pro arm64（8P+4E，16 GB）上执行。系统为 macOS 27.2.1（26B131），编译器为 AppleClang 21.0.0.21000401，两版均使用 Release `-O3 -DNDEBUG` 和同一套 Kokkos 5.2.2 Serial 安装。开始与结束均接通电源。系统接口未返回温度或性能状态，未记录 CPU 频率。结果限于此单机、工具链和工作负载。 [Serial 验证环境](serial.md#本地离线执行) · [实验元数据](../../results/p1-07-release-crossover-20261119T114553/primary/meta.json)
+主实验于 `2026-11-19T11:46:43+08:00` 至 `2026-11-19T11:51:06+08:00` 在同一台 Apple M2 Pro arm64（8P+4E，16 GB）上执行。系统为 macOS 27.2.1（26B131），编译器为 AppleClang 21.0.0.21000401，两版均使用 Release `-O3 -DNDEBUG` 和同一套 Kokkos 5.2.2 Serial 安装。开始与结束均接通电源。系统接口未返回温度或性能状态，未记录 CPU 频率。结果限于此单机、工具链和工作负载。 [Serial 验证环境](serial.md#历史离线执行) · [实验元数据](../../results/p1-07-release-crossover-20261119T114553/primary/meta.json)
 
 | 版本 | 源码输入清单 SHA-256 | 原构建与计量记录 |
 | --- | --- | --- |
@@ -62,7 +64,7 @@ AppleClang 为 B 的 float 生成了同时计算内外两段、最后用 `fcsel`
 
 在精简版中只改变完整支持域谓词的内联位置，同样的计时探针包围实际 CSR 逐边校验循环。各进程热中位数的几何均值，float 从 49.75 ms 降至 48.15 ms（−3.22%，95% CI −4.67% 至 −1.75%），double 从 49.68 ms 降至 47.68 ms（−4.04%，−5.18% 至 −2.89%）。按热样本算术均值，逐边循环的配对差值为 float −1.18 ms [−2.64, 0.27]、double −2.38 ms [−2.97, −1.78]。整个初始化阶段的两个区间均跨过零。修正版把同一谓词和减法余项放在内部方法头文件，供校验和核函数共用。[逐边探针数据](../../results/p1-07-release-crossover-20261119T114553/probes/probe-analysis.json)
 
-## 三项生产改动的复验
+## 三项夹具优化的复验
 
 M₄ 分支提示、完整支持域判断内联和两个标量 ID 读取内联组成版本 D，源码输入清单 SHA-256 为 `a63743b1057679af812b3fb43c866774048513155dd5024ebd545c579a0198cc`。从 `2026-11-19T12:03:46+08:00` 至 `2026-11-19T12:04:42+08:00` 完成干净的四组 Serial 构建。Debug/Release × float/double 分别通过 21/21 项 CTest，均无跳过，各配置的搬迁包测试均执行并通过 3 个消费者。[源码清单](../../results/p1-07-release-crossover-20261119T114553/fixed-source-sha256.txt) · [验证日志](../../results/p1-07-release-crossover-20261119T114553/validation/)
 

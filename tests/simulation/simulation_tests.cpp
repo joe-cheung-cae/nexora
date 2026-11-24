@@ -17,7 +17,6 @@ enum class Failure {
     prepare,
     begin,
     trial,
-    report,
     precommit,
     commit,
     restore,
@@ -72,7 +71,7 @@ class DummyParticipant final : public ParticipantIF {
         }
         return status;
     }
-    Result<TrialReport> advance_trial(const TimeInterval& interval) override {
+    Status advance_trial(const TimeInterval& interval) override {
         calls.push_back("trial");
         if (!checkpoint) {
             ADD_FAILURE() << "advance_trial called without a checkpoint";
@@ -82,15 +81,7 @@ class DummyParticipant final : public ParticipantIF {
         ++state.history;
         ++state.sequence;
         state.time = interval.end;
-        auto status = status_for(Failure::trial);
-        if (!status.ok()) {
-            return status;
-        }
-        if (failure == Failure::report) {
-            failure = Failure::none;
-            return TrialReport{interval.begin, true};
-        }
-        return TrialReport{interval.end, true};
+        return status_for(Failure::trial);
     }
     Status prepare_commit(const TimeInterval&) override {
         calls.push_back("precommit");
@@ -211,7 +202,7 @@ TEST(SimulationTest, LifecycleAndReplay) {
 
 TEST(SimulationTest, FailuresAndRetry) {
     for (const auto failure :
-         {Failure::begin, Failure::trial, Failure::report, Failure::precommit, Failure::commit}) {
+         {Failure::begin, Failure::trial, Failure::precommit, Failure::commit}) {
         DummyParticipant participant;
         Simulation simulation(participant, 2.0);
         ASSERT_NO_FATAL_FAILURE(prepare(simulation));
