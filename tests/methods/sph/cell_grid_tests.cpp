@@ -591,6 +591,58 @@ TEST(SphCellGrid, NonbinaryCellWidthUsesExactFloorOnRoundedQuotient) {
     EXPECT_FALSE(sph::CellGrid::build(exec, fields.get(), 5, {}, .1).ok());
 }
 
+TEST(SphCellGrid, TranslatedCellRangesKeepIntegerPrecision) {
+    Kokkos::Serial exec;
+    const real base = sizeof(real) == sizeof(double) ? real{0x1p54} : real{0x1p24};
+    // At width 3/2, the exact bins of 2^54 + {0,4,8} are
+    // 12009599006321322, 12009599006321325 and 12009599006321328.
+    // Mirroring gives -12009599006321323, -12009599006321326 and -12009599006321328.
+    // 2^24 has the same residues mod 3 and keeps the float coordinates distinct.
+    for (const real sign : {real{1}, real{-1}}) {
+        for (const real shift : {real{0}, real{4}}) {
+            SCOPED_TRACE(::testing::Message() << "sign=" << sign << ", shift=" << shift);
+            const real x = base + shift;
+            Fields fields({{{sign * x, 0, 0}, 1, 10, 0}, {{sign * (x + 4), 0, 0}, 1, 20, 0}});
+            const std::size_t count = sign < 0 && shift == 4 ? 3 : 4;
+            EXPECT_EQ(sph::CellGrid::build(exec, fields.get(), count - 1, {}, .75).status().code(),
+                      StatusCode::resource_exhausted);
+            const auto grid = checked(sph::CellGrid::build(exec, fields.get(), count, {}, .75));
+            ASSERT_EQ(grid.cell_begin().extent(0), count + 1);
+            EXPECT_EQ(grid.cell_begin()(0), 0U);
+            for (std::size_t cell = 1; cell < count; ++cell)
+                EXPECT_EQ(grid.cell_begin()(cell), 1U);
+            EXPECT_EQ(grid.cell_begin()(count), 2U);
+            EXPECT_EQ(grid.fields().ids(0), sign > 0 ? 10U : 20U);
+            EXPECT_EQ(grid.fields().ids(1), sign > 0 ? 20U : 10U);
+            for (LocalIndex slot = 0; slot < 2; ++slot)
+                grid.neighbors().for_each_neighbor_of_slot(slot, [](LocalIndex, double) {
+                    ADD_FAILURE() << "particles four units apart exceed the 1.5 support radius";
+                });
+        }
+    }
+}
+
+TEST(SphCellGrid, SignedCellRangeIncludesOnlyItsLowerEndpoint) {
+    Kokkos::Serial exec;
+    const real limit = real{1.5} * real{0x1p63};
+    Fields fields({{{0, 0, 0}, 1, 10, 0}, {{0, .5, 0}, 1, 20, 1}});
+    for (const real x : {-limit, std::nextafter(-limit, real{0}), std::nextafter(limit, real{0})}) {
+        fields.position(0, 0) = fields.position(1, 0) = x;
+        const auto grid = checked(sph::CellGrid::build(exec, fields.get(), 1, {}, .75));
+        std::vector<std::uint64_t> ids;
+        grid.neighbors().for_each_neighbor(0, [&](LocalIndex slot, double d2) {
+            ids.push_back(grid.fields().ids(slot));
+            EXPECT_EQ(d2, .25);
+        });
+        EXPECT_EQ(ids, (std::vector<std::uint64_t>{20}));
+    }
+    for (const real x : {std::nextafter(-limit, -std::numeric_limits<real>::infinity()), limit}) {
+        fields.position(0, 0) = x;
+        EXPECT_EQ(sph::CellGrid::build(exec, fields.get(), 1, {}, .75).status().code(),
+                  StatusCode::unsupported);
+    }
+}
+
 TEST(SphCellGrid, ValidatesCaseSupport) {
     Kokkos::Serial exec;
     Fields fields({{{0, 0, 0}, 1, 1, 0}});

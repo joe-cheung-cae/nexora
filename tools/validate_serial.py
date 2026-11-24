@@ -527,6 +527,8 @@ def verify_precision(args, profile, precision):
         "nexora_sph_fixed_csr_tests.Sph.FrozenLayoutAndReorder",
         "nexora_sph_tests.SphCellGrid.ThreeDimensionalShuffledStableIdsAndGhosts",
         "nexora_sph_tests.SphCellGrid.NeighborViewPreservesCallbackOrder",
+        "nexora_sph_tests.SphCellGrid.TranslatedCellRangesKeepIntegerPrecision",
+        "nexora_sph_tests.SphCellGrid.SignedCellRangeIncludesOnlyItsLowerEndpoint",
         "nexora_sph_tests.SphCellGrid.IsolatedMassAndSmoothingLengthSetSelfDensity",
         "nexora_sph_tests.SphCellGrid.PairMirrorsAndRelativeVelocityReversalMatchAnalyticRatesAndForces",
         "nexora_sph_tests.SphCellGrid.AdmissionPrecedesRemapAndFollowsSharedQueryLifetime",

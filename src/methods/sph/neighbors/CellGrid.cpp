@@ -12,10 +12,11 @@ namespace {
 using Policy = Kokkos::RangePolicy<Kokkos::Serial, Kokkos::IndexType<std::size_t>>;
 using Slots = CellGrid::Indices::non_const_type;
 
-double floor_cell_index(double position, double width) {
+// The quotient is small enough that adjacent integer candidates are exact in double.
+std::int64_t floor_small_quotient(double position, double width) {
     // The quotient can round up at a nonbinary cell boundary, such as 1 / 0.2.
     const double index = std::floor(position / width);
-    return index - (std::fma(-index, width, position) < 0);
+    return static_cast<std::int64_t>(index) - (std::fma(-index, width, position) < 0);
 }
 
 struct SortEntry {
@@ -83,7 +84,18 @@ Result<CellGrid> CellGrid::update(const Kokkos::Serial& exec, const ParticleFiel
 }
 
 std::int64_t NeighborView3D::absolute_bin(double x) const {
-    return static_cast<std::int64_t>(floor_cell_index(x, support_radius()));
+    const double width = support_radius();
+    if (std::abs(x) < 0x1p53 * width)
+        return floor_small_quotient(x, width);
+
+    // Split a signed 64-bit bin into a block and a nonnegative offset so both
+    // quotients retain unit precision. At this magnitude x and block*block_width
+    // are multiples of the block width's ULP, so their remainder is exact.
+    constexpr std::int64_t block_size = std::int64_t{1} << 32;
+    const double block_width = block_size * width;
+    const auto block = floor_small_quotient(x, block_width);
+    const double remainder = std::fma(-static_cast<double>(block), block_width, x);
+    return block * block_size + floor_small_quotient(remainder, width);
 }
 
 std::size_t CellGrid::cell_of(const ParticleFields3D& fields, std::size_t i) const {
@@ -200,6 +212,7 @@ Result<CellGrid> CellGrid::prepare(const Kokkos::Serial& exec, const ParticleFie
         !std::isfinite(grid.query_.radius_squared_))
         return Status{StatusCode::invalid_argument,
                       "3D SPH requires positive smoothing length with finite positive squared support"};
+    const double bin_limit = 0x1p63 * radius;
     grid.query_.origin_.fill(std::numeric_limits<std::int64_t>::max());
     std::array<std::int64_t, 3> largest;
     largest.fill(std::numeric_limits<std::int64_t>::min());
@@ -215,15 +228,12 @@ Result<CellGrid> CellGrid::prepare(const Kokkos::Serial& exec, const ParticleFie
             const double x = input.position(i, axis);
             if (!std::isfinite(x)) {
                 invalid_field = true;
+            } else if (x < -bin_limit || x >= bin_limit) {
+                unsupported_bin = true;
             } else {
-                const double bin = floor_cell_index(x, radius);
-                if (bin < -0x1p63 || bin >= 0x1p63) {
-                    unsupported_bin = true;
-                } else {
-                    const auto key = static_cast<std::int64_t>(bin);
-                    grid.query_.origin_[axis] = std::min(grid.query_.origin_[axis], key);
-                    largest[axis] = std::max(largest[axis], key);
-                }
+                const auto bin = grid.query_.absolute_bin(x);
+                grid.query_.origin_[axis] = std::min(grid.query_.origin_[axis], bin);
+                largest[axis] = std::max(largest[axis], bin);
             }
         }
     });
