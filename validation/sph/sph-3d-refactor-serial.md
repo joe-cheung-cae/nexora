@@ -156,3 +156,18 @@ Kokkos 5.2.2 Serial 下 Debug float 和 Debug double 分别通过全部 27 项�
 ### 关闭测试的构建与固定壁轨迹
 
 独立 Release float `BUILD_TESTING=OFF` 构建通过两个三维私有目标、Simulation、默认构建及目标图守卫，完成于 2026-11-24T15:38:41+08:00。Release double 6³ 固定壁轨迹于 2026-11-24T15:37:14+08:00 完成，601 步推进至 2.34765625 s。`frames.csv`、`profiles.csv`、`crossings.csv` 与 M0 基线逐字节相同。`steps.csv` 剔除 `controlled_bytes` 后逐字节相同，受控字节和 M5 记录一致。矩阵、关闭测试的构建、轨迹与 CSV 比对日志均位于本机 `results/sph-refactor-followup/`。
+
+## 复审跟进三　私有头依赖守卫
+
+守卫读取字面 include 的分隔符。绝对路径直接查找，引号包含先查引用文件所在目录，规范的 `methods/` 和 `participants/` 路径沿用 `src` 根。实际命中的私有头按仓内身份套用原有白名单。公开头、退役头和无法解析的相对遍历仍按原规则检查。依赖额外 `-I` 解析的非规范尖括号遍历仍由遍历规则拒绝。
+
+在从 `86b39a0` 导出的隔离副本中生成 Debug Serial CMake 目标图，从实际 `adami_wall_tests.cpp` 调用完整 `tools/check_dependencies.py --graph`。独立审查用另一隔离副本和 Debug double 目标图复跑 15 项。
+
+| 包含方式 | 基线退出码 | 修复后退出码 |
+|---|---:|---:|
+| 原始规范路径 | 0 | 0 |
+| 引号相对路径引用获准的 `AdamiWallPressure3D.hpp` | 1 | 0 |
+| 引号绝对路径引用禁止的 `WcsphStep3D.hpp` | 0 | 1 |
+| 尖括号绝对路径引用同一头 | 0 | 1 |
+
+分别停用相对路径例外和绝对路径查找后，完整入口均因内置回归退出 1。隔离复验于 2026-11-24T16:54:23+08:00 完成。四种 Serial 目标图、Release `BUILD_TESTING=OFF` 构建与目标图守卫、Release double 搬迁安装消费（1/1）均通过。执行记录位于本机 `results/sph-refactor-followup/private-include-guard/compact/`。

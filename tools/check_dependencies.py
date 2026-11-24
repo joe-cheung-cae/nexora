@@ -7,6 +7,7 @@ import argparse
 import json
 import re
 import sys
+from functools import cache
 from pathlib import Path
 
 
@@ -184,8 +185,9 @@ PRIVATE_DATA_HEADERS = {
     "TransportReceiver.hpp": {STRUCTURE_FIXTURE, RECEIVE_TEST},
 }
 PRIVATE_ENTITY_HEADERS = {"EntityCapacity.hpp", "EntityOrder.hpp", "Permutation.hpp", "CsrAdjacency.hpp"}
-SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".cu", ".cuh"}
-INCLUDE = re.compile(r'^\s*#\s*include\s*[<"]([^>"]+)[>"]', re.MULTILINE)
+HEADER_SUFFIXES = {".h", ".hh", ".hpp", ".hxx", ".cuh"}
+SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".cu", *HEADER_SUFFIXES}
+INCLUDE = re.compile(r'^\s*#\s*include\s*(?:"([^"\n]+)"|<([^>\n]+)>)', re.MULTILINE)
 PLATFORM_HEADER = re.compile(
     r"(?:mpi\.h|cuda[^/]*\.h|device_launch_parameters\.h|vector_types\.h)", re.IGNORECASE
 )
@@ -232,23 +234,49 @@ def check_kokkos_header(relative: Path, scope: str, module: str, header: str) ->
     return [f"{relative}: Kokkos header {header} is outside an approved numerical, validation, or CLI boundary"]
 
 
-def check_internal_include(relative: Path, scope: str, header: str) -> list[str]:
+@cache
+def implementation_file_paths() -> dict[tuple[int, int], Path]:
+    """Retain the repository spelling on filesystems with insensitive lookup."""
+    paths = {}
+    for path in (ROOT / "src").rglob("*"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        info = path.stat()
+        paths[(info.st_dev, info.st_ino)] = path.relative_to(ROOT)
+    return paths
+
+
+def resolve_project_include(relative: Path, header: str, quoted: bool) -> Path | None:
+    """Resolve explicit paths and the policy's canonical implementation names."""
+    spelling = Path(header.replace("\\", "/"))
+    if spelling.is_absolute():
+        candidates = [spelling]
+    else:
+        candidates = [ROOT / relative.parent / spelling] if quoted else []
+        if spelling.parts and spelling.parts[0].casefold() in {"methods", "participants"}:
+            candidates.append(ROOT / "src" / spelling)
+    for candidate in candidates:
+        if candidate.is_file():
+            info = candidate.stat()
+            target = implementation_file_paths().get((info.st_dev, info.st_ino))
+            if target is not None:
+                return target
+            resolved = candidate.resolve()
+            return resolved.relative_to(ROOT) if resolved.is_relative_to(ROOT) else None
+    return None
+
+
+def check_internal_include(relative: Path, scope: str, header: str,
+                           target: Path | None = None) -> list[str]:
     """Enforce downward use of implementation-only headers."""
-    spelling = header.replace("\\", "/")
-    parts = [part for part in spelling.split("/") if part not in {"", "."}]
-    if parts and (parts[0] in {"methods", "participants"} or
-                  parts[-1] in {Path(SPH_ADAMI_HEADER).name,
-                                Path(SPH_MOVING_WALL_HEADER).name} or
-                  parts[0] == ".."):
-        source_root = ROOT / "src"
-        for include_dir in (ROOT / relative.parent, source_root):
-            resolved = (include_dir / spelling).resolve()
-            if resolved.is_file() and resolved.is_relative_to(source_root):
-                parts = list(resolved.relative_to(source_root).parts)
-                break
+    if target is not None:
+        parts = list(target.relative_to("src").parts if target.is_relative_to("src") else target.parts)
+    else:
+        parts = [part for part in header.replace("\\", "/").split("/") if part not in {"", "."}]
     if not parts:
         return []
     location = relative.parts
+    target_name = "/".join(parts)
     if ({"gtest", "gmock"}.intersection(parts) or parts[-1].startswith(("gtest", "gmock"))) and (
             scope != "tests" or location[:2] == ("tests", "package") or relative in STANDALONE_TEST_SOURCES):
         return [f"{relative}: {header} is private to GoogleTest unit targets"]
@@ -262,12 +290,14 @@ def check_internal_include(relative: Path, scope: str, header: str) -> list[str]
         if relative.parent == FIXED_CSR_DIR or relative in FIXED_CSR_CONSUMERS.values():
             return []
         return [f"{relative}: {header} is private to the fixed CSR fixture, test and benchmark"]
-    if parts[-1] == Path(SPH_ADAMI_HEADER).name:
-        if "/".join(parts) == SPH_ADAMI_HEADER and relative in SPH_ADAMI_CONSUMERS:
+    if (target_name == SPH_ADAMI_HEADER
+            or (target is None and parts[-1] == Path(SPH_ADAMI_HEADER).name)):
+        if target_name == SPH_ADAMI_HEADER and relative in SPH_ADAMI_CONSUMERS:
             return []
         return [f"{relative}: {header} is private to Adami pressure evaluation and its regression"]
-    if parts[-1] == Path(SPH_MOVING_WALL_HEADER).name:
-        if "/".join(parts) == SPH_MOVING_WALL_HEADER and relative in SPH_MOVING_WALL_CONSUMERS:
+    if (target_name == SPH_MOVING_WALL_HEADER
+            or (target is None and parts[-1] == Path(SPH_MOVING_WALL_HEADER).name)):
+        if target_name == SPH_MOVING_WALL_HEADER and relative in SPH_MOVING_WALL_CONSUMERS:
             return []
         return [f"{relative}: {header} is private to prescribed WCSPH motion and its window tests"]
     if parts[-1] == SPH_PRESSURE_ORACLE.name:
@@ -347,9 +377,12 @@ def public_module(parts: tuple[str, ...]) -> str:
     return parts[0]
 
 
-def check_public_include(relative: Path, scope: str, allowed: set[str], header: str) -> list[str]:
+def check_public_include(relative: Path, scope: str, allowed: set[str], header: str,
+                         implementation_header: bool = False) -> list[str]:
     parts = tuple(header.replace("\\", "/").split("/"))
     if ".." in parts:
+        if implementation_header and parts[0] != "nexora":
+            return []
         return [f"{relative}: relative traversal include is forbidden"]
     if len(parts) > 1 and parts[0] == "nexora":
         public_parts = parts[1:]
@@ -368,6 +401,23 @@ def check_public_include(relative: Path, scope: str, allowed: set[str], header: 
     if target not in allowed:
         return [f"{relative}: forbidden include {header}"]
     return []
+
+
+def check_source_includes(relative: Path, scope: str, module: str, allowed: set[str],
+                          source: str) -> list[str]:
+    errors: list[str] = []
+    for quoted, angled in INCLUDE.findall(source):
+        header = quoted or angled
+        target = resolve_project_include(relative, header, bool(quoted))
+        errors.extend(check_kokkos_header(relative, scope, module, header))
+        errors.extend(check_internal_include(relative, scope, header, target))
+        implementation_header = (target is not None and target.suffix in HEADER_SUFFIXES
+                                 and target.parts[:2] in {("src", "methods"), ("src", "participants")})
+        errors.extend(check_public_include(relative, scope, allowed, header, implementation_header))
+        header_name = header.replace("\\", "/").split("/")[-1]
+        if (scope, module) != ("apps", "nexora") and PLATFORM_HEADER.fullmatch(header_name):
+            errors.append(f"{relative}: CUDA/MPI header {header} belongs in the optional CLI")
+    return errors
 
 
 def policy_self_test() -> list[str]:
@@ -597,11 +647,24 @@ def policy_self_test() -> list[str]:
     for path in SPH_ADAMI_CONSUMERS:
         if check_internal_include(path, path.parts[0], SPH_ADAMI_HEADER):
             failures.append(f"checker self-test failed to allow Adami pressure use in {path}")
-    if check_internal_include(SPH_ADAMI_TEST, "tests", f"../../../src/{SPH_ADAMI_HEADER}"):
-        failures.append("checker self-test failed to allow relative Adami test include")
-    if check_internal_include(Path(*SPH_METHOD_DIR) / "Pressure3D.cpp", "src",
-                              Path(SPH_ADAMI_HEADER).name):
-        failures.append("checker self-test failed to allow local Adami pressure include")
+    stepper = ROOT / "src" / SPH_STEP_HEADER
+    for spelling, forbidden in ((f'<{SPH_ADAMI_HEADER}>', False),
+                                (f'"../../../src/{SPH_ADAMI_HEADER}"', False),
+                                (f'"{stepper.as_posix()}"', True),
+                                (f'<{stepper.as_posix()}>', True),
+                                ('"../missing.hpp"', True)):
+        errors = check_source_includes(SPH_ADAMI_TEST, "tests", "methods",
+                                      set(ALLOWED_INCLUDES), f"#include {spelling}\n")
+        if bool(errors) != forbidden:
+            failures.append(f"checker self-test misclassified {spelling} in {SPH_ADAMI_TEST}")
+    pressure = Path(*SPH_METHOD_DIR) / "Pressure3D.cpp"
+    local_adami = Path(SPH_ADAMI_HEADER).name
+    for spelling, forbidden in ((f'"{local_adami}"', False), (f'<{local_adami}>', True),
+                                (f'"../../{SPH_PARTICIPANT_HEADER}"', True)):
+        errors = check_source_includes(pressure, "src", "methods", ALLOWED_INCLUDES["core"],
+                                      f"#include {spelling}\n")
+        if bool(errors) != forbidden:
+            failures.append(f"checker self-test misclassified {spelling} in {pressure}")
     for path in (sph_method, sph_participant, SPH_CELL_GRID_TEST, SPH_GRID_ORACLE,
                  REFERENCE_COMMAND_SOURCE, Path("include/nexora/core/Types.hpp"),
                  package_consumer, *FIXED_CSR_CONSUMERS.values()):
@@ -609,8 +672,6 @@ def policy_self_test() -> list[str]:
         for header in (SPH_ADAMI_HEADER, relative_header):
             if not check_internal_include(path, path.parts[0], header):
                 failures.append(f"checker self-test failed to keep Adami pressure out of {path}")
-    if not check_internal_include(sph_method, "src", "../../" + SPH_PARTICIPANT_HEADER):
-        failures.append("checker self-test failed to reject a relative method-to-participant include")
     for header in ("methods/sph/ParticleFields3D.hpp", "methods/sph/neighbors/NeighborView3D.hpp"):
         for path in (sph_method, sph_participant, SPH_CELL_GRID_TEST):
             if check_internal_include(path, path.parts[0], header):
@@ -730,13 +791,8 @@ def check_includes() -> list[str]:
             if path.suffix in {".cu", ".cuh"} and not cli_source:
                 errors.append(f"{relative}: CUDA sources are limited to the opt-in CLI smoke target")
 
-            for header in INCLUDE.findall(path.read_text(encoding="utf-8")):
-                errors.extend(check_kokkos_header(relative, scope, module, header))
-                errors.extend(check_internal_include(relative, scope, header))
-                errors.extend(check_public_include(relative, scope, allowed, header))
-                header_parts = header.replace("\\", "/").split("/")
-                if not cli_source and PLATFORM_HEADER.fullmatch(header_parts[-1]):
-                    errors.append(f"{relative}: CUDA/MPI header {header} belongs in the optional CLI")
+            errors.extend(check_source_includes(relative, scope, module, allowed,
+                                                path.read_text(encoding="utf-8")))
     return errors
 
 
