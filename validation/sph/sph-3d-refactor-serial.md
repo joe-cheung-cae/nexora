@@ -1,0 +1,34 @@
+# 三维 WCSPH 重构 Serial 验收
+
+## M0 固定对照
+
+实施起点为 `bbc301cad481ce6e85706f139398027dbf823e10`。集成分支从 `de1f36cade3a2b6208ef2c78449ffbe52041e92a` 创建。这两次提交的差异仅为重构计划。按计划所列路径复算原实施补丁，SHA-256 为 `12838aaebeac7c2200ee1e28ee16eeea7232125ba950c9734233371a0270424f`。[迁移计划](../../docs/architecture/sph-3d-refactor-plan.md#m0-固定对照)
+
+在 Apple M2 Pro、macOS arm64、Apple Clang 21.0.0、C++20、CMake 4.4.3 和 Ninja 1.13.2 上执行。使用已校验的本地 Kokkos 5.2.2 Serial-only 和 GoogleTest 1.17.0，MPI 关闭，测试开启。源码由两个冻结提交分别导出，使用匹配构建类型的依赖。分别以 `ctest --show-only=json-v1` 保存发现列表，再按一维及三维 SPH 目标的完整前缀执行。
+
+| 源码 | Serial 配置 | 一维 / 三维 | 完成时间 |
+|---|---|---:|---|
+| 历史数值对照 `ce54294` | Release double | 7/7 · 56/56 | 2026-11-24T14:24:19+08:00 |
+| 实施起点 `de1f36c` | Debug float | 7/7 · 59/59 | 2026-11-24T14:24:37+08:00 |
+| 实施起点 `de1f36c` | Release double | 7/7 · 58/58 | 2026-11-24T14:24:19+08:00 |
+
+实施起点两份三维清单的唯一差异为 float 专用的 `nexora_sph_tests.SphVerletWindow.DriftJustAboveFloatRangeCannotRoundBackToLargestPosition`。快照调用分布在连续性、Adami、Verlet 窗口、静水初态和轨迹驱动。现有无密度入口由静水初态、未注册的旧水箱诊断及窗口初态测试调用。四组静水初态为 6³/h=1、12³/h=0.5、24³/h=0.25 和 24³/h=0.5，保留独立参考的邻居数、核矩、密度、压力 RMS 及归一化净加速度 RMS 判据。[静水初态记录](hydrostatic-initial-resolution.md)
+
+两个源码起点分别用 Release double 运行 `nexora_sph_tank_trajectory 6 <目录>`。每次推进 601 步至 2.34765625 s，216 粒子均在箱内，穿墙事件为零。两次生成的四份文件与历史归档逐字节一致，`steps.csv` 的受控字节为初态 54,292 B、后续各步 101,076 B。
+
+| 文件 | SHA-256 |
+|---|---|
+| `frames.csv` | `177a2246a90999b05a9efb8064914c14a392010339bcc8fb22e5eb2ef9632c0f` |
+| `profiles.csv` | `336429a339f7809485c99e8f668c59031db9710383fa394b32e2fa27fe66afe0` |
+| `crossings.csv` | `5958d4e75856c981c1518a2dbae5bfe07fd6d20ac9347eafc40a8b7b48694bba` |
+| `steps.csv` | `9a83a2724f2fe5d4bf786eb44be96f1fc57c5d4af263b20364027a46ef04cfc3` |
+
+使用同一驱动及生产库另行测量 Kokkos Tools 事件。下表的 Kokkos 峰值包含调用方输入和 Kokkos 内部 scratch。显式 fence 计入总数。六个积分缓冲均于首步各分配一次，第二步均复用。两份基线的分配、复制及峰值在所列采样点一致，自首步起总 fence 数有差异。历史双粒子同格窗口的原拒绝限为 170/290 B，原成功限为 290/514 B（float/double）。
+
+| 采样 | 分配 / 释放 | 深拷贝次数 / 字节 | 总 fence 历史 / 实施 | Kokkos 峰值 B |
+|---|---:|---:|---:|---:|
+| 初始化 | 21 / 8 | 0 / 0 | 18 / 18 | 143,448 |
+| 第 1 步 | 17 / 11 | 2 / 4,928 | 22 / 20 | 203,096 |
+| 第 2 步 | 9 / 9 | 1 / 1,728 | 20 / 18 | 196,696 |
+
+历史 6³ 轨迹的全程成功预算下界为 133,076 B，低 1 B 时首步预算拒绝。历史数值文件由独立代理从冻结提交复现，集成方复核 Git 摘要及两份运行清单。原始发现列表、构建及运行日志、CSV、Kokkos 事件和预算探测记录位于本机 `results/sph-refactor-execution/`。[历史轨迹](hydrostatic-continuity-repair.md#solver-cleanup-trajectory)
