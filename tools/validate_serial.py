@@ -571,6 +571,7 @@ def verify_precision(args, profile, precision):
         "nexora_sph_tests.SphVerletWindow.MovingWallRejectsInvalidGroupsAndSamples",
         "nexora_sph_tests.SphVerletWindow.MovingWallFiniteDomainRejectsRoundedUpRelativeWidth",
         "nexora_sph_tests.SphVerletWindow.MovingWallPeriodicFoldAndThrowingCallbackRecover",
+        "nexora_sph_tests.SphVerletWindow.MovingWallRejectsReentrantSimulationMutation",
         "nexora_sph_tests.SphVerletWindow.MovingWallPreparedCandidateRestoresPhasesBeforeReplay",
         "nexora_sph_tests.SphVerletWindow.MovingWallTrajectoryStorageIsAdmittedBeforeCapture",
         "nexora_sph_tests.SphAdamiWall.GravityOnlyMatchesFreeFall",

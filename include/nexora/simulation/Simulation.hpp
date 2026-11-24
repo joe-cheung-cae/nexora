@@ -24,6 +24,8 @@ struct TimeState {
 
 // Synchronous orchestration of exactly one participant. The caller owns the
 // participant and must keep it alive and exclusively controlled by Simulation.
+// Callbacks within a Simulation operation may observe its state and time.
+// Reentrant lifecycle operations on that Simulation return invalid_state.
 // Destruction does not call participant methods; finalize explicitly.
 class Simulation {
   public:
@@ -54,9 +56,11 @@ class Simulation {
 
   private:
     Status reject_trial(const Status& cause);
+    Status restore_checkpoint();
 
     ParticipantIF& participant_;
     SimulationState state_ = SimulationState::created;
+    bool operation_active_{};
     TimeState time_;
     TimeInterval interval_;
 };

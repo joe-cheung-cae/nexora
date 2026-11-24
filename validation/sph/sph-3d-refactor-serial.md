@@ -133,3 +133,26 @@ Release double 下，`h=0.75`、`x={2^54,2^54+4}` 与整体右移 4 的两组几
 独立审查在 75,077 对 binary64 输入上用精确有理数对照，修复前的浮点格号路径出现 18,984 处差异，修复后差异为零。集成方另以 UBSan 运行 38,610 个输入，36,585 个整格号精确匹配，2,025 个越界坐标均按约定拒绝。原始探针与日志位于本机 `results/sph-refactor-followup/grid/`。
 
 Kokkos 5.2.2 Serial 下 Debug float 和 Debug double 分别通过全部 27 项格网 CTest。独立 Release double 构建复跑了这 27 项及窗口用例。独立审查未发现需修复的问题。
+
+## 复审跟进二　Simulation 窗口重入
+
+保留已安装的 `SimulationState` 和 `state()` 接口。`created`、`initialized`、`prepared`、`window_open`、`trial_advanced` 分别允许初始化、准备、开窗、试算和提交。`failed` 仍允许转发 `finalize()` 做清理，`finalized` 拒绝再次转发。首次试算失败并按原步长重新开窗，与首次试算成功但尚未提交，可以有相同的 `TimeState` 和窗口区间，却只有后者可以提交。`ParticipantIF` 没有生命周期查询。CLI 通过返回状态与时间控制运行，真实参与者回归和协调器测试使用公开阶段查询。
+
+协调器用一个作用域标记记录正在执行的生命周期操作。运动轨迹回调可读取公开阶段和时间，嵌套的恢复、关闭或试算会在修改协调器或调用参与者前返回 `invalid_state`。传播这一返回值时，外层试算恢复已提交检查点，保持已接受时间、步数和壁数据，随后缩步一半可成功提交。忽略嵌套拒绝时外层原步正常提交。真实参与者恢复返回相同错误码时，协调器仍进入 `failed`。已提交行读取回调从协调器操作外请求关闭，保留参与者拒绝、协调器进入 `failed`、读取结束后重试关闭成功的流程。
+
+新增真实运动壁用例在基线出现嵌套恢复破坏外层回滚的失败。修复后 Debug float 通过 8 项相关回归，独立 Release double 构建通过格网和生命周期共 35 项，并另用真实运动壁驱动复核嵌套恢复和关闭的传播与忽略。独立审查未发现需修复的问题。日志和探针位于本机 `results/sph-refactor-followup/`。
+
+### 两项改动的四配置验证
+
+使用 macOS arm64、AppleClang 21.0.0.21000401、Ninja 和本地 Kokkos 5.2.2 Serial、GoogleTest 1.17.0。Debug 和 Release 均执行 `tools/validate_serial.py verify --precisions float double --require-network-blocked`。每组通过目标图依赖守卫、Reference Decimal oracle 和搬迁安装消费。各组 CTest 清单与两份 JUnit 逐名相符，其中三维 SPH 90 项、一维固定 CSR 7 项，三项新增回归均执行。
+
+| Serial 配置 | 常规 CTest | 搬迁安装 | 完成时间 |
+|---|---:|---:|---|
+| Debug float | 163/163 | 1/1 | 2026-11-24T15:38:14+08:00 |
+| Debug double | 162/162 | 1/1 | 2026-11-24T15:39:14+08:00 |
+| Release float | 163/163 | 1/1 | 2026-11-24T15:38:00+08:00 |
+| Release double | 162/162 | 1/1 | 2026-11-24T15:38:48+08:00 |
+
+### 关闭测试的构建与固定壁轨迹
+
+独立 Release float `BUILD_TESTING=OFF` 构建通过两个三维私有目标、Simulation、默认构建及目标图守卫，完成于 2026-11-24T15:38:41+08:00。Release double 6³ 固定壁轨迹于 2026-11-24T15:37:14+08:00 完成，601 步推进至 2.34765625 s。`frames.csv`、`profiles.csv`、`crossings.csv` 与 M0 基线逐字节相同。`steps.csv` 剔除 `controlled_bytes` 后逐字节相同，受控字节和 M5 记录一致。矩阵、关闭测试的构建、轨迹与 CSV 比对日志均位于本机 `results/sph-refactor-followup/`。

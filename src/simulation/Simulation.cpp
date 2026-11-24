@@ -10,6 +10,22 @@ Status invalid_state(const char* message) {
     return {StatusCode::invalid_state, message};
 }
 
+class ActiveOperation {
+  public:
+    explicit ActiveOperation(bool& active) noexcept : active_(active) { active_ = true; }
+    ~ActiveOperation() { active_ = false; }
+
+    ActiveOperation(const ActiveOperation&) = delete;
+    ActiveOperation& operator=(const ActiveOperation&) = delete;
+
+  private:
+    bool& active_;
+};
+
+Status reject_reentry() {
+    return invalid_state("simulation operation is already active");
+}
+
 } // namespace
 
 Simulation::Simulation(ParticipantIF& participant, double initial_time) noexcept
@@ -18,12 +34,15 @@ Simulation::Simulation(ParticipantIF& participant, double initial_time) noexcept
 }
 
 Status Simulation::initialize() {
+    if (operation_active_)
+        return reject_reentry();
     if (state_ != SimulationState::created) {
         return invalid_state("simulation can only initialize once");
     }
     if (!std::isfinite(time_.accepted_time)) {
         return {StatusCode::invalid_argument, "initial time must be finite"};
     }
+    const ActiveOperation operation(operation_active_);
     if (!participant_.capabilities().rollback) {
         return {StatusCode::unsupported, "transactional simulation requires participant rollback"};
     }
@@ -45,18 +64,24 @@ Status Simulation::initialize() {
 }
 
 Status Simulation::prepare() {
+    if (operation_active_)
+        return reject_reentry();
     if (state_ != SimulationState::initialized) {
         return invalid_state("prepare requires an initialized simulation");
     }
+    const ActiveOperation operation(operation_active_);
     const auto status = participant_.prepare();
     state_ = status.ok() ? SimulationState::prepared : SimulationState::failed;
     return status;
 }
 
 Status Simulation::begin_window(double step) {
+    if (operation_active_)
+        return reject_reentry();
     if (state_ != SimulationState::prepared) {
         return invalid_state("begin_window requires a prepared simulation");
     }
+    const ActiveOperation operation(operation_active_);
     const auto constraint = participant_.time_constraint(time_.accepted_time);
     const auto valid = validate_time_step(constraint, step);
     if (!valid.ok()) {
@@ -80,7 +105,7 @@ Status Simulation::begin_window(double step) {
 }
 
 Status Simulation::reject_trial(const Status& cause) {
-    const auto restored = restore_window();
+    const auto restored = restore_checkpoint();
     if (!restored.ok()) {
         return {restored.code(), cause.message() + "; rollback failed: " + restored.message()};
     }
@@ -88,9 +113,12 @@ Status Simulation::reject_trial(const Status& cause) {
 }
 
 Status Simulation::advance_trial() {
+    if (operation_active_)
+        return reject_reentry();
     if (state_ != SimulationState::window_open) {
         return invalid_state("advance_trial requires an open window");
     }
+    const ActiveOperation operation(operation_active_);
     ++time_.trial_attempts;
     const auto status = participant_.advance_trial(interval_);
     if (!status.ok())
@@ -100,9 +128,12 @@ Status Simulation::advance_trial() {
 }
 
 Status Simulation::commit_window() {
+    if (operation_active_)
+        return reject_reentry();
     if (state_ != SimulationState::trial_advanced) {
         return invalid_state("commit_window requires a successful trial");
     }
+    const ActiveOperation operation(operation_active_);
     auto status = participant_.prepare_commit(interval_);
     if (!status.ok()) {
         return reject_trial(status);
@@ -118,9 +149,16 @@ Status Simulation::commit_window() {
 }
 
 Status Simulation::restore_window() {
+    if (operation_active_)
+        return reject_reentry();
     if (state_ != SimulationState::window_open && state_ != SimulationState::trial_advanced) {
         return invalid_state("restore_window requires an open window");
     }
+    const ActiveOperation operation(operation_active_);
+    return restore_checkpoint();
+}
+
+Status Simulation::restore_checkpoint() {
     const auto status = participant_.restore_window();
     state_ = status.ok() ? SimulationState::prepared : SimulationState::failed;
     return status;
@@ -136,11 +174,14 @@ Status Simulation::advance(double step) {
 }
 
 Status Simulation::finalize() {
+    if (operation_active_)
+        return reject_reentry();
     if (state_ == SimulationState::finalized) {
         return invalid_state("simulation is already finalized");
     }
+    const ActiveOperation operation(operation_active_);
     if (state_ == SimulationState::window_open || state_ == SimulationState::trial_advanced) {
-        const auto status = restore_window();
+        const auto status = restore_checkpoint();
         if (!status.ok()) {
             return status;
         }

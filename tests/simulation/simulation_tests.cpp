@@ -138,7 +138,10 @@ class DummyParticipant final : public ParticipantIF {
     Status status_for(Failure point) {
         if (failure == point) {
             failure = Failure::none;
-            return {StatusCode::execution_failure, "injected participant failure"};
+            // A participant can report invalid_state even for a delegated restore failure.
+            const auto code = point == Failure::restore ? StatusCode::invalid_state
+                                                        : StatusCode::execution_failure;
+            return {code, "injected participant failure"};
         }
         return {};
     }
@@ -152,16 +155,24 @@ void prepare(Simulation& simulation) {
 TEST(SimulationTest, LifecycleAndReplay) {
     DummyParticipant participant;
     Simulation simulation(participant);
+    ASSERT_EQ(simulation.state(), SimulationState::created);
     ASSERT_FALSE(simulation.advance(0.5).ok());
     ASSERT_FALSE(simulation.prepare().ok());
     ASSERT_TRUE(participant.calls.empty());
-    ASSERT_NO_FATAL_FAILURE(prepare(simulation));
+    ASSERT_TRUE(simulation.initialize().ok());
+    ASSERT_EQ(simulation.state(), SimulationState::initialized);
+    ASSERT_EQ(simulation.begin_window(0.5).code(), StatusCode::invalid_state);
+    ASSERT_TRUE(simulation.prepare().ok());
+    ASSERT_EQ(simulation.state(), SimulationState::prepared);
     ASSERT_FALSE(simulation.initialize().ok());
     ASSERT_FALSE(simulation.commit_window().ok());
     ASSERT_FALSE(simulation.restore_window().ok());
     ASSERT_TRUE(simulation.begin_window(0.5).ok());
+    ASSERT_EQ(simulation.state(), SimulationState::window_open);
+    ASSERT_EQ(simulation.commit_window().code(), StatusCode::invalid_state);
     ASSERT_FALSE(simulation.begin_window(0.5).ok());
     ASSERT_TRUE(simulation.advance_trial().ok());
+    ASSERT_EQ(simulation.state(), SimulationState::trial_advanced);
     ASSERT_FALSE(simulation.advance_trial().ok());
     ASSERT_EQ(participant.state.value, 0.5);
     ASSERT_EQ(participant.state.history, 1);
@@ -234,7 +245,7 @@ TEST(SimulationTest, FailedRestoreAndFinalization) {
     ASSERT_TRUE(simulation.begin_window(0.5).ok());
     ASSERT_TRUE(simulation.advance_trial().ok());
     participant.failure = Failure::restore;
-    ASSERT_FALSE(simulation.restore_window().ok());
+    ASSERT_EQ(simulation.restore_window().code(), StatusCode::invalid_state);
     ASSERT_EQ(simulation.state(), SimulationState::failed);
     ASSERT_EQ(simulation.time().accepted_time, 0.0);
     ASSERT_EQ(simulation.time().accepted_steps, 0);

@@ -3207,6 +3207,75 @@ TEST(SphVerletWindow, MovingWallPeriodicFoldAndThrowingCallbackRecover) {
     EXPECT_TRUE(simulation.finalize().ok());
 }
 
+TEST(SphVerletWindow, MovingWallRejectsReentrantSimulationMutation) {
+    struct NestedCall {
+        const char* name;
+        Status (Simulation::*call)();
+    };
+    constexpr double full_step = .5;
+    const Fields fluid({}), boundary({{{.25, 0, 0}, 1, 70, 1}});
+    const sph::WcsphVerletParameters parameters{{1, .25, 1}, .5};
+    for (const auto nested : {NestedCall{"restore_window", &Simulation::restore_window},
+                              NestedCall{"finalize", &Simulation::finalize},
+                              NestedCall{"advance_trial", &Simulation::advance_trial}}) {
+        for (const bool propagate : {true, false}) {
+            SCOPED_TRACE(nested.name);
+            SCOPED_TRACE(propagate);
+            Simulation* active{};
+            std::optional<Status> rejection;
+            auto motion = stationary_motion(1.);
+            motion.motion = [&](WallTime time, double) -> Result<WallMotion> {
+                if (time.elapsed == full_step) {
+                    EXPECT_EQ(active->state(), SimulationState::window_open);
+                    rejection = (active->*nested.call)();
+                    EXPECT_EQ(rejection->code(), StatusCode::invalid_state);
+                    EXPECT_EQ(active->state(), SimulationState::window_open);
+                    EXPECT_EQ(active->time().trial_attempts, 1u);
+                    if (propagate && !rejection->ok())
+                        return *rejection;
+                }
+                WallMotion sample;
+                sample.translation[0] = time.elapsed;
+                sample.velocity[0] = 1.;
+                return sample;
+            };
+            const WallGroups groups{{1, wall_fields(boundary), motion}};
+            sph::WcsphParticipant3D participant(fluid.get(), 8, parameters, {}, {}, groups);
+            Simulation simulation(participant);
+            active = &simulation;
+            ASSERT_TRUE(simulation.initialize().ok());
+            ASSERT_TRUE(simulation.prepare().ok());
+            const auto initial = checked(participant.read_committed_wall(70));
+
+            double accepted_step = full_step;
+            const auto attempted = simulation.advance(full_step);
+            ASSERT_TRUE(rejection.has_value());
+            EXPECT_EQ(simulation.state(), SimulationState::prepared);
+            EXPECT_EQ(simulation.time().trial_attempts, 1u);
+            if (propagate) {
+                EXPECT_EQ(attempted.code(), rejection->code());
+                EXPECT_EQ(attempted.message(), rejection->message());
+                EXPECT_EQ(simulation.time().accepted_time, 0.);
+                EXPECT_EQ(simulation.time().accepted_steps, 0u);
+                EXPECT_EQ(checked(participant.read_committed_wall(70)), initial);
+                accepted_step = full_step / 2;
+                const auto retry = simulation.advance(accepted_step);
+                ASSERT_TRUE(retry.ok()) << retry.message();
+            } else {
+                ASSERT_TRUE(attempted.ok()) << attempted.message();
+            }
+            EXPECT_EQ(simulation.state(), SimulationState::prepared);
+            EXPECT_EQ(simulation.time().accepted_time, accepted_step);
+            EXPECT_EQ(simulation.time().accepted_steps, 1u);
+            EXPECT_EQ(simulation.time().trial_attempts, propagate ? 2u : 1u);
+            EXPECT_EQ(checked(participant.read_committed_wall(70)).position[0],
+                      initial.position[0] + accepted_step);
+            EXPECT_TRUE(simulation.finalize().ok());
+            EXPECT_EQ(participant.resource_usage().controlled_bytes, 0u);
+        }
+    }
+}
+
 TEST(SphVerletWindow, MovingWallPreparedCandidateRestoresPhasesBeforeReplay) {
     const Fields empty({}), wall_fields_input({{{.25, 0, 0}, 3, 71, 1}});
     auto motion = stationary_motion(.5);
