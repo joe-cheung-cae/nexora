@@ -136,6 +136,13 @@ SPH_ADAMI_CONSUMERS = {
 }
 SPH_PRESSURE_TEST = SPH_CELL_GRID_TEST.with_name("pressure_3d_tests.cpp")
 SPH_VERLET_TEST = SPH_CELL_GRID_TEST.with_name("verlet_window_tests.cpp")
+SPH_MOVING_WALL_HEADER = "methods/sph/PrescribedMovingWall3D.hpp"
+SPH_MOVING_WALL_CONSUMERS = {
+    Path("src") / SPH_MOVING_WALL_HEADER,
+    (Path("src") / SPH_MOVING_WALL_HEADER).with_suffix(".cpp"),
+    Path(*SPH_PARTICIPANT_DIR) / "WcsphStep3D.hpp",
+    SPH_VERLET_TEST,
+}
 SPH_HYDROSTATIC_INITIAL_TEST = SPH_CELL_GRID_TEST.with_name("hydrostatic_initial_tests.cpp")
 SPH_CONTINUITY_TEST = SPH_CELL_GRID_TEST.with_name("continuity_tests.cpp")
 SPH_TANK_FIXTURE = SPH_CELL_GRID_TEST.with_name("hydrostatic_tank_fixture.hpp")
@@ -230,7 +237,8 @@ def check_internal_include(relative: Path, scope: str, header: str) -> list[str]
     spelling = header.replace("\\", "/")
     parts = [part for part in spelling.split("/") if part not in {"", "."}]
     if parts and (parts[0] in {"methods", "participants"} or
-                  Path(parts[-1]).name == Path(SPH_ADAMI_HEADER).name or
+                  parts[-1] in {Path(SPH_ADAMI_HEADER).name,
+                                Path(SPH_MOVING_WALL_HEADER).name} or
                   parts[0] == ".."):
         source_root = ROOT / "src"
         for include_dir in (ROOT / relative.parent, source_root):
@@ -258,6 +266,10 @@ def check_internal_include(relative: Path, scope: str, header: str) -> list[str]
         if "/".join(parts) == SPH_ADAMI_HEADER and relative in SPH_ADAMI_CONSUMERS:
             return []
         return [f"{relative}: {header} is private to Adami pressure evaluation and its regression"]
+    if parts[-1] == Path(SPH_MOVING_WALL_HEADER).name:
+        if "/".join(parts) == SPH_MOVING_WALL_HEADER and relative in SPH_MOVING_WALL_CONSUMERS:
+            return []
+        return [f"{relative}: {header} is private to prescribed WCSPH motion and its window tests"]
     if parts[-1] == SPH_PRESSURE_ORACLE.name:
         if relative in {SPH_PRESSURE_TEST, SPH_VERLET_TEST}:
             return []
@@ -624,6 +636,16 @@ def policy_self_test() -> list[str]:
             failures.append(f"checker self-test failed to keep the SPH stepper out of {path}")
         if not check_internal_include(path, path.parts[0], "methods/sph/Continuity3D.hpp"):
             failures.append(f"checker self-test failed to keep continuity internals out of {path}")
+    for path in SPH_MOVING_WALL_CONSUMERS:
+        if check_internal_include(path, path.parts[0], SPH_MOVING_WALL_HEADER):
+            failures.append(f"checker self-test failed to allow prescribed wall motion in {path}")
+    for path in (SPH_CELL_GRID_TEST, SPH_PRESSURE_TEST, SPH_GRID_ORACLE, SPH_ADAMI_TEST,
+                 REFERENCE_COMMAND_SOURCE, package_consumer, *FIXED_CSR_CONSUMERS.values(),
+                 Path("include/nexora/core/Types.hpp")):
+        for header in (SPH_MOVING_WALL_HEADER,
+                       "../" * len(path.parent.parts) + "src/" + SPH_MOVING_WALL_HEADER):
+            if not check_internal_include(path, path.parts[0], header):
+                failures.append(f"checker self-test failed to keep prescribed wall motion out of {path}")
     cell_grid_header = "methods/sph/neighbors/CellGrid.hpp"
     if check_internal_include(SPH_CELL_GRID_TEST, "tests", cell_grid_header):
         failures.append("checker self-test failed to allow the SPH cell-grid test to include internals")

@@ -45,6 +45,10 @@ class WcsphParticipant3D final : public ParticipantIF {
                        WcsphVerletParameters parameters, Velocity3D::const_type initial_velocity,
                        Values::const_type initial_density, FixedWallParticles3D walls,
                        ParticipantId id = ParticipantId{1}, ResourceLimits limits = {});
+    WcsphParticipant3D(ParticleFields3D fluid, std::size_t max_cells,
+                       WcsphVerletParameters parameters, Velocity3D::const_type initial_velocity,
+                       Values::const_type initial_density, std::vector<SphBoundary::WallGroupInput3D> walls,
+                       ParticipantId id = ParticipantId{1}, ResourceLimits limits = {});
     WcsphParticipant3D(const WcsphParticipant3D&) = delete;
     WcsphParticipant3D& operator=(const WcsphParticipant3D&) = delete;
 
@@ -83,7 +87,7 @@ class WcsphParticipant3D final : public ParticipantIF {
     WcsphVerletParameters parameters_;
     Velocity3D::const_type initial_velocity_;
     Values::const_type initial_density_;
-    std::optional<FixedWallParticles3D> fixed_walls_;
+    std::vector<SphBoundary::WallGroupInput3D> initial_walls_;
     ParticipantId id_;
     detail::ResourceBudget budget_;
     std::optional<Kokkos::Serial> exec_;
@@ -94,6 +98,7 @@ class WcsphParticipant3D final : public ParticipantIF {
     std::uint64_t attempt_{};
     Stage stage_ = Stage::created;
     mutable bool reading_{};
+    bool evaluating_{};
     void* observer_context_{};
     void (*observe_)(void*, StepStage3D, const NeighborView3D&){};
 };

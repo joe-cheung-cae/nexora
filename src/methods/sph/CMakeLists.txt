@@ -2,6 +2,7 @@ add_library(nexora_methods_sph STATIC
     AdamiWallPressure3D.cpp
     Density3D.cpp
     Pressure3D.cpp
+    PrescribedMovingWall3D.cpp PrescribedMovingWall3D.hpp
     SphBoundary.cpp
     TaitEos.cpp
     Verlet3D.cpp Continuity3D.cpp Continuity3D.hpp

@@ -21,19 +21,19 @@ const WallParticle3D* SolidWallBoundary3D::find(std::uint64_t id) const {
     return particle != end && particle->id == id ? particle : nullptr;
 }
 
-Result<WallKinematics3D> SolidWallBoundary3D::sample(std::uint64_t id, double phase) const {
+Result<WallKinematics3D> SolidWallBoundary3D::sample(std::uint64_t id, WallTrajectoryTime3D time) const {
     const auto* particle = find(id);
     if (!particle)
         return Status{StatusCode::invalid_argument, "unknown SPH wall particle ID"};
-    return sample_reference(particle->reference_position, phase);
+    return sample_reference(particle->reference_position, time);
 }
 
 FixedWall3D::FixedWall3D(ParticleView sorted_particles)
     : SolidWallBoundary3D(std::move(sorted_particles)) {}
 
 Result<WallKinematics3D>
-FixedWall3D::sample_reference(const std::array<real, 3>& position, double) const {
-    return WallKinematics3D{position, {}, {}};
+FixedWall3D::sample_reference(const std::array<real, 3>& position, WallTrajectoryTime3D) const {
+    return kinematics(position);
 }
 
 Result<SolidWallBoundary3D::ParticleView>

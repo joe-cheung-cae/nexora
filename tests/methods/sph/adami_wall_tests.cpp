@@ -94,7 +94,8 @@ struct WallForceReference {
 
 WallForceReference independent_wall_forces(
     const std::vector<Particle>& particles, const std::map<std::uint64_t, real>& density,
-    const sph::WcsphVerletParameters& parameters) {
+    const sph::WcsphVerletParameters& parameters,
+    const std::array<double, 3>& wall_acceleration = {}) {
     constexpr long double pi = std::numbers::pi_v<long double>;
     const long double rho0 = parameters.eos.reference_density;
     const long double gamma = parameters.eos.gamma;
@@ -124,7 +125,7 @@ WallForceReference independent_wall_forces(
                 (std::pow(2 - q, 3) - 4 * std::pow(std::max(1 - q, 0.L), 3)) / (4 * pi);
             long double head{};
             for (int k = 0; k < 3; ++k)
-                head += parameters.gravity[k] *
+                head += (static_cast<long double>(parameters.gravity[k]) - wall_acceleration[k]) *
                         (static_cast<long double>(wall.position[k]) - fluid.position[k]);
             weight_sum += weight;
             weighted_pressure += weight *
@@ -253,6 +254,65 @@ TEST(SphAdamiWall, WallPressureAndForcesMatchIndependentReference) {
         expect_wall_reference(committed_rows(participant), reference, parameters);
         EXPECT_TRUE(simulation.finalize().ok());
     }
+}
+
+TEST(SphAdamiWall, AcceleratedWallPressureAndForcesMatchIndependentHead) {
+    const std::vector<Particle> particles{
+        {{.125, .75, .5}, 1.5, 20, 0},
+        {{.875, .125, .5}, 2.5, 40, 0},
+        {{.25, .375, .5}, 4, 99, 1}};
+    const std::map<std::uint64_t, real> density{{20, real{1.25}}, {40, real{1.125}}};
+    const sph::WcsphVerletParameters parameters{{1, 2, 3}, .75, {-.25, .125, -.375}, 1.25};
+    const std::array<double, 3> wall_acceleration{1.5, -1, .5};
+    const auto expected = independent_wall_forces(particles, density, parameters, wall_acceleration);
+    const auto stationary = independent_wall_forces(particles, density, parameters);
+    EXPECT_GT(std::abs(expected.wall_pressure.at(99) - stationary.wall_pressure.at(99)), .1);
+
+    const Kokkos::Serial exec;
+    const auto grid = checked(sph::CellGrid::build(exec, Fields(particles).get(), 64, {},
+                                                   parameters.smoothing_length));
+    const auto& query = grid.neighbors();
+    const auto& sources = query.fields();
+    const auto owned = query.owned_slots();
+    sph::Values rho("moving_wall_test.density", 2);
+    sph::Values fluid_pressure("moving_wall_test.fluid_pressure", 2);
+    sph::NeighborView3D::Indices::non_const_type row_of_slot("moving_wall_test.row_of_slot", 3);
+    LocalIndex wall_slot{};
+    for (std::size_t slot = 0; slot < sources.ids.extent(0); ++slot)
+        if (sources.ids(slot) == 99)
+            wall_slot = static_cast<LocalIndex>(slot);
+    ASSERT_EQ(sources.ids(wall_slot), 99u);
+    for (std::size_t row = 0; row < owned.extent(0); ++row) {
+        const auto slot = owned(row);
+        const auto id = sources.ids(slot);
+        row_of_slot(slot) = static_cast<LocalIndex>(row);
+        rho(row) = density.at(id);
+        fluid_pressure(row) = expected.fluid_pressure.at(id);
+    }
+
+    const sph::TaitEos eos(parameters.eos);
+    const auto raw = sph::wall_pressure(query, wall_slot, row_of_slot, rho, fluid_pressure,
+                                        wall_acceleration, parameters.gravity);
+    const auto coefficient = sph::wall_coefficient(query, wall_slot, row_of_slot, rho, fluid_pressure,
+                                                   wall_acceleration, parameters.gravity, eos);
+    ASSERT_TRUE(coefficient.has_value());
+    EXPECT_NEAR(raw, expected.wall_pressure.at(99), 64 * std::numeric_limits<double>::epsilon());
+    EXPECT_NEAR(*coefficient, expected.coefficient.at(99), 32 * std::numeric_limits<real>::epsilon());
+
+    sph::WallAcceleration3D wall_a("moving_wall_test.acceleration", 3);
+    for (int k = 0; k < 3; ++k)
+        wall_a(wall_slot, k) = wall_acceleration[k];
+    sph::Values pressure("moving_wall_test.pressure", 2);
+    sph::Acceleration3D acceleration("moving_wall_test.fluid_acceleration", 2);
+    ASSERT_TRUE(sph::evaluate_pressure_3d(exec, query, eos, rho, pressure, acceleration, wall_a,
+                                          parameters.gravity).ok());
+    std::vector<sph::CommittedRow3D> observed;
+    for (std::size_t row = 0; row < owned.extent(0); ++row)
+        observed.push_back({.id = sources.ids(owned(row)),
+                            .pressure = pressure(row),
+                            .pressure_acceleration =
+                                {acceleration(row, 0), acceleration(row, 1), acceleration(row, 2)}});
+    ASSERT_NO_FATAL_FAILURE(expect_wall_reference(observed, expected, parameters));
 }
 
 TEST(SphAdamiWall, FixedSourcesMatchIndependentWallForcesAcrossRestore) {
