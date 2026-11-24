@@ -550,7 +550,14 @@ def verify_precision(args, profile, precision):
         "nexora_sph_tests.SphVerletWindow.ObservesStageNeighborsAfterEvictionAndRestore",
         "nexora_sph_tests.SphVerletWindow.InitializationMapsExplicitValuesAcrossInputPermutations",
         "nexora_sph_tests.SphVerletWindow.MismatchedTrialIntervalsKeepWindowOpen",
+        "nexora_simulation_tests.SimulationTest.FailedRestoreAndFinalization",
         "nexora_sph_tests.SphVerletWindow.FixedWallOnlyCommitsStaticGeometryAndAcousticLimit",
+        "nexora_sph_tests.SphVerletWindow.CommittedReadsRejectActiveAndReentrantWindowsAndRecoverAfterException",
+        "nexora_sph_tests.SphVerletWindow.DirectFinalizeRejectedDuringCommittedRowVisit",
+        "nexora_sph_tests.SphVerletWindow.SimulationFinalizeFailsDuringCommittedRowVisit",
+        "nexora_sph_tests.SphVerletWindow.PreparedCandidateRestoresAndReplaysWithoutChangingCommittedAllocations",
+        "nexora_sph_tests.SphVerletWindow.HostAllocationFailureRestoresAndRetries",
+        "nexora_sph_tests.SphVerletWindow.FixedWallBudgetRejectionRestoresCommittedRowsAndWall",
         "nexora_sph_tests.SphAdamiWall.GravityOnlyMatchesFreeFall",
         "nexora_sph_tests.SphAdamiWall.FixedSourcesMatchIndependentWallForcesAcrossRestore",
         "nexora_sph_tests.SphAdamiWall.WallPressureAndForcesMatchIndependentReference",
@@ -565,7 +572,8 @@ def verify_precision(args, profile, precision):
         "nexora_reference_uninitialized_tests.ReferenceUninitialized.RejectUninitializedRuntime",
         mpi_test,
     ] + (["nexora_sph_tests.SphVerletWindow.DriftJustAboveFloatRangeCannotRoundBackToLargestPosition"]
-         if precision == "float" else []))
+         if precision == "float" else
+         ["nexora_sph_tests.SphVerletWindow.LateCflFailureRestoresAndShorterRetryMatchesDirectStep"]))
     test_log = build / "Testing/Temporary/LastTest.log"
     shutil.copyfile(test_log, logs / "reference-ctest.log")
     command([sys.executable, ROOT / "tools/check_reference_precision.py", "--log", test_log,

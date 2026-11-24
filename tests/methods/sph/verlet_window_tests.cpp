@@ -1,16 +1,128 @@
 #include "wcsph_oracle.hpp"
 
+#include <cstdint>
+#include <cstdlib>
 #include <iomanip>
+#include <new>
+#include <optional>
 #include <nexora/simulation/Simulation.hpp>
 #include <participants/sph/WcsphParticipant3D.hpp>
 #include <participants/sph/WcsphStep3D.hpp>
 #include <sstream>
 #include <string_view>
 #include <tuple>
+#include <utility>
+
+namespace {
+struct HostAllocationObservation {
+    std::size_t calls{}, requested_bytes{};
+    std::size_t fail_at{};
+    bool active{};
+    bool threw{};
+};
+thread_local HostAllocationObservation host_allocations;
+
+class ScopedHostAllocations {
+  public:
+    explicit ScopedHostAllocations(std::size_t fail_at) {
+        host_allocations = {.fail_at = fail_at, .active = true};
+    }
+    ~ScopedHostAllocations() { host_allocations.active = false; }
+};
+
+void count_host_allocation(std::size_t bytes) {
+    auto& observation = host_allocations;
+    if (!observation.active)
+        return;
+    observation.requested_bytes += bytes;
+    if (++observation.calls == observation.fail_at) {
+        observation.active = false;
+        observation.threw = true;
+        throw std::bad_alloc{};
+    }
+}
+
+void* allocate_test_host_storage(std::size_t bytes) {
+    count_host_allocation(bytes);
+    for (;;) {
+        if (void* allocation = std::malloc(bytes ? bytes : 1))
+            return allocation;
+        const auto handler = std::get_new_handler();
+        if (!handler)
+            throw std::bad_alloc{};
+        handler();
+    }
+}
+} // namespace
+
+void* operator new(std::size_t bytes) {
+    return allocate_test_host_storage(bytes);
+}
+
+void* operator new[](std::size_t bytes) {
+    return allocate_test_host_storage(bytes);
+}
+
+void operator delete(void* allocation) noexcept {
+    std::free(allocation);
+}
+
+void operator delete[](void* allocation) noexcept {
+    std::free(allocation);
+}
+
+void operator delete(void* allocation, std::size_t) noexcept {
+    std::free(allocation);
+}
+
+void operator delete[](void* allocation, std::size_t) noexcept {
+    std::free(allocation);
+}
 
 namespace nexora::sph {
 
 struct WcsphTestAccess {
+    struct PrecommitIdentity {
+        FieldStamp state_stamp;
+        double maximum_step;
+        std::array<std::uintptr_t, 5> allocation;
+        std::array<FieldStamp, 4> grant;
+        bool operator==(const PrecommitIdentity&) const = default;
+    };
+
+    static PrecommitIdentity precommit_identity(const WcsphState3D& state) {
+        const auto address = [](const auto& view) {
+            return reinterpret_cast<std::uintptr_t>(view.data());
+        };
+        return {state.stamp,
+                state.maximum_step,
+                {address(state.density->view()), address(state.pressure->view()),
+                 address(state.acceleration->view()), address(state.velocity->view()),
+                 address(state.geometry.owned_row_to_input)},
+                {state.density->stamp(), state.pressure->stamp(), state.acceleration->stamp(),
+                 state.velocity->stamp()}};
+    }
+
+    static PrecommitIdentity accepted_precommit_identity(const WcsphParticipant3D& participant) {
+        return precommit_identity(*participant.accepted_);
+    }
+
+    static PrecommitIdentity trial_precommit_identity(const WcsphParticipant3D& participant) {
+        return precommit_identity(*participant.trial_);
+    }
+
+    static bool has_unpublished_precommit_state(const WcsphParticipant3D& participant) {
+        return participant.trial_ || participant.pending_;
+    }
+
+    static auto reserve_test_budget(const WcsphParticipant3D& participant, std::size_t bytes) {
+        return participant.budget_.reserve(bytes);
+    }
+
+    static PrecommitIdentity pending_precommit_identity(const WcsphParticipant3D& participant) {
+        return precommit_identity(*participant.pending_);
+    }
+
     static FieldStamp stamp(const WcsphParticipant3D& participant) {
         return participant.accepted_->stamp;
     }
@@ -1345,6 +1457,613 @@ TEST(SphVerletWindow, ObservesStageNeighborsAfterEvictionAndRestore) {
     ASSERT_NO_FATAL_FAILURE(expect_fixed_rows(published, next.end, wall, gravity));
     ASSERT_TRUE(simulation.finalize().ok());
     ASSERT_TRUE(direct_sim.finalize().ok());
+    EXPECT_EQ(participant.resource_usage().controlled_bytes, 0u);
+}
+
+// Forward the real lifecycle. Scope the host fault to prepare_commit so
+// neither Simulation recovery nor the subsequent publication can be faulted.
+class ObservePrecommit final : public ParticipantIF {
+  public:
+    explicit ObservePrecommit(sph::WcsphParticipant3D& participant) : participant_(participant) {}
+    ParticipantId id() const noexcept override { return participant_.id(); }
+    ParticipantCapabilities capabilities() const override { return participant_.capabilities(); }
+    std::vector<PortDescriptor> ports() const override { return participant_.ports(); }
+    TimeConstraint time_constraint(double time) const override {
+        return participant_.time_constraint(time);
+    }
+    Status initialize(double time) override { return participant_.initialize(time); }
+    Status prepare() override { return participant_.prepare(); }
+    Status begin_window(const TimeInterval& interval) override {
+        return participant_.begin_window(interval);
+    }
+    Status advance_trial(const TimeInterval& interval) override {
+        return participant_.advance_trial(interval);
+    }
+    Status prepare_commit(const TimeInterval& interval) override {
+        ++prepare_calls;
+        const auto failure = std::exchange(fail_at, std::nullopt);
+        if (!failure)
+            return participant_.prepare_commit(interval);
+        const ScopedHostAllocations observe(*failure);
+        return participant_.prepare_commit(interval);
+    }
+    Status commit_window(const TimeInterval& interval) override {
+        return participant_.commit_window(interval);
+    }
+    Status restore_window() override { return participant_.restore_window(); }
+    Status finalize() override { return participant_.finalize(); }
+
+    std::size_t prepare_calls{};
+    std::optional<std::size_t> fail_at;
+
+  private:
+    sph::WcsphParticipant3D& participant_;
+};
+
+class PrecommitKokkosEvents {
+  public:
+    PrecommitKokkosEvents() : previous_(Kokkos::Tools::Experimental::get_callbacks()) {
+        active_ = this;
+        using namespace Kokkos::Tools::Experimental;
+        set_allocate_data_callback(record_allocation);
+        set_deallocate_data_callback(record_release);
+        set_begin_deep_copy_callback(record_copy);
+    }
+
+    ~PrecommitKokkosEvents() {
+        Kokkos::Tools::Experimental::set_callbacks(previous_);
+        active_ = nullptr;
+    }
+
+    std::size_t allocations{}, copies{};
+    std::array<std::size_t, 5> releases{};
+    std::array<std::uintptr_t, 5> candidate_allocations{};
+
+  private:
+    static void record_allocation(Kokkos::Tools::SpaceHandle, const char* label,
+                                  const void* address, std::uint64_t) noexcept {
+        constexpr std::array<std::string_view, 5> candidate_labels{
+            "sph.participant3d.density", "sph.participant3d.pressure",
+            "sph.participant3d.pressure_acceleration", "sph.participant3d.velocity",
+            "sph.geometry.owned_row_to_input"};
+        ++active_->allocations;
+        for (std::size_t i = 0; i < candidate_labels.size(); ++i)
+            if (candidate_labels[i] == label)
+                active_->candidate_allocations[i] = reinterpret_cast<std::uintptr_t>(address);
+    }
+
+    static void record_copy(Kokkos::Tools::SpaceHandle, const char*, const void*,
+                            Kokkos::Tools::SpaceHandle, const char*, const void*,
+                            std::uint64_t) noexcept {
+        ++active_->copies;
+    }
+
+    static void record_release(Kokkos::Tools::SpaceHandle, const char*, const void* address,
+                               std::uint64_t) noexcept {
+        const auto pointer = reinterpret_cast<std::uintptr_t>(address);
+        for (std::size_t i = 0; i < active_->candidate_allocations.size(); ++i)
+            if (active_->candidate_allocations[i] == pointer)
+                ++active_->releases[i];
+    }
+
+    inline static PrecommitKokkosEvents* active_{};
+    Kokkos::Tools::Experimental::EventSet previous_;
+};
+
+// The second fluid crosses the x-cell edge on the second step. The wall
+// remains outside the fluid support while retaining real committed wall data.
+struct M4FixedWallFixture {
+    static constexpr double first_step = .125, step = .25;
+    Fields fluid{{{{.75, 0, 0}, 1, 10, 0}, {{1.875, 0, 0}, 2, 20, 0}}};
+    Fields wall{{{{4, 0, 0}, 3, 30, 1}}};
+    sph::Velocity3D velocity{"m4.velocity", 2};
+    sph::Values density{"m4.density", 2};
+
+    M4FixedWallFixture() {
+        velocity(0, 0) = velocity(1, 0) = .5;
+        density(0) = 2;
+        density(1) = 3;
+    }
+
+    sph::WcsphParticipant3D participant(sph::WcsphParticipant3D::ResourceLimits limits = {}) const {
+        return {fluid.get(), 16, {{2, 1, 1}, 1, {}, .5}, velocity, density,
+                sph::FixedWallParticles3D{wall.position, wall.mass, wall.ids},
+                ParticipantId{1}, limits};
+    }
+};
+
+void expect_same_wall(const sph::WallValue3D& actual, const sph::WallValue3D& expected) {
+    EXPECT_EQ(actual.id, expected.id);
+    EXPECT_EQ(actual.mass, expected.mass);
+    EXPECT_EQ(actual.position, expected.position);
+    EXPECT_EQ(actual.stamp, expected.stamp);
+    EXPECT_EQ(actual.phase, expected.phase);
+}
+
+TEST(SphVerletWindow, HostAllocationFailureRestoresAndRetries) {
+    using Access = sph::WcsphTestAccess;
+    const M4FixedWallFixture fixture;
+    constexpr double first_step = fixture.first_step, step = fixture.step;
+    std::size_t precommit_host_calls = 0;
+    CommittedSample reference;
+    double reference_limit = 0;
+    const auto run = [&](std::size_t fail_at) {
+        SCOPED_TRACE(fail_at);
+        auto participant = fixture.participant();
+        ObservePrecommit observed(participant);
+        Simulation simulation(observed);
+        const auto initialized = simulation.initialize();
+        ASSERT_TRUE(initialized.ok()) << initialized.message();
+        const auto prepared = simulation.prepare();
+        ASSERT_TRUE(prepared.ok()) << prepared.message();
+        const auto first = simulation.advance(first_step);
+        ASSERT_TRUE(first.ok()) << first.message();
+        ASSERT_TRUE(participant.release_workspace().ok());
+        const auto before = Access::accepted_precommit_identity(participant);
+        const auto before_rows = committed(participant);
+        const auto before_wall = checked(participant.read_committed_wall(30));
+        const auto cold_usage = participant.resource_usage();
+        const auto opened = simulation.begin_window(step);
+        ASSERT_TRUE(opened.ok()) << opened.message();
+        Access::PrecommitIdentity trial{};
+        detail::ResourceBudget::Usage trial_usage;
+        Status commit_status;
+        {
+            PrecommitKokkosEvents numeric;
+            const auto advanced = simulation.advance_trial();
+            ASSERT_TRUE(advanced.ok()) << advanced.message();
+            trial = Access::trial_precommit_identity(participant);
+            for (std::size_t i = 0; i < trial.allocation.size(); ++i) {
+                ASSERT_NE(trial.allocation[i], 0u);
+                ASSERT_NE(numeric.candidate_allocations[i], 0u);
+                EXPECT_NE(trial.allocation[i], before.allocation[i]);
+            }
+            trial_usage = participant.resource_usage();
+            EXPECT_GT(trial_usage.controlled_bytes, cold_usage.controlled_bytes);
+            EXPECT_EQ(simulation.state(), SimulationState::trial_advanced);
+            const auto allocations = numeric.allocations;
+            const auto copies = numeric.copies;
+            observed.fail_at = fail_at;
+            commit_status = simulation.commit_window();
+            EXPECT_EQ(numeric.allocations, allocations);
+            EXPECT_EQ(numeric.copies, copies);
+            const std::array<std::size_t, 5> expected_releases =
+                fail_at ? std::array<std::size_t, 5>{1, 1, 1, 1, 1}
+                        : std::array<std::size_t, 5>{};
+            EXPECT_EQ(numeric.releases, expected_releases);
+        }
+
+        EXPECT_FALSE(Access::has_unpublished_precommit_state(participant));
+        EXPECT_EQ(simulation.state(), SimulationState::prepared);
+        if (fail_at) {
+            EXPECT_TRUE(host_allocations.threw);
+            EXPECT_EQ(host_allocations.calls, fail_at);
+            ASSERT_EQ(commit_status.code(), StatusCode::resource_exhausted) << commit_status.message();
+            EXPECT_EQ(Access::accepted_precommit_identity(participant), before);
+            expect_same_rows(committed(participant), before_rows);
+            expect_same_wall(checked(participant.read_committed_wall(30)), before_wall);
+            EXPECT_EQ(simulation.time().accepted_time, first_step);
+            EXPECT_EQ(simulation.time().accepted_steps, 1u);
+            EXPECT_EQ(simulation.time().trial_attempts, 2u);
+            EXPECT_EQ(participant.time_constraint(first_step).maximum_step, before.maximum_step);
+            ASSERT_TRUE(participant.release_workspace().ok());
+            const auto restored_usage = participant.resource_usage();
+            EXPECT_EQ(restored_usage.controlled_bytes, cold_usage.controlled_bytes);
+            EXPECT_EQ(restored_usage.snapshot_records, cold_usage.snapshot_records);
+            EXPECT_EQ(restored_usage.known_external_owner_bytes, cold_usage.known_external_owner_bytes);
+
+            ASSERT_TRUE(simulation.advance(step).ok());
+            expect_same_rows(committed(participant), reference);
+            EXPECT_EQ(participant.time_constraint(first_step + step).maximum_step, reference_limit);
+        } else {
+            ASSERT_TRUE(commit_status.ok()) << commit_status.message();
+            EXPECT_FALSE(host_allocations.threw);
+            precommit_host_calls = host_allocations.calls;
+            RecordProperty("successful_prepare_host_allocation_bytes",
+                           std::to_string(host_allocations.requested_bytes));
+            RecordProperty("controlled_bytes_before_window",
+                           std::to_string(cold_usage.controlled_bytes));
+            RecordProperty("controlled_bytes_after_trial",
+                           std::to_string(trial_usage.controlled_bytes));
+            const auto accepted = Access::accepted_precommit_identity(participant);
+            EXPECT_EQ(accepted.allocation, trial.allocation);
+            for (std::size_t i = 0; i < accepted.grant.size(); ++i) {
+                EXPECT_TRUE(accepted.grant[i].accepted);
+                EXPECT_NE(accepted.grant[i].storage_incarnation, trial.grant[i].storage_incarnation);
+            }
+            reference = committed(participant);
+            reference_limit = participant.time_constraint(first_step + step).maximum_step;
+        }
+        EXPECT_EQ(simulation.time().accepted_time, first_step + step);
+        EXPECT_EQ(simulation.time().accepted_steps, 2u);
+        EXPECT_EQ(simulation.time().trial_attempts, fail_at ? 3u : 2u);
+        ASSERT_TRUE(simulation.finalize().ok());
+        EXPECT_EQ(participant.resource_usage().controlled_bytes, 0u);
+    };
+
+    ASSERT_NO_FATAL_FAILURE(run(0));
+    ASSERT_GT(precommit_host_calls, 0u);
+    RecordProperty("successful_prepare_host_allocations", std::to_string(precommit_host_calls));
+    for (std::size_t failure = 1; failure <= precommit_host_calls; ++failure)
+        ASSERT_NO_FATAL_FAILURE(run(failure));
+}
+
+void expect_committed_reads_rejected(const sph::WcsphParticipant3D& participant) {
+    std::size_t calls = 0;
+    const auto rows = participant.visit_committed_rows([&](sph::CommittedRow3D) { ++calls; });
+    EXPECT_EQ(rows.code(), StatusCode::invalid_state);
+    EXPECT_EQ(calls, 0u);
+    const auto wall = participant.read_committed_wall(30);
+    EXPECT_FALSE(wall.ok());
+    EXPECT_EQ(wall.status().code(), StatusCode::invalid_state);
+}
+
+TEST(SphVerletWindow, CommittedReadsRejectActiveAndReentrantWindowsAndRecoverAfterException) {
+    const M4FixedWallFixture fixture;
+    auto participant = fixture.participant();
+    Simulation simulation(participant);
+    ASSERT_TRUE(simulation.initialize().ok());
+    ASSERT_TRUE(simulation.prepare().ok());
+    const auto before = committed(participant);
+    ASSERT_EQ(before.rows.size(), 2u);
+    EXPECT_EQ(before.rows[0].id, 10u);
+    EXPECT_EQ(before.rows[1].id, 20u);
+    const auto wall = checked(participant.read_committed_wall(30));
+    EXPECT_EQ(wall.id, 30u);
+    EXPECT_EQ(wall.mass, 3);
+    EXPECT_EQ(wall.position, (std::array<real, 3>{4, 0, 0}));
+    EXPECT_EQ(wall.stamp, before.stamp);
+    EXPECT_EQ(wall.phase, 0);
+    const double maximum = participant.time_constraint(0).maximum_step;
+
+    EXPECT_EQ(simulation.begin_window(2 * maximum).code(), StatusCode::invalid_argument);
+    EXPECT_EQ(simulation.state(), SimulationState::prepared);
+    expect_same_rows(committed(participant), before);
+    expect_same_wall(checked(participant.read_committed_wall(30)), wall);
+
+    ASSERT_TRUE(simulation.begin_window(fixture.step).ok());
+    expect_committed_reads_rejected(participant);
+    ASSERT_TRUE(simulation.restore_window().ok());
+
+    std::vector<std::uint64_t> visited;
+    const auto normal = participant.visit_committed_rows([&](sph::CommittedRow3D row) {
+        visited.push_back(row.id);
+        if (visited.size() == 1) {
+            EXPECT_EQ(simulation.begin_window(fixture.step).code(), StatusCode::invalid_state);
+            expect_committed_reads_rejected(participant);
+        }
+    });
+    EXPECT_TRUE(normal.ok()) << normal.message();
+    EXPECT_EQ(visited, (std::vector<std::uint64_t>{10, 20}));
+    EXPECT_EQ(simulation.state(), SimulationState::prepared);
+    ASSERT_TRUE(simulation.begin_window(fixture.step).ok());
+    ASSERT_TRUE(simulation.restore_window().ok());
+    expect_same_rows(committed(participant), before);
+    expect_same_wall(checked(participant.read_committed_wall(30)), wall);
+
+    std::size_t calls = 0;
+    const auto thrown = participant.visit_committed_rows([&](sph::CommittedRow3D) {
+        ++calls;
+        throw std::runtime_error("observer failed");
+    });
+    EXPECT_EQ(thrown.code(), StatusCode::execution_failure);
+    EXPECT_EQ(calls, 1u);
+    ASSERT_TRUE(simulation.begin_window(fixture.step).ok());
+    ASSERT_TRUE(simulation.advance_trial().ok());
+    ASSERT_TRUE(simulation.restore_window().ok());
+    expect_same_rows(committed(participant), before);
+    expect_same_wall(checked(participant.read_committed_wall(30)), wall);
+    expect_metadata(participant, simulation, 0, 0, maximum);
+    EXPECT_EQ(simulation.time().trial_attempts, 1u);
+    EXPECT_TRUE(simulation.finalize().ok());
+}
+
+TEST(SphVerletWindow, DirectFinalizeRejectedDuringCommittedRowVisit) {
+    const M4FixedWallFixture fixture;
+    auto participant = fixture.participant();
+    ASSERT_TRUE(participant.initialize(0).ok());
+    ASSERT_TRUE(participant.prepare().ok());
+    std::vector<std::uint64_t> ids;
+    const auto read = participant.visit_committed_rows([&](sph::CommittedRow3D row) {
+        ids.push_back(row.id);
+        if (ids.size() == 1)
+            EXPECT_EQ(participant.finalize().code(), StatusCode::invalid_state);
+    });
+    EXPECT_TRUE(read.ok()) << read.message();
+    EXPECT_EQ(ids, (std::vector<std::uint64_t>{10, 20}));
+    const TimeInterval interval{0, fixture.first_step, fixture.first_step};
+    ASSERT_TRUE(participant.begin_window(interval).ok());
+    ASSERT_TRUE(participant.advance_trial(interval).ok());
+    ASSERT_TRUE(participant.prepare_commit(interval).ok());
+    ASSERT_TRUE(participant.commit_window(interval).ok());
+    EXPECT_EQ(committed(participant).stamp.accepted_version.value(), 1u);
+    EXPECT_TRUE(participant.finalize().ok());
+    EXPECT_EQ(participant.resource_usage().controlled_bytes, 0u);
+}
+
+TEST(SphVerletWindow, SimulationFinalizeFailsDuringCommittedRowVisit) {
+    const M4FixedWallFixture fixture;
+    auto participant = fixture.participant();
+    Simulation simulation(participant);
+    ASSERT_TRUE(simulation.initialize().ok());
+    ASSERT_TRUE(simulation.prepare().ok());
+    ASSERT_TRUE(simulation.advance(fixture.first_step).ok());
+    const auto before = simulation.time();
+    std::vector<std::uint64_t> ids;
+    const auto read = participant.visit_committed_rows([&](sph::CommittedRow3D row) {
+        ids.push_back(row.id);
+        if (ids.size() == 1) {
+            EXPECT_EQ(simulation.finalize().code(), StatusCode::invalid_state);
+            EXPECT_EQ(simulation.state(), SimulationState::failed);
+        }
+    });
+    EXPECT_TRUE(read.ok()) << read.message();
+    EXPECT_EQ(ids, (std::vector<std::uint64_t>{10, 20}));
+    EXPECT_EQ(simulation.state(), SimulationState::failed);
+    EXPECT_EQ(simulation.begin_window(fixture.step).code(), StatusCode::invalid_state);
+    EXPECT_EQ(simulation.time().accepted_time, before.accepted_time);
+    EXPECT_EQ(simulation.time().accepted_steps, before.accepted_steps);
+    EXPECT_EQ(simulation.time().trial_attempts, before.trial_attempts);
+    ASSERT_TRUE(simulation.finalize().ok());
+    EXPECT_EQ(simulation.state(), SimulationState::finalized);
+    EXPECT_EQ(participant.resource_usage().controlled_bytes, 0u);
+}
+
+TEST(SphVerletWindow, PreparedCandidateRestoresAndReplaysWithoutChangingCommittedAllocations) {
+    using Access = WcsphTestAccess;
+    const M4FixedWallFixture fixture;
+    constexpr auto first = fixture.first_step, full = fixture.step;
+    for (const double dt : {full, full / 2}) {
+        SCOPED_TRACE(dt);
+        auto participant = fixture.participant();
+        auto direct = fixture.participant();
+        const auto advance = [](sph::WcsphParticipant3D& item, TimeInterval interval) {
+            ASSERT_TRUE(item.begin_window(interval).ok());
+            ASSERT_TRUE(item.advance_trial(interval).ok());
+            ASSERT_TRUE(item.prepare_commit(interval).ok());
+            ASSERT_TRUE(item.commit_window(interval).ok());
+        };
+        for (auto* item : {&participant, &direct}) {
+            ASSERT_TRUE(item->initialize(0).ok());
+            ASSERT_TRUE(item->prepare().ok());
+            ASSERT_NO_FATAL_FAILURE(advance(*item, {0, first, first}));
+        }
+        ASSERT_TRUE(participant.release_workspace().ok());
+        const auto baseline_usage = participant.resource_usage();
+        const auto before = committed(participant);
+        const auto before_identity = Access::accepted_precommit_identity(participant);
+        const auto before_map = Access::row_to_input(participant);
+        const auto before_wall = checked(participant.read_committed_wall(30));
+
+        const TimeInterval trial_interval{first, first + full, full};
+        ASSERT_TRUE(participant.begin_window(trial_interval).ok());
+        {
+            PrecommitKokkosEvents numeric;
+            ASSERT_TRUE(participant.advance_trial(trial_interval).ok());
+            const auto candidate = Access::trial_precommit_identity(participant);
+            const auto allocations = numeric.allocations, copies = numeric.copies;
+            ASSERT_TRUE(participant.prepare_commit(trial_interval).ok());
+            const auto pending = Access::pending_precommit_identity(participant);
+            EXPECT_EQ(pending.allocation, candidate.allocation);
+            for (std::size_t i = 0; i < pending.grant.size(); ++i) {
+                EXPECT_TRUE(pending.grant[i].accepted);
+                EXPECT_NE(pending.grant[i].storage_incarnation,
+                          candidate.grant[i].storage_incarnation);
+            }
+            EXPECT_EQ(numeric.allocations, allocations);
+            EXPECT_EQ(numeric.copies, copies);
+            expect_committed_reads_rejected(participant);
+            ASSERT_TRUE(participant.restore_window().ok());
+            EXPECT_EQ(numeric.releases, (std::array<std::size_t, 5>{1, 1, 1, 1, 1}));
+        }
+        EXPECT_FALSE(Access::has_unpublished_precommit_state(participant));
+        EXPECT_EQ(Access::accepted_precommit_identity(participant), before_identity);
+        EXPECT_EQ(Access::row_to_input(participant), before_map);
+        expect_same_rows(committed(participant), before);
+        expect_same_wall(checked(participant.read_committed_wall(30)), before_wall);
+        ASSERT_TRUE(participant.release_workspace().ok());
+        EXPECT_EQ(participant.resource_usage().controlled_bytes, baseline_usage.controlled_bytes);
+        EXPECT_EQ(participant.resource_usage().snapshot_records, baseline_usage.snapshot_records);
+        EXPECT_EQ(participant.time_constraint(first).maximum_step, before_identity.maximum_step);
+
+        const TimeInterval retry{first, first + dt, dt};
+        ASSERT_NO_FATAL_FAILURE(advance(direct, retry));
+        ASSERT_TRUE(participant.begin_window(retry).ok());
+        {
+            PrecommitKokkosEvents numeric;
+            ASSERT_TRUE(participant.advance_trial(retry).ok());
+            ASSERT_TRUE(participant.prepare_commit(retry).ok());
+            const auto pending = Access::pending_precommit_identity(participant);
+            const auto allocations = numeric.allocations, copies = numeric.copies;
+            ASSERT_TRUE(participant.commit_window(retry).ok());
+            EXPECT_EQ(Access::accepted_precommit_identity(participant), pending);
+            EXPECT_EQ(numeric.allocations, allocations);
+            EXPECT_EQ(numeric.copies, copies);
+            EXPECT_EQ(numeric.releases, (std::array<std::size_t, 5>{}));
+        }
+        expect_same_rows(committed(participant), committed(direct));
+        EXPECT_EQ(Access::stamp(participant), Access::stamp(direct));
+        EXPECT_EQ(Access::row_to_input(participant), Access::row_to_input(direct));
+        EXPECT_EQ(Access::maximum_step(participant), Access::maximum_step(direct));
+        expect_same_wall(checked(participant.read_committed_wall(30)),
+                         checked(direct.read_committed_wall(30)));
+        EXPECT_TRUE(participant.finalize().ok());
+        EXPECT_TRUE(direct.finalize().ok());
+        EXPECT_EQ(participant.resource_usage().controlled_bytes, 0u);
+    }
+}
+
+#if NEXORA_ENABLE_DOUBLE_PRECISION
+TEST(SphVerletWindow, LateCflFailureRestoresAndShorterRetryMatchesDirectStep) {
+    const Fields fields({{{0, 0, 0}, 1, 11, 0}});
+    const sph::Velocity3D velocity("late_cfl.velocity", 1);
+    const sph::Values density("late_cfl.density", 1);
+    density(0) = 1;
+    constexpr double failed_dt = 0x1p-505, legal_dt = 0x1p-508;
+    const sph::WcsphVerletParameters parameters{{1, 1, 1}, .5, {0x1p1018, 0, 0}, 1};
+    sph::WcsphParticipant3D participant(fields.get(), 1, parameters, velocity, density);
+    sph::WcsphParticipant3D direct(fields.get(), 1, parameters, velocity, density);
+    ObservePrecommit observed(participant);
+    StageSamples samples(participant);
+    WindowAllocations allocations(participant);
+    Simulation simulation(observed), baseline(direct);
+    ASSERT_TRUE(simulation.initialize().ok());
+    ASSERT_TRUE(simulation.prepare().ok());
+    ASSERT_TRUE(baseline.initialize().ok());
+    ASSERT_TRUE(baseline.prepare().ok());
+    ASSERT_TRUE(participant.release_workspace().ok());
+    const auto before = committed(participant);
+    const auto identity = WcsphTestAccess::accepted_precommit_identity(participant);
+    const auto row_map = WcsphTestAccess::row_to_input(participant);
+    const auto usage = participant.resource_usage();
+    for (std::size_t attempt = 1; attempt <= 2; ++attempt) {
+        SCOPED_TRACE(attempt);
+        const auto mark = allocations.events.size();
+        const auto stage_mark = samples.samples.size();
+        ASSERT_TRUE(simulation.begin_window(failed_dt).ok());
+        const auto failure = simulation.advance_trial();
+        EXPECT_EQ(failure.code(), StatusCode::numerical_failure);
+        EXPECT_EQ(failure.message(), "invalid WCSPH CFL step");
+        EXPECT_EQ(observed.prepare_calls, 0u);
+        EXPECT_FALSE(WcsphTestAccess::has_unpublished_precommit_state(participant));
+        EXPECT_EQ(allocations.count(mark, "sph.participant3d.velocity", true), 1u);
+        EXPECT_EQ(allocations.count(mark, "sph.participant3d.velocity", false), 1u);
+        ASSERT_EQ(samples.samples.size(), stage_mark + 2);
+        EXPECT_EQ(samples.samples.back().stage, StepStage3D::end);
+        EXPECT_EQ(samples.samples.back().particles.at(0).position[0], 128);
+        EXPECT_EQ(simulation.state(), SimulationState::prepared);
+        EXPECT_EQ(simulation.time().trial_attempts, attempt);
+        expect_metadata(participant, simulation, 0, 0, .5);
+        expect_same_rows(committed(participant), before);
+        EXPECT_EQ(WcsphTestAccess::accepted_precommit_identity(participant), identity);
+        EXPECT_EQ(WcsphTestAccess::row_to_input(participant), row_map);
+        ASSERT_TRUE(participant.release_workspace().ok());
+        EXPECT_EQ(participant.resource_usage().controlled_bytes, usage.controlled_bytes);
+        EXPECT_EQ(participant.resource_usage().snapshot_records, usage.snapshot_records);
+    }
+    ASSERT_TRUE(simulation.advance(legal_dt).ok());
+    ASSERT_TRUE(baseline.advance(legal_dt).ok());
+    EXPECT_EQ(observed.prepare_calls, 1u);
+    EXPECT_EQ(simulation.time().trial_attempts, 3u);
+    expect_metadata(participant, simulation, legal_dt, 1, 0x1p-511);
+    const auto after = committed(participant);
+    expect_same_rows(after, committed(direct));
+    ASSERT_EQ(after.rows.size(), 1u);
+    EXPECT_EQ(after.rows[0].position[0], 2);
+    EXPECT_EQ(after.rows[0].velocity[0], 0x1p510);
+    EXPECT_TRUE(simulation.finalize().ok());
+    EXPECT_TRUE(baseline.finalize().ok());
+    EXPECT_EQ(participant.resource_usage().controlled_bytes, 0u);
+}
+#endif
+
+TEST(SphVerletWindow, FixedWallBudgetRejectionRestoresCommittedRowsAndWall) {
+    const M4FixedWallFixture fixture;
+    fixture.fluid.position(0, 0) = 1.125;
+    constexpr auto dt = fixture.first_step;
+    constexpr std::size_t source_count = 3;
+    constexpr std::size_t vector_bytes = source_count * 3 * sizeof(real);
+    constexpr std::size_t grid_values_bytes = source_count * 4 * sizeof(real);
+
+    auto reference = fixture.participant();
+    std::optional<WindowAllocations> reference_allocations(std::in_place, reference);
+    StageSamples reference_stages(reference);
+    Simulation direct(reference);
+    ASSERT_TRUE(direct.initialize().ok());
+    ASSERT_TRUE(direct.prepare().ok());
+    const auto after_initialize = reference_allocations->events.size();
+    const auto initial_bytes = reference.resource_usage().controlled_bytes;
+    const auto initial_peak = reference_allocations->peak(0, after_initialize);
+    ASSERT_TRUE(direct.begin_window(dt).ok());
+    ASSERT_TRUE(direct.advance_trial().ok());
+    const auto trial_peak = reference_allocations->peak(after_initialize,
+                                                       reference_allocations->events.size());
+    ASSERT_GT(trial_peak, initial_peak);
+    ASSERT_TRUE(direct.commit_window().ok());
+    const auto end = committed(reference);
+    const auto end_wall = checked(reference.read_committed_wall(30));
+    const double end_step = reference.time_constraint(dt).maximum_step;
+    ASSERT_TRUE(direct.finalize().ok());
+    reference_allocations.reset();
+    ASSERT_EQ(reference_stages.samples.size(), 3u);
+
+    // The old grid has the same box, input order, and cell membership on this
+    // step. Both Verlet buffers fit; the subsequent reuse values need one more byte.
+    const auto refusal_limit = initial_bytes + 2 * vector_bytes + grid_values_bytes - 1;
+    ASSERT_GE(refusal_limit, initial_peak);
+    ASSERT_LT(refusal_limit, trial_peak);
+    ::testing::Test::RecordProperty("fixed_wall_initialization_peak_bytes", initial_peak);
+    ::testing::Test::RecordProperty("fixed_wall_trial_peak_bytes", trial_peak);
+    ::testing::Test::RecordProperty("fixed_wall_refusal_limit_bytes", refusal_limit);
+    ::testing::Test::RecordProperty("rejected_grid_values_bytes", grid_values_bytes);
+
+    const auto cap = trial_peak + grid_values_bytes;
+    auto participant = fixture.participant({32, cap});
+    StageSamples samples(participant);
+    ObservePrecommit observed(participant);
+    Simulation simulation(observed);
+    ASSERT_TRUE(simulation.initialize().ok());
+    ASSERT_TRUE(simulation.prepare().ok());
+    ASSERT_EQ(samples.samples.size(), 1u);
+    ASSERT_EQ(participant.resource_usage().controlled_bytes, initial_bytes);
+    const auto before = committed(participant);
+    const auto before_wall = checked(participant.read_committed_wall(30));
+    const auto identity = WcsphTestAccess::accepted_precommit_identity(participant);
+    const auto row_map = WcsphTestAccess::row_to_input(participant);
+    const auto maximum_step = participant.time_constraint(0).maximum_step;
+    const auto held_bytes = cap - refusal_limit;
+    auto held = checked(WcsphTestAccess::reserve_test_budget(participant, held_bytes));
+    ASSERT_TRUE(simulation.begin_window(dt).ok());
+    {
+        WindowAllocations rejected(participant);
+        const auto failure = simulation.advance_trial();
+        EXPECT_EQ(failure.code(), StatusCode::resource_exhausted);
+        EXPECT_EQ(failure.message(), "participant resource budget exceeded");
+        EXPECT_EQ(rejected.count(0, "sph.verlet.half_velocity", true), 1u);
+        EXPECT_EQ(rejected.count(0, "sph.verlet.stage", true), 1u);
+        EXPECT_EQ(rejected.count(0, "sph.grid.position", true), 0u);
+        EXPECT_EQ(rejected.count(0, "sph.grid.mass", true), 0u);
+        EXPECT_EQ(rejected.peak(0, rejected.events.size()), cap - (grid_values_bytes - 1));
+        rejected.expect_all_released();
+    }
+    EXPECT_EQ(observed.prepare_calls, 0u);
+    EXPECT_EQ(simulation.state(), SimulationState::prepared);
+    EXPECT_EQ(simulation.time().trial_attempts, 1u);
+    EXPECT_EQ(samples.samples.size(), 1u);
+    expect_metadata(participant, simulation, 0, 0, maximum_step);
+    expect_same_rows(committed(participant), before);
+    expect_same_wall(checked(participant.read_committed_wall(30)), before_wall);
+    EXPECT_EQ(WcsphTestAccess::accepted_precommit_identity(participant), identity);
+    EXPECT_EQ(WcsphTestAccess::row_to_input(participant), row_map);
+    EXPECT_EQ(participant.resource_usage().controlled_bytes, initial_bytes + held_bytes);
+    EXPECT_EQ(participant.resource_usage().snapshot_records, 0u);
+
+    held.reset();
+    ASSERT_EQ(participant.resource_usage().controlled_bytes, initial_bytes);
+    ASSERT_TRUE(simulation.advance(dt).ok());
+    ASSERT_EQ(samples.samples.size(), reference_stages.samples.size());
+    for (std::size_t i = 1; i < samples.samples.size(); ++i) {
+        const auto& actual = samples.samples[i];
+        const auto& expected = reference_stages.samples[i];
+        EXPECT_EQ(actual.stage, expected.stage);
+        EXPECT_EQ(actual.owned, (std::vector<std::uint64_t>{10, 20}));
+        EXPECT_EQ(actual.neighbors, expected.neighbors);
+        ASSERT_EQ(actual.particles.size(), source_count);
+        for (std::size_t slot = 0; slot < source_count; ++slot) {
+            EXPECT_EQ(actual.particles[slot].id, expected.particles[slot].id);
+            EXPECT_EQ(actual.particles[slot].position, expected.particles[slot].position);
+        }
+        const double dx = double(actual.particles[1].position[0]) - actual.particles[0].position[0];
+        EXPECT_EQ(actual.neighbors.at(10), (NeighborPairs{{20, dx * dx}}));
+        EXPECT_EQ(actual.neighbors.at(20), (NeighborPairs{{10, dx * dx}}));
+        EXPECT_TRUE(actual.neighbors.at(30).empty());
+    }
+    EXPECT_EQ(observed.prepare_calls, 1u);
+    EXPECT_EQ(simulation.time().trial_attempts, 2u);
+    expect_metadata(participant, simulation, dt, 1, end_step);
+    expect_same_rows(committed(participant), end);
+    expect_same_wall(checked(participant.read_committed_wall(30)), end_wall);
+    ASSERT_TRUE(simulation.finalize().ok());
     EXPECT_EQ(participant.resource_usage().controlled_bytes, 0u);
 }
 
