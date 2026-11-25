@@ -20,12 +20,13 @@ namespace {
 struct HostAllocationFault {
     std::size_t fail_at{}, calls{};
     bool active{}, threw{};
+    const std::unique_ptr<nexora::sph::CellGrid>* committed_grid{};
 };
 
 thread_local HostAllocationFault host_fault;
 
 void* allocate_test_storage(std::size_t bytes) {
-    if (host_fault.active && ++host_fault.calls == host_fault.fail_at) {
+    if (host_fault.active && !*host_fault.committed_grid && ++host_fault.calls == host_fault.fail_at) {
         host_fault.active = false;
         host_fault.threw = true;
         throw std::bad_alloc{};
@@ -71,6 +72,10 @@ struct WcsphTestAccess {
                  address(state.geometry.owned_row_to_input)},
                 {state.density->stamp(), state.pressure->stamp(), state.acceleration->stamp(),
                  state.velocity->stamp()}};
+    }
+
+    static const auto& committed_grid(const WcsphParticipant3D& participant) {
+        return participant.step_->committed_grid_;
     }
 
     static PublishedIdentity accepted_identity(const WcsphParticipant3D& participant) {
@@ -131,12 +136,15 @@ struct WcsphTestAccess {
         return result;
     }
     static void observe(WcsphParticipant3D& participant, void* context,
-                        void (*callback)(void*, StepStage3D, const NeighborView3D&)) {
+                        void (*callback)(void*, StepStage3D, const NeighborView3D&),
+                        bool kinematics = false) {
         participant.observer_context_ = context;
         participant.observe_ = callback;
+        participant.observe_kinematics_ = kinematics;
         if (participant.step_) {
             participant.step_->observer_context_ = context;
             participant.step_->observe_ = callback;
+            participant.step_->observe_kinematics_ = kinematics;
         }
     }
 };
@@ -163,7 +171,7 @@ class StageSamples {
   public:
     explicit StageSamples(sph::WcsphParticipant3D& participant, bool observe_kinematics = false)
         : participant_(participant), observe_kinematics_(observe_kinematics) {
-        WcsphTestAccess::observe(participant_, this, &record);
+        WcsphTestAccess::observe(participant_, this, &record, observe_kinematics);
     }
     ~StageSamples() { WcsphTestAccess::observe(participant_, nullptr, nullptr); }
 
@@ -616,6 +624,61 @@ TEST(SphVerlet, DriftJustAboveFloatRangeCannotRoundBackToLargestPosition) {
     EXPECT_EQ(committed(participant).rows.at(0).position[0], largest);
     ASSERT_TRUE(simulation.finalize().ok());
 }
+TEST(SphVerlet, PredictorRangeAppliesOnlyToConsumedVelocity) {
+    // The rounded half kick makes the final velocity representable even though
+    // the single-FMA endpoint predictor lies strictly above the float maximum.
+    constexpr double dt = 0x1p-108;
+    constexpr real initial = 0x1p102f;
+    constexpr double largest = std::numeric_limits<real>::max();
+    const double gravity = (largest + 0x1p98 - initial) / dt;
+    const real half = static_cast<real>(std::fma(.5 * dt, gravity, double(initial)));
+    const double final_velocity = std::fma(.5 * dt, gravity, double(half));
+    ASSERT_GT(std::fma(dt, gravity, double(initial)), largest);
+    ASSERT_LE(final_velocity, largest);
+
+    // Empty neighborhood, coincident points and the exact support edge all
+    // give zero continuity contribution. At half support both rows are read.
+    for (real gap : {-1.f, 0.f, 2.f, 1.f}) {
+        SCOPED_TRACE(gap);
+        std::vector<Particle> particles{{{0, 0, 0}, 1, 11, 0}};
+        if (gap >= 0)
+            particles.push_back({{0, gap, 0}, 1, 21, 0});
+        const Fields fields(particles);
+        sph::Velocity3D velocity("test.predictor_velocity", particles.size());
+        for (std::size_t row = 0; row < particles.size(); ++row)
+            velocity(row, 0) = initial;
+        for (bool kinematics : {false, true}) {
+            SCOPED_TRACE(kinematics);
+            sph::WcsphParticipant3D participant(fields.get(), 16, {{1, 1, 1}, 1, {gravity, 0, 0}},
+                                                velocity, fields.mass);
+            StageSamples stages(participant, kinematics);
+            Simulation simulation(participant);
+            ASSERT_TRUE(simulation.initialize().ok());
+            const auto before = committed(participant);
+            const auto result = simulation.run(dt);
+            if (gap == 1 || kinematics) {
+                EXPECT_EQ(result.code(), StatusCode::numerical_failure);
+                EXPECT_EQ(simulation.time().accepted_steps, 0u);
+                EXPECT_EQ(committed(participant).stamp, before.stamp);
+                expect_same_rows(committed(participant), before);
+            } else {
+                ASSERT_TRUE(result.ok()) << result.message();
+                ASSERT_EQ(stages.samples.size(), 3u);
+                const auto& neighbors = stages.samples.back().neighbors.at(11);
+                const NeighborPairs expected = gap < 0 ? NeighborPairs{} : NeighborPairs{{21, gap * gap}};
+                EXPECT_EQ(neighbors, expected);
+                for (const auto& row : committed(participant).rows) {
+                    EXPECT_EQ(row.position[0], static_cast<real>(dt * half));
+                    EXPECT_EQ(row.velocity[0], static_cast<real>(final_velocity));
+                    EXPECT_EQ(row.density, 1);
+                }
+                EXPECT_EQ(simulation.time().accepted_steps, 1u);
+            }
+            EXPECT_TRUE(simulation.finalize().ok());
+        }
+    }
+}
+
 #endif
 
 TEST(SphVerlet, ChecksInitialVelocityCflAndOwnershipBeforePublishing) {
@@ -642,6 +705,11 @@ TEST(SphVerlet, ChecksInitialVelocityCflAndOwnershipBeforePublishing) {
     rejects(parameters, velocity, {}, StatusCode::invalid_argument);
     velocity(0, 2) = std::numeric_limits<real>::quiet_NaN();
     rejects(parameters, velocity, density, StatusCode::invalid_argument);
+#if NEXORA_ENABLE_DOUBLE_PRECISION
+    // The component is valid input, but its squared speed overflows the acoustic calculation.
+    velocity(0, 2) = 0x1p512;
+    rejects(parameters, velocity, density, StatusCode::numerical_failure);
+#endif
     velocity(0, 2) = 0;
     for (const real invalid : {real{0}, -real{1}, std::numeric_limits<real>::infinity()}) {
         density(0) = invalid;
@@ -960,6 +1028,9 @@ TEST(SphVerlet, ReusedWorkspaceIsReleasedWithoutChangingCommittedRows) {
     for (const auto label : workspace_labels)
         EXPECT_EQ(observed.count(after_cold, label, true), 0u) << label;
 
+    // Both input orders remain the identity. The immutable committed row table
+    // follows the coordinates through all four steps and survives cache eviction.
+    EXPECT_EQ(observed.count(initialized, "sph.geometry.owned_row_to_input", true), 0u);
     const auto before = committed(participant);
     const auto release_start = observed.events.size();
     ASSERT_TRUE(participant.release_workspace().ok());
@@ -1364,19 +1435,19 @@ void expect_same_wall(const sph::WallValue3D& actual, const sph::WallValue3D& ex
 }
 
 
-// Arm the allocator after the final kick and disarm it when the endpoint CFL
-// reduction starts. The fault targets host field binding in a real step.
+// The last reduction writes the trial velocity and computes its maximum squared speed.
+// The test evicts the accepted grid before the trial. Its replacement is installed only
+// after velocity binding and the CFL check succeed. Stop injecting at that exact point:
+// destroying the old step storage can allocate profiling labels inside a destructor.
 class VelocityPublicationFault {
   public:
-    explicit VelocityPublicationFault(std::size_t fail_at)
+    VelocityPublicationFault(std::size_t fail_at, const sph::WcsphParticipant3D& participant)
         : previous_(Kokkos::Tools::Experimental::get_callbacks()) {
-        host_fault = {.fail_at = fail_at};
+        host_fault = {.fail_at = fail_at, .committed_grid = &WcsphTestAccess::committed_grid(participant)};
         finished_kick_ = false;
-        started_cfl_ = false;
         using namespace Kokkos::Tools::Experimental;
-        set_begin_parallel_for_callback(begin_for);
-        set_end_parallel_for_callback(end_for);
         set_begin_parallel_reduce_callback(begin_reduce);
+        set_end_parallel_reduce_callback(end_reduce);
     }
     ~VelocityPublicationFault() {
         host_fault.active = false;
@@ -1386,27 +1457,19 @@ class VelocityPublicationFault {
     VelocityPublicationFault& operator=(const VelocityPublicationFault&) = delete;
 
     bool finished_kick() const { return finished_kick_; }
-    bool started_cfl() const { return started_cfl_; }
 
   private:
-    static void begin_for(const char* label, std::uint32_t, std::uint64_t*) {
+    static void begin_reduce(const char* label, std::uint32_t, std::uint64_t*) {
         final_kick_active_ = std::string_view(label) == "sph.verlet.finish_kick";
     }
-    static void end_for(std::uint64_t) {
+    static void end_reduce(std::uint64_t) {
         if (final_kick_active_) {
             final_kick_active_ = false;
             finished_kick_ = true;
             host_fault.active = true;
         }
     }
-    static void begin_reduce(const char* label, std::uint32_t, std::uint64_t*) {
-        if (std::string_view(label) == "sph.verlet.maximum_speed") {
-            started_cfl_ = true;
-            host_fault.active = false;
-        }
-    }
-
-    inline static bool final_kick_active_{}, finished_kick_{}, started_cfl_{};
+    inline static bool final_kick_active_{}, finished_kick_{};
     Kokkos::Tools::Experimental::EventSet previous_;
 };
 
@@ -1428,16 +1491,14 @@ TEST(SphVerlet, VelocityPublicationAllocationFailurePreservesLastStep) {
         const auto bytes = participant.resource_usage().controlled_bytes;
         const auto mark = observed.events.size();
         Status result;
-        bool finished_kick{}, started_cfl{};
+        bool finished_kick{};
         {
-            const VelocityPublicationFault fault(fail_at);
+            const VelocityPublicationFault fault(fail_at, participant);
             result = simulation.run(dt, fail_at ? 2 : 1);
             finished_kick = fault.finished_kick();
-            started_cfl = fault.started_cfl();
         }
         ASSERT_TRUE(finished_kick);
         if (fail_at) {
-            EXPECT_FALSE(started_cfl);
             EXPECT_TRUE(host_fault.threw);
             EXPECT_EQ(host_fault.calls, fail_at);
             ASSERT_EQ(result.code(), StatusCode::resource_exhausted) << result.message();
@@ -1454,7 +1515,6 @@ TEST(SphVerlet, VelocityPublicationAllocationFailurePreservesLastStep) {
             ASSERT_TRUE(participant.release_workspace().ok());
             EXPECT_EQ(participant.resource_usage().controlled_bytes, bytes);
         } else {
-            EXPECT_TRUE(started_cfl);
             ASSERT_TRUE(result.ok()) << result.message();
             publication_allocations = host_fault.calls;
             EXPECT_EQ(simulation.time().accepted_time, first_dt + dt);
@@ -1612,7 +1672,7 @@ TEST(SphVerlet, FixedWallBudgetRejectionPreservesRowsAndWall) {
     constexpr auto dt = fixture.first_step;
     constexpr std::size_t source_count = 3;
     constexpr std::size_t vector_bytes = source_count * 3 * sizeof(real);
-    constexpr std::size_t grid_values_bytes = source_count * 4 * sizeof(real);
+    constexpr std::size_t grid_position_bytes = source_count * 3 * sizeof(real);
 
     auto reference = fixture.participant();
     std::optional<StepAllocations> reference_allocations(std::in_place, reference);
@@ -1623,6 +1683,8 @@ TEST(SphVerlet, FixedWallBudgetRejectionPreservesRowsAndWall) {
     const auto initial_bytes = reference.resource_usage().controlled_bytes;
     const auto initial_peak = reference_allocations->peak(0, after_initialize);
     ASSERT_TRUE(direct.run(dt).ok());
+    const auto expected = committed(reference);
+    const auto expected_maximum_step = reference.time_constraint().maximum_step;
     const auto step_peak = reference_allocations->peak(after_initialize,
                                                        reference_allocations->events.size());
     ASSERT_GT(step_peak, initial_peak);
@@ -1631,16 +1693,17 @@ TEST(SphVerlet, FixedWallBudgetRejectionPreservesRowsAndWall) {
     ASSERT_EQ(reference_stages.samples.size(), 3u);
 
     // The old grid has the same box, input order, and cell membership on this
-    // step. Both Verlet buffers fit; the subsequent reuse values need one more byte.
-    const auto refusal_limit = initial_bytes + 2 * vector_bytes + grid_values_bytes - 1;
+    // step. Both Verlet buffers fit; the new grid position allocation needs one
+    // more byte. Its mass, identity and permutation arrays are shared.
+    const auto refusal_limit = initial_bytes + 2 * vector_bytes + grid_position_bytes - 1;
     ASSERT_GE(refusal_limit, initial_peak);
     ASSERT_LT(refusal_limit, step_peak);
     ::testing::Test::RecordProperty("fixed_wall_initialization_peak_bytes", initial_peak);
     ::testing::Test::RecordProperty("fixed_wall_step_peak_bytes", step_peak);
     ::testing::Test::RecordProperty("fixed_wall_refusal_limit_bytes", refusal_limit);
-    ::testing::Test::RecordProperty("rejected_grid_values_bytes", grid_values_bytes);
+    ::testing::Test::RecordProperty("rejected_grid_position_bytes", grid_position_bytes);
 
-    const auto cap = step_peak + grid_values_bytes;
+    const auto cap = step_peak + grid_position_bytes;
     auto participant = fixture.participant({32, cap});
     StageSamples samples(participant);
     Simulation simulation(participant);
@@ -1663,7 +1726,10 @@ TEST(SphVerlet, FixedWallBudgetRejectionPreservesRowsAndWall) {
         EXPECT_EQ(rejected.count(0, "sph.verlet.stage", true), 1u);
         EXPECT_EQ(rejected.count(0, "sph.grid.position", true), 0u);
         EXPECT_EQ(rejected.count(0, "sph.grid.mass", true), 0u);
-        EXPECT_EQ(rejected.peak(0, rejected.events.size()), cap - (grid_values_bytes - 1));
+        EXPECT_EQ(rejected.count(0, "sph.grid.identity", true), 0u);
+        EXPECT_EQ(rejected.count(0, "sph.grid.to_input", true), 0u);
+        EXPECT_EQ(rejected.count(0, "sph.grid.from_input", true), 0u);
+        EXPECT_EQ(rejected.peak(0, rejected.events.size()), cap - (grid_position_bytes - 1));
         rejected.expect_all_released();
     }
     EXPECT_EQ(samples.samples.size(), 1u);
@@ -1677,6 +1743,13 @@ TEST(SphVerlet, FixedWallBudgetRejectionPreservesRowsAndWall) {
 
     held.reset();
     EXPECT_EQ(participant.resource_usage().controlled_bytes, initial_bytes);
+    // Simulation closes its run path after failure. Exercise participant retry
+    // directly without asking that failed coordinator to advance again.
+    ASSERT_TRUE(participant.step(TimeInterval{0, dt, dt}).ok());
+    expect_same_rows(committed(participant), expected);
+    EXPECT_EQ(WcsphTestAccess::stamp(participant).time.physical_time, dt);
+    EXPECT_EQ(WcsphTestAccess::stamp(participant).accepted_version.value(), 1u);
+    EXPECT_EQ(participant.time_constraint().maximum_step, expected_maximum_step);
     ASSERT_TRUE(simulation.finalize().ok());
     EXPECT_EQ(participant.resource_usage().controlled_bytes, 0u);
 }
@@ -1708,6 +1781,55 @@ TrajectoryInput stationary_motion(double limit) {
     result.motion = [](WallTime, double) -> Result<WallMotion> { return WallMotion{}; };
     result.sample_step_limit = limit;
     return result;
+}
+
+TEST(SphVerlet, WallReceptionKeepsStandaloneAndAssemblyValidationBoundaries) {
+    const Kokkos::Serial exec;
+    const Fields empty({});
+    const sph::WcsphVerletParameters parameters{{1, 1, 1}, .5};
+    const auto assemble = [&](const Fields& fields,
+                              std::optional<TrajectoryInput> trajectory = std::nullopt) {
+        sph::WcsphParticipant3D participant(
+            empty.get(), 4, parameters, {}, {}, WallGroups{{1, wall_fields(fields), trajectory}});
+        const auto result = participant.initialize(0);
+        EXPECT_EQ(participant.resource_usage().controlled_bytes, 0u);
+        EXPECT_FALSE(participant.read_committed_wall(21).ok());
+        EXPECT_TRUE(participant.finalize().ok());
+        return result.code();
+    };
+    Fields particles({{{.25, 0, 0}, 1, 21, 1}});
+    for (const real mass : {real{0}, std::numeric_limits<real>::infinity()}) {
+        particles.mass(0) = mass;
+        EXPECT_EQ(wall::capture_wall_particles(exec, wall_fields(particles)).status().code(),
+                  StatusCode::invalid_argument);
+        EXPECT_EQ(assemble(particles), StatusCode::invalid_argument);
+    }
+    particles.mass(0) = 1;
+    std::size_t calls{};
+    auto moving = stationary_motion(.5);
+    moving.motion = [&](WallTime, double) -> Result<WallMotion> {
+        ++calls;
+        return WallMotion{};
+    };
+    for (const real x : {std::numeric_limits<real>::quiet_NaN(),
+                         std::numeric_limits<real>::infinity()}) {
+        particles.position(0, 0) = x;
+        EXPECT_EQ(wall::capture_wall_particles(exec, wall_fields(particles)).status().code(),
+                  StatusCode::invalid_argument);
+        EXPECT_EQ(assemble(particles), StatusCode::invalid_argument);
+        EXPECT_EQ(assemble(particles, moving), StatusCode::invalid_argument);
+        EXPECT_EQ(calls, 0u);
+    }
+    const Fields duplicate({{{.25, 0, 0}, 1, 21, 1}, {{.5, 0, 0}, 2, 21, 1}});
+    EXPECT_EQ(wall::capture_wall_particles(exec, wall_fields(duplicate)).status().code(),
+              StatusCode::invalid_argument);
+    EXPECT_EQ(assemble(duplicate), StatusCode::invalid_argument);
+
+    // Finite coordinates can be valid wall records while exceeding the grid's
+    // signed cell domain; only grid assembly owns that conversion boundary.
+    particles.position(0, 0) = real{0x1p64};
+    EXPECT_TRUE(wall::capture_wall_particles(exec, wall_fields(particles)).ok());
+    EXPECT_EQ(assemble(particles), StatusCode::unsupported);
 }
 
 TEST(SphVerlet, MovingWallRejectsUnrepresentableGroupDurationBeforeSampling) {
@@ -1813,8 +1935,8 @@ TEST(SphVerlet, MovingWallFiniteEndpointPublishesAndRejectsAnotherStep) {
         EXPECT_EQ(WcsphTestAccess::wall_groups(participant).at(12),
                   (WcsphTestAccess::WallGroupValue{0, 1, 0}));
         const auto count = calls.size();
-        ASSERT_EQ(count, 5u);
-        constexpr std::array expected_elapsed{0., 0., .5, .5, 1.};
+        ASSERT_EQ(count, 3u);
+        constexpr std::array expected_elapsed{0., .5, 1.};
         for (std::size_t i = 0; i < count; ++i) {
             EXPECT_EQ(calls[i].time.elapsed, expected_elapsed[i]);
             EXPECT_EQ(calls[i].phase, expected_elapsed[i]);
@@ -2083,7 +2205,7 @@ TEST(SphVerlet, MovingWallsSampleTranslationAndRotationAtGroupPhase) {
 
 TEST(SphVerlet, MovingWallRejectsInvalidGroupsAndSamples) {
     const Fields fluid({{{0, 0, 0}, 1, 11, 0}});
-    const Fields wall_a({{{2, 0, 0}, 1, 21, 1}}), wall_b({{{3, 0, 0}, 2, 21, 1}}),
+    const Fields wall_a({{{1, 0, 0}, 1, 21, 1}}), wall_b({{{3, 0, 0}, 2, 21, 1}}),
         duplicate_fluid({{{4, 0, 0}, 2, 11, 1}}), other_wall({{{5, 0, 0}, 3, 32, 1}});
     const sph::WcsphVerletParameters parameters{{1, .5, 7}, 1};
     const sph::Velocity3D velocity("test.velocity", 1);
@@ -2123,6 +2245,151 @@ TEST(SphVerlet, MovingWallRejectsInvalidGroupsAndSamples) {
         rejects({{1, wall_fields(wall_a), invalid_limit}});
     }
     EXPECT_EQ(samples, 0u);
+}
+
+TEST(SphVerlet, UnusedMovingWallKinematicsDoNotRejectTheStep) {
+    const Fields fluid({{{0, 0, 0}, 1, 11, 0}}), boundary({{{2, 0, 0}, 1, 21, 1}});
+    const sph::Velocity3D velocity("test.velocity", 1);
+    const auto nan = std::numeric_limits<double>::quiet_NaN();
+    enum class Observation { none, geometry, kinematics };
+    const auto run = [&](Observation mode, bool invalid_velocity) {
+        SCOPED_TRACE(invalid_velocity);
+        SCOPED_TRACE(static_cast<int>(mode));
+        bool initialized = false;
+        auto trajectory = stationary_motion(.25);
+        trajectory.motion = [&](WallTime time, double) -> Result<WallMotion> {
+            WallMotion m;
+            // At initialization no wall velocity is consumed. At the step start
+            // only velocity is used. The wall enters support on the second endpoint.
+            m.translation[0] = initialized && time.elapsed == 0 ? nan : (time.elapsed == .25 ? -.5 : 0.);
+            m.velocity[0] = invalid_velocity || !initialized ? nan : 0.;
+            m.acceleration[0] = invalid_velocity ? 0. : nan;
+            return m;
+        };
+        sph::WcsphParticipant3D participant(fluid.get(), 16, {{1, .5, 1}, 1},
+            velocity, fluid.mass, WallGroups{{1, wall_fields(boundary), trajectory}});
+        std::optional<StageSamples> stages;
+        if (mode != Observation::none)
+            stages.emplace(participant, mode == Observation::kinematics);
+        Simulation simulation(participant);
+        ASSERT_TRUE(simulation.initialize().ok());
+        initialized = true;
+        const auto before = committed(participant);
+        const auto first = simulation.run(.125);
+        if (mode == Observation::kinematics && invalid_velocity) {
+            EXPECT_EQ(first.code(), StatusCode::numerical_failure);
+            EXPECT_EQ(simulation.time().accepted_steps, 0u);
+            expect_same_rows(committed(participant), before);
+            EXPECT_EQ(committed(participant).stamp, before.stamp);
+            EXPECT_TRUE(simulation.finalize().ok());
+            return;
+        }
+        ASSERT_TRUE(first.ok()) << first.message();
+        if (stages) {
+            ASSERT_EQ(stages->samples.size(), 3u);
+            EXPECT_EQ(stages->samples.back().neighbors.at(11), (NeighborPairs{{21, 4.}}));
+        }
+        const auto committed_wall = checked(participant.read_committed_wall(21));
+        EXPECT_EQ(committed_wall.position[0], 2);
+        EXPECT_EQ(simulation.run(.125).code(), StatusCode::numerical_failure);
+        EXPECT_EQ(checked(participant.read_committed_wall(21)), committed_wall);
+        EXPECT_EQ(simulation.time().accepted_steps, 1u);
+        EXPECT_TRUE(simulation.finalize().ok());
+    };
+    for (auto mode : {Observation::none, Observation::geometry, Observation::kinematics})
+        for (bool invalid_velocity : {false, true})
+            ASSERT_NO_FATAL_FAILURE(run(mode, invalid_velocity));
+}
+
+TEST(SphVerlet, MovingWallPositionFailurePreservesTheLastGridAndClock) {
+    const Fields empty({}), boundary({{{1, 0, 0}, 1, 21, 1}});
+    const sph::Velocity3D velocity("test.empty_velocity", 0);
+    const auto particles = checked(sph::SphBoundary::capture_wall_particles(Kokkos::Serial{},
+                                                                             wall_fields(boundary)));
+    for (bool bad_initial : {false, true}) {
+        auto trajectory = stationary_motion(.25);
+        trajectory.motion = [bad_initial](WallTime time, double) -> Result<WallMotion> {
+            WallMotion motion;
+            if (bad_initial || time.elapsed >= .25)
+                motion.translation[0] = std::numeric_limits<double>::infinity();
+            return motion;
+        };
+        const sph::SphBoundary::PrescribedMovingWall3D wall(particles, trajectory);
+        EXPECT_EQ(wall.sample(21, {0., .25}).status().code(), StatusCode::numerical_failure);
+        sph::WcsphParticipant3D participant(empty.get(), 8, {{1, 1, 1}, 1}, velocity, empty.mass,
+                                            WallGroups{{1, wall_fields(boundary), trajectory}});
+        Simulation simulation(participant);
+        const auto initial = simulation.initialize();
+        if (bad_initial) {
+            EXPECT_EQ(initial.code(), StatusCode::numerical_failure);
+            EXPECT_FALSE(participant.read_committed_wall(21).ok());
+        } else {
+            ASSERT_TRUE(initial.ok()) << initial.message();
+            ASSERT_TRUE(simulation.run(.125).ok());
+            const auto before = checked(participant.read_committed_wall(21));
+            const auto stamp = WcsphTestAccess::stamp(participant);
+            EXPECT_EQ(simulation.run(.125).code(), StatusCode::numerical_failure);
+            EXPECT_EQ(checked(participant.read_committed_wall(21)), before);
+            EXPECT_EQ(WcsphTestAccess::stamp(participant), stamp);
+            EXPECT_EQ(simulation.time().accepted_steps, 1u);
+            EXPECT_EQ(simulation.time().accepted_time, .125);
+        }
+        EXPECT_TRUE(simulation.finalize().ok());
+    }
+}
+
+TEST(SphVerlet, MotionUsesRotationGeometryOnlyWhenRotating) {
+    const Fields wall({{{1, 0, 0}, 1, 21, 1}});
+    const auto particles = checked(sph::SphBoundary::capture_wall_particles(Kokkos::Serial{}, wall_fields(wall)));
+    auto trajectory = stationary_motion(.5);
+    trajectory.motion = [](WallTime, double) -> Result<WallMotion> {
+        WallMotion motion;
+        motion.translation[0] = .5;
+        motion.center[0] = std::numeric_limits<double>::quiet_NaN();
+        motion.axis[1] = std::numeric_limits<double>::quiet_NaN();
+        return motion;
+    };
+    const sph::SphBoundary::PrescribedMovingWall3D translating(particles, trajectory);
+    const auto translated = checked(translating.sample(21, translating.initial_time()));
+    EXPECT_EQ(translated.position, (std::array<real, 3>{1.5, 0, 0}));
+
+    const auto translation = trajectory.motion;
+    trajectory.motion = [](WallTime, double) -> Result<WallMotion> {
+        WallMotion motion;
+        motion.acceleration[0] = std::numeric_limits<double>::infinity();
+        return motion;
+    };
+    const sph::SphBoundary::PrescribedMovingWall3D bad_acceleration(particles, trajectory);
+    EXPECT_EQ(bad_acceleration.sample(21, bad_acceleration.initial_time()).status().code(),
+              StatusCode::numerical_failure);
+
+    // Callback captures are required to be trivially copyable; borrow the
+    // original callback for this direct sampling test.
+    trajectory.motion = [&](WallTime time, double phase) -> Result<WallMotion> {
+        auto motion = translation(time, phase);
+        motion.value().angular_speed = 1;
+        return motion;
+    };
+    const sph::SphBoundary::PrescribedMovingWall3D rotating(particles, trajectory);
+    EXPECT_EQ(rotating.sample(21, rotating.initial_time()).status().code(), StatusCode::numerical_failure);
+    for (const double z : {0., std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN(),
+                           std::numeric_limits<double>::max(), std::numeric_limits<double>::denorm_min()}) {
+        trajectory.motion = [z](WallTime, double) -> Result<WallMotion> {
+            WallMotion m;
+            m.axis = {0., 0., z};
+            m.angular_speed = 1.;
+            return m;
+        };
+        const sph::SphBoundary::PrescribedMovingWall3D spin(particles, trajectory);
+        const auto sample = spin.sample(21, spin.initial_time());
+        if (z > 0 && std::isfinite(z)) {
+            ASSERT_TRUE(sample.ok());
+            EXPECT_EQ(sample.value().velocity, (std::array<real, 3>{0, 1, 0}));
+            EXPECT_EQ(sample.value().acceleration, (std::array<double, 3>{-1, 0, 0}));
+        } else {
+            EXPECT_EQ(sample.status().code(), StatusCode::numerical_failure);
+        }
+    }
 }
 
 TEST(SphVerlet, MovingWallLocalDurationSurvivesLargeAbsoluteTime) {
@@ -2631,7 +2898,7 @@ TEST(SphVerlet, MovingWallFiniteDomainRejectsRoundedUpRelativeWidth) {
     ASSERT_TRUE(moving.validate().ok());
     EXPECT_EQ(checked(moving.maximum_sample_step({-.75, 0})), T);
     EXPECT_FALSE(moving.advance_time({-.75, 0}, T + 1, T + 1).ok());
-    EXPECT_FALSE(moving.motion_at({-.75, T + 1}).ok());
+    EXPECT_FALSE(moving.sample(70, {-.75, T + 1}).ok());
     EXPECT_TRUE(sampled.empty());
 
     sph::WcsphParticipant3D participant(fluid.get(), 1, {{1, 0x1p-54, 1}, .5}, {},
@@ -2661,19 +2928,21 @@ TEST(SphVerlet, MovingWallFiniteDomainRoundsExtremeWidthInward) {
         calls.push_back({time, phase});
         return WallMotion{};
     };
-    const wall::PrescribedMovingWall3D moving({}, trajectory);
+    const Fields fields({{{.25, 0, 0}, 1, 70, 1}});
+    const auto particles = checked(wall::capture_wall_particles(Kokkos::Serial{}, wall_fields(fields)));
+    const wall::PrescribedMovingWall3D moving(particles, trajectory);
     ASSERT_TRUE(moving.validate().ok());
     const auto start = moving.initial_time();
     EXPECT_EQ(checked(moving.maximum_sample_step(start)), inward);
     EXPECT_EQ(moving.advance_time(start, outward, outward).status().code(),
               StatusCode::numerical_failure);
-    EXPECT_EQ(moving.motion_at({initial, outward}).status().code(), StatusCode::invalid_argument);
+    EXPECT_EQ(moving.sample(70, {initial, outward}).status().code(), StatusCode::invalid_argument);
     EXPECT_TRUE(calls.empty());
 
     const auto end = checked(moving.advance_time(start, inward, inward));
     EXPECT_EQ(end.initial_phase, initial);
     EXPECT_EQ(end.elapsed, inward);
-    ASSERT_TRUE(moving.motion_at(end).ok());
+    ASSERT_TRUE(moving.sample(70, end).ok());
     ASSERT_EQ(calls.size(), 1u);
     EXPECT_EQ(calls.front().phase, -0x1p+972);
     EXPECT_EQ(moving.maximum_sample_step(end).status().code(), StatusCode::numerical_failure);
@@ -2714,7 +2983,7 @@ TEST(SphVerlet, MovingWallPeriodicFoldAndThrowingCallbackPreserveLastStep) {
     EXPECT_EQ(published.phase, .25);
     EXPECT_EQ(published.position[0], .75);
     EXPECT_EQ(published.stamp.accepted_version.value(), 1u);
-    ASSERT_EQ(phases.size(), 5u);
+    ASSERT_EQ(phases.size(), 3u);
     EXPECT_EQ(phases.back(), .75);
     EXPECT_TRUE(simulation.finalize().ok());
     EXPECT_EQ(participant.resource_usage().controlled_bytes, 0u);

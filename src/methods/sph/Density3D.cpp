@@ -41,7 +41,7 @@ Status evaluate_density_3d(const Kokkos::Serial& exec, const NeighborView3D& gri
             "sph.grid.density_3d", Policy(exec, 0, rows.extent(0)),
             KOKKOS_LAMBDA(std::size_t row, std::size_t& failures) {
                 const double sum = density_at_slot_3d(grid, rows(row));
-                if (Kokkos::isfinite(sum) && sum <= std::numeric_limits<real>::max())
+                if (Kokkos::abs(sum) <= std::numeric_limits<real>::max())
                     density(row) = static_cast<real>(sum);
                 else
                     ++failures;

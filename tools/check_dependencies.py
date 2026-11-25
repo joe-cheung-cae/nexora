@@ -347,7 +347,8 @@ def check_internal_include(relative: Path, scope: str, header: str,
                 or (relative in {SPH_PRESSURE_TEST, SPH_PRESSURE_ORACLE, SPH_TANK_FIXTURE,
                                     SPH_HYDROSTATIC_INITIAL_TEST}
                     and parts == ["methods", "sph", "Pressure3D.hpp"])
-                or (relative == SPH_CONTINUITY_TEST and parts == ["methods", "sph", "Verlet3D.hpp"])
+                or (relative == SPH_CONTINUITY_TEST and parts[:2] == ["methods", "sph"]
+                    and parts[2:] in (["Continuity3D.hpp"], ["Verlet3D.hpp"]))
                 or (relative in SPH_PARTICIPANT_CONSUMERS
                     and "/".join(parts) == SPH_PARTICIPANT_HEADER)):
             return []

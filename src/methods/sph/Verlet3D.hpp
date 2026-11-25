@@ -4,22 +4,10 @@
 #include "neighbors/CellGrid.hpp"
 
 #include <array>
-#include <limits>
-#include <type_traits>
 
 namespace nexora::sph {
 
 using Velocity3D = Acceleration3D;
-
-// Keep overflow visible to the next operator even when a value just above FLT_MAX
-// would round back to a finite float.
-KOKKOS_INLINE_FUNCTION real narrow_step_value(double value) {
-    if constexpr (std::is_same_v<real, float>) {
-        if (Kokkos::abs(value) > std::numeric_limits<float>::max())
-            value = Kokkos::copysign(std::numeric_limits<double>::infinity(), value);
-    }
-    return static_cast<real>(value);
-}
 
 struct WcsphVerletParameters {
     WcsphParameters eos;
@@ -48,5 +36,26 @@ Status finish_kick_3d(const Kokkos::Serial&, const CellGrid& refreshed,
 // Empty and stationary fields give C*h/c0. C is an explicit safety factor in (0,1].
 Result<double> cfl_step_3d(const Kokkos::Serial&, const Velocity3D::const_type& velocity,
                            double sound_speed, double cfl_coefficient, double smoothing_length = 1);
+
+// The participant admits dt and validates the fixed parameters, and its workspace and
+// field grants supply disjoint storage with the extents described above.
+namespace verlet_step {
+// Build/validate the grid from staged_position before consuming either output.
+// In double storage, this coordinate admission also rejects a nonfinite half
+// velocity propagated through the drift. Float narrowing is checked here.
+Status kick_drift(const Kokkos::Serial&, const CellGrid&, const Velocity3D::const_type& velocity,
+                  const Acceleration3D::const_type& acceleration, double dt,
+                  const Velocity3D& staged_position, const Velocity3D& half_velocity,
+                  const std::array<double, 3>& gravity);
+
+// Both writers reduce the maximum squared speed of the stored real velocities.
+Result<double> capture_velocity(const Kokkos::Serial&, const NeighborView3D::Indices& row_to_input,
+                                const Velocity3D::const_type& input, const Velocity3D& output);
+Result<double> finish_kick(const Kokkos::Serial&, const CellGrid&, const Velocity3D::const_type& half,
+                           const Acceleration3D::const_type& acceleration, double dt,
+                           const Velocity3D& velocity, const std::array<double, 3>& gravity);
+Result<double> acoustic_step(double maximum_speed_squared, double sound_speed,
+                             double cfl_coefficient, double smoothing_length);
+} // namespace verlet_step
 
 } // namespace nexora::sph

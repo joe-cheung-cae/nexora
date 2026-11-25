@@ -43,13 +43,13 @@ template <class View, class HistoryView>
 Result<Participant::BankAccess> Participant::claim_bank(const View& x, const View& q,
                                                         const HistoryView& history,
                                                         const FieldStamp& stamp) {
-    auto x_access = detail::FieldIssuer::create(x, stamp);
+    auto x_access = detail::FieldIssuer::create_at_validated_time(x, stamp);
     if (!x_access.ok())
         return x_access.status();
-    auto q_access = detail::FieldIssuer::create(q, stamp);
+    auto q_access = detail::FieldIssuer::create_at_validated_time(q, stamp);
     if (!q_access.ok())
         return q_access.status();
-    auto history_access = detail::FieldIssuer::create(history, stamp);
+    auto history_access = detail::FieldIssuer::create_at_validated_time(history, stamp);
     if (!history_access.ok())
         return history_access.status();
     return BankAccess{std::move(x_access).value(), std::move(q_access).value(),
@@ -63,7 +63,10 @@ void Participant::BankAccess::close() noexcept {
 }
 
 Participant::Participant(Config config, ParticipantId id, ResourceBudget::Limits limits)
-    : id_(id), budget_(limits), state_(std::move(config)) {}
+    : id_(id), budget_(limits), state_(std::move(config)) {
+    const auto constraint = case_time_constraint(state_.lambda());
+    constraint_ = constraint.ok() ? constraint.value() : TimeConstraint{.available = false};
+}
 ParticipantId Participant::id() const noexcept {
     return id_;
 }
@@ -72,60 +75,97 @@ ParticipantId Participant::id() const noexcept {
 std::vector<PortDescriptor> Participant::ports() const {
     return {};
 }
-Status Participant::validate_case_config(const Config& config, double initial_time) {
-    const auto checked = validate_config(config, initial_time);
+Result<std::unique_ptr<Participant>> Participant::prepare_case(Config config,
+                                                               ConfigField& invalid_field) {
+    auto participant = std::make_unique<Participant>(std::move(config));
+    if (!participant->constraint_.available) {
+        invalid_field = ConfigField::lambda;
+        return Status{StatusCode::invalid_argument, "invalid reference initial state or lambda"};
+    }
+    invalid_field = ConfigField::ids;
+    const auto checked = validate_initial_fields(participant->state_.config_, &invalid_field);
     if (!checked.ok())
         return checked.status();
     // The default case needs IDs plus accepted and temporary step banks,
     // and only requests its read snapshot after the final step.
-    ResourceBudget budget;
     const auto sizes = checked.value();
-    auto ids = budget.reserve(sizes.ids_bytes, 0);
+    auto ids = participant->budget_.reserve(sizes.ids_bytes);
     if (!ids.ok())
         return ids.status();
-    auto accepted = budget.reserve(sizes.bank_bytes, 0);
+    auto accepted = participant->budget_.reserve(sizes.bank_bytes);
     if (!accepted.ok())
         return accepted.status();
-    auto next = budget.reserve(sizes.bank_bytes, 1);
-    return next.status();
-}
-Status Participant::validate_case_interval(const TimeInterval& interval, real lambda) {
-    return validate_interval(interval, lambda);
+    auto next = participant->budget_.reserve(sizes.bank_bytes, 1);
+    if (!next.ok())
+        return next.status();
+    participant->initial_sizes_ = sizes;
+    return participant;
 }
 TimeConstraint Participant::time_constraint() const {
-    return case_time_constraint(state_.lambda());
+    return constraint_;
 }
-TimeConstraint Participant::case_time_constraint(real lambda) {
-    if (!std::isfinite(lambda) || lambda <= 0) {
-        return {1.0, 0.0, std::nullopt};
+Result<TimeConstraint> Participant::case_time_constraint(real lambda) {
+    constexpr auto real_max = std::numeric_limits<real>::max();
+    if (!(real{0} < lambda && lambda <= real_max)) {
+        return Status{StatusCode::invalid_argument, "invalid reference initial state or lambda"};
     }
     const double lambda_time = static_cast<double>(lambda);
-    double max_step = std::min(1.0 / lambda_time,
-                               static_cast<double>(std::numeric_limits<real>::max()));
-    const real real_max_step = static_cast<real>(max_step);
-    // Rounding the time bound to real can cross the stable-step boundary,
-    // especially when real_max_step is subnormal. Publish a supported endpoint.
-    if (max_step * lambda_time > 1.0 || real_max_step * lambda > real{1}) {
-        max_step = static_cast<double>(std::nextafter(real_max_step, real{0}));
+    const auto stable_maximum = [&](double step) {
+        if constexpr (std::is_same_v<real, float>) {
+            if (static_cast<real>(step) * lambda > real{1})
+                return false;
+        }
+        return step * lambda_time <= 1.0;
+    };
+    double max_step = std::min(1.0 / lambda_time, static_cast<double>(real_max));
+    constexpr auto invalid_bounds = "reference lambda has no supported step bounds";
+    // Rounding to real can cross the upper stability limit, especially for
+    // subnormals. A predecessor in real is below the original double bound.
+    if (!stable_maximum(max_step)) {
+        max_step = static_cast<double>(std::nextafter(static_cast<real>(max_step), real{0}));
+        if (!stable_maximum(max_step))
+            return Status{StatusCode::invalid_argument, invalid_bounds};
     }
     const double real_min_step = static_cast<double>(std::numeric_limits<real>::denorm_min());
     const double min_step = std::max(real_min_step, real_min_step / lambda_time);
-    return {max_step, min_step, std::nullopt};
+    // The cast and multiplication by a positive lambda are monotone. Checking
+    // the real product here covers positive dt and factor at every admitted
+    // duration, including subnormals. In float the double product cannot
+    // underflow if the real product is positive. In double they are identical.
+    if (!(static_cast<real>(min_step) * lambda > real{0}))
+        return Status{StatusCode::invalid_argument, invalid_bounds};
+    return TimeConstraint{max_step, min_step, std::nullopt};
 }
 Status Participant::initialize(double t) {
+    if (std::isfinite(t))
+        return initialize_at_finite_time(t);
+    return guarded([&] {
+        if (auto status = state_.preflight_initialize(); !status.ok())
+            return status;
+        return Status{StatusCode::invalid_argument, "invalid reference initial state or lambda"};
+    });
+}
+Status Participant::initialize_at_finite_time(double t) {
     ResourceBudget::Ticket ids_ticket, bank_ticket;
     // Keep the selected instance alive until any failed initialization has
     // released its Views and authorities.
     std::optional<Kokkos::Serial> selected;
     auto result = guarded([&] {
-        const auto sizes = state_.preflight_initialize(t);
-        if (!sizes.ok())
-            return sizes.status();
-        auto ids_reservation = budget_.reserve(sizes.value().ids_bytes);
+        if (auto status = state_.preflight_initialize(); !status.ok())
+            return status;
+        if (!constraint_.available)
+            return Status{StatusCode::invalid_argument, "invalid reference initial state or lambda"};
+        if (!initial_sizes_) {
+            const auto sizes = validate_initial_fields(state_.config_);
+            if (!sizes.ok())
+                return sizes.status();
+            initial_sizes_ = sizes.value();
+        }
+        auto ids_reservation = budget_.reserve(initial_sizes_->ids_bytes);
         if (!ids_reservation.ok())
             return ids_reservation.status();
         ids_ticket = std::move(ids_reservation).value();
-        auto bank_reservation = budget_.reserve(sizes.value().bank_bytes);
+        auto bank_reservation = budget_.reserve(initial_sizes_->bank_bytes);
         if (!bank_reservation.ok())
             return bank_reservation.status();
         bank_ticket = std::move(bank_reservation).value();
@@ -188,8 +228,8 @@ Status Participant::do_step(const TimeInterval& interval) {
                 return fields.status();
             const auto& [old_x, old_q, old_history, next_x, next_q, next_history] = fields.value();
             Kokkos::deep_copy(*exec_, next_history.view(), old_history.view());
-            if (auto status = State::evaluate(*exec_, static_cast<real>(interval.duration()),
-                                              state_.lambda(), old_x.view(), old_q.view(),
+            const real factor = static_cast<real>(interval.duration()) * state_.lambda();
+            if (auto status = State::evaluate(*exec_, factor, old_x.view(), old_q.view(),
                                               next_x.view(), next_q.view(), next_history.view(),
                                               state_.accepted_control_.sequence + 1); !status.ok())
                 return status;

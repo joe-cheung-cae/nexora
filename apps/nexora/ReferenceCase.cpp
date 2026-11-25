@@ -8,7 +8,6 @@
 #include <limits>
 #include <map>
 #include <new>
-#include <nexora/participant/TimeConstraint.hpp>
 #include <participants/reference/Participant.hpp>
 #include <stdexcept>
 #include <string>
@@ -16,7 +15,9 @@
 #include <system_error>
 #include <utility>
 
+/// @brief
 namespace nexora::cli {
+/// @brief
 namespace {
 std::string_view trim(std::string_view text) {
     constexpr std::string_view whitespace = " \t\r\n\f\v";
@@ -37,6 +38,11 @@ Status error(const std::filesystem::path& path, std::size_t line, std::string me
     return {code, path.string() + ":" + std::to_string(line) + ": " + std::move(message)};
 }
 
+/// @brief
+/// @tparam T
+/// @param text
+/// @param value
+/// @return
 template <class T>
 bool parse_number(std::string_view text, T& value) {
     if (!text.empty() && text.front() == '+') {
@@ -48,8 +54,7 @@ bool parse_number(std::string_view text, T& value) {
         return false;
     const auto result = std::from_chars(text.data(), text.data() + text.size(), value,
                                         std::chars_format::general);
-    return result.ec == std::errc{} && result.ptr == text.data() + text.size() &&
-           std::isfinite(value);
+    return result.ec == std::errc{} && result.ptr == text.data() + text.size();
 }
 
 bool parse_id(std::string_view text, std::uint64_t& value) {
@@ -136,35 +141,42 @@ Result<ReferenceCase> load(const std::filesystem::path& path, std::size_t& curre
     for (auto [key, destination] : {std::pair{"start", &result.start},
                                    std::pair{"end", &result.end}, std::pair{"step", &step}}) {
         const auto it = entries.find(key);
-        if (it != entries.end() && !parse_number(it->second.value, *destination))
+        if (it != entries.end() && (!parse_number(it->second.value, *destination) ||
+                                    !std::isfinite(*destination)))
             return fail(key, std::string(key) + " must be a finite decimal number in double range");
     }
     if (result.end <= result.start)
         return fail("end", "end must be greater than start");
-    if (entries.contains("lambda") &&
-        !parse_number(entries.at("lambda").value, result.config.lambda))
+    reference::Config config;
+    if (entries.contains("lambda") && !parse_number(entries.at("lambda").value, config.lambda))
         return fail("lambda", "lambda must be finite and representable in build real precision");
     if (entries.contains("ids") &&
-        !parse_list(entries.at("ids").value, result.config.ids, parse_id))
+        !parse_list(entries.at("ids").value, config.ids, parse_id))
         return fail("ids", "ids must be a nonempty comma-separated list of unsigned 64-bit integers");
-    for (auto [key, destination] : {std::pair{"x", &result.config.x},
-                                   std::pair{"q", &result.config.q}}) {
+    for (auto [key, destination] : {std::pair{"x", &config.x}, std::pair{"q", &config.q}}) {
         if (entries.contains(key) && !parse_list(entries.at(key).value, *destination, parse_number<real>))
             return fail(key, std::string(key) +
                              " must contain finite comma-separated values representable in build real precision");
     }
-    const auto checked_config = reference::Participant::validate_case_config(result.config, result.start);
-    if (!checked_config.ok()) {
-        const auto key = result.config.lambda <= 0 ? "lambda" :
-                         result.config.ids.size() != result.config.x.size() ? "x" :
-                         result.config.ids.size() != result.config.q.size() ? "q" : "ids";
-        return fail(key, checked_config.message(), checked_config.code());
+    result.entities = config.ids.size();
+    using reference::ConfigField;
+    ConfigField invalid_field = ConfigField::ids;
+    auto prepared = reference::Participant::prepare_case(std::move(config), invalid_field);
+    if (!prepared.ok()) {
+        const auto report = [&](std::string_view key) {
+            const auto& status = prepared.status();
+            return fail(key, status.message(), status.code());
+        };
+        switch (invalid_field) {
+        case ConfigField::ids: return report("ids");
+        case ConfigField::x: return report("x");
+        case ConfigField::q: return report("q");
+        case ConfigField::lambda: return report("lambda");
+        }
     }
-    const auto constraint = reference::Participant::case_time_constraint(result.config.lambda);
+    result.participant = std::move(prepared).value();
+    const auto constraint = result.participant->time_constraint();
     if (auto status = validate_time_step(constraint, step); !status.ok())
-        return fail("step", status.message(), status.code());
-    if (auto status = reference::Participant::validate_case_interval({0.0, step, step}, result.config.lambda);
-        !status.ok())
         return fail("step", status.message(), status.code());
     // Monotonic rounded addition cannot cross an endpoint predecessor at which
     // the nominal duration already stalls; all tail requests are no larger.
@@ -200,13 +212,12 @@ Result<ReferenceCase> load(const std::filesystem::path& path, std::size_t& curre
             requested = result.end - time;
             endpoint = time + requested;
         }
-        if (!std::isfinite(endpoint) || endpoint <= time || endpoint > result.end)
+        if (!(endpoint > time && endpoint <= result.end))
             return fail("step", "step does not produce a finite advancing endpoint within end");
-        if (auto status = validate_time_step(constraint, requested); !status.ok())
-            return fail("step", status.message(), status.code());
-        if (auto status = reference::Participant::validate_case_interval({time, endpoint, requested},
-                                                        result.config.lambda); !status.ok())
-            return fail("step", status.message(), status.code());
+        if (requested != step) {
+            if (auto status = validate_time_step(constraint, requested); !status.ok())
+                return fail("step", status.message(), status.code());
+        }
         if (result.steps.size() == result.steps.max_size() ||
             result.steps.size() == std::numeric_limits<std::uint64_t>::max())
             return fail("step", "case step count exceeds schedule or counter capacity",

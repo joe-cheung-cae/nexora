@@ -20,6 +20,8 @@ struct FieldStamp {
     std::uint64_t storage_incarnation{}; // Zero until assigned to a storage binding.
     bool accepted{};
 
+    // Validate caller-supplied time at ingress. Bindings authenticate against
+    // the issuer's immutable stamp, including its storage incarnation.
     Status validate() const {
         if (!std::isfinite(time.physical_time) || !std::isfinite(valid_from) ||
             !std::isfinite(valid_until) || valid_until < valid_from) {

@@ -1,5 +1,6 @@
 #include "wcsph_oracle.hpp"
 #include <gtest/gtest.h>
+#include <cmath>
 #include <limits>
 #include <methods/sph/Pressure3D.hpp>
 
@@ -192,6 +193,85 @@ TEST(SphWcsphOperators, RejectsInvalidParameters) {
                       .code(), StatusCode::invalid_argument);
     }
 }
+TEST(SphWcsphOperators, PressureRejectsDensityThatRoundsToZero) {
+    Kokkos::Serial exec;
+    // The isolated particle contributes m/pi, which rounds to zero in the stored precision.
+    Fields fields({{{0, 0, 0}, std::numeric_limits<real>::denorm_min(), 1, 0}});
+    const auto grid = checked(sph::CellGrid::build(exec, fields.get(), 1));
+    const auto& query = grid.neighbors();
+    const auto rho = checked(sph::evaluate_density_3d(exec, query));
+    EXPECT_EQ(rho(0), real{0});
+    sph::Values pressure("test.pressure", 1);
+    sph::Acceleration3D acceleration("test.acceleration", 1);
+    const auto status = sph::evaluate_pressure_3d(exec, query, sph::TaitEos({1, 1, 1}), rho,
+                                                  pressure, acceleration);
+    EXPECT_EQ(status.code(), StatusCode::numerical_failure);
+    rho(0) = std::numeric_limits<real>::infinity();
+    for (const double speed : {1., std::numeric_limits<double>::min()}) {
+        const auto overflow = sph::evaluate_pressure_3d(exec, query, sph::TaitEos({1, speed, 1}),
+                                                        rho, pressure, acceleration);
+        EXPECT_EQ(overflow.code(), StatusCode::numerical_failure);
+    }
+}
+
+TEST(SphWcsphOperators, PressureValidatesOnlyContributingWallData) {
+    const Kokkos::Serial exec;
+    const sph::Values rho("test.rho", 1), pressure("test.pressure", 1);
+    const sph::Acceleration3D acceleration("test.acceleration", 1);
+    const sph::WallAcceleration3D wall_acceleration("test.wall_acceleration", 2);
+    for (const real x : {real{0}, real{1}, real{2}}) {
+        SCOPED_TRACE(x);
+        const Fields fields({{{0, 0, 0}, 1, 1, 0}, {{x, 0, 0}, 1, 2, 1}});
+        const auto grid = checked(sph::CellGrid::build(exec, fields.get(), 8));
+        rho(0) = 1;
+        const auto result = sph::evaluate_pressure_3d(exec, grid.neighbors(), sph::TaitEos({1, 1, 1}),
+            rho, pressure, acceleration, wall_acceleration, {0., std::numeric_limits<double>::quiet_NaN(), 0.});
+        EXPECT_EQ(result.ok(), x != 1);
+        if (x == 1)
+            EXPECT_EQ(result.code(), StatusCode::numerical_failure);
+    }
+
+    // R² rounds up, while sqrt(1² + 1²)/h rounds exactly to the zero-gradient
+    // endpoint. Its immediately smaller x coordinate still needs the wall input.
+    const double h = .5 * std::sqrt(2.);
+    for (const real x : {real{1}, std::nextafter(real{1}, real{0})}) {
+        const Fields diagonal({{{0, 0, 0}, 1, 1, 0}, {{x, 1, 0}, 1, 2, 1}});
+        const auto grid = checked(sph::CellGrid::build(exec, diagonal.get(), 8, {}, h));
+        double d2 = 0;
+        grid.neighbors().for_each_neighbor(0, [&](LocalIndex, double squared) { d2 = squared; });
+        ASSERT_GT(d2, 0.);
+        ASSERT_LT(d2, grid.support_radius() * grid.support_radius());
+        const bool active = x < 1;
+        ASSERT_EQ(std::sqrt(d2) / h < 2, active);
+        const std::array gravity{std::numeric_limits<double>::quiet_NaN(), 0., 0.};
+        const sph::TaitEos eos({1, 1, 1});
+        EXPECT_EQ(sph::evaluate_pressure_3d(exec, grid.neighbors(), eos, rho, pressure, acceleration,
+                                           wall_acceleration, gravity).ok(), !active);
+        int reads = 0;
+        const auto at_slot = [&](LocalIndex) { ++reads; return std::array<double, 3>{}; };
+        EXPECT_EQ(sph::evaluate_step_pressure_3d(exec, grid.neighbors(), eos, rho, pressure,
+                                                acceleration, at_slot, gravity, false).ok(), !active);
+        EXPECT_EQ(reads, active ? 1 : 0);
+    }
+
+    // Two owned rows request the same wall coefficient. The separate distant
+    // wall has no force pair and must never request acceleration.
+    const Fields mixed({{{0, 0, 0}, 1, 10, 0}, {{1, 0, 0}, 1, 20, 0},
+                        {{.5, 0, 0}, 1, 30, 1}, {{4, 0, 0}, 1, 40, 1}});
+    const auto grid = checked(sph::CellGrid::build(exec, mixed.get(), 8));
+    const sph::Values owned_rho("test.owned_rho", 2), owned_p("test.owned_p", 2);
+    const sph::Acceleration3D owned_a("test.owned_a", 2);
+    Kokkos::deep_copy(exec, owned_rho, real{1});
+    std::vector<std::uint64_t> sampled_ids;
+    const auto at_wall = [&](LocalIndex slot) {
+        sampled_ids.push_back(grid.fields().ids(slot));
+        return std::array<double, 3>{};
+    };
+    ASSERT_TRUE(sph::evaluate_step_pressure_3d(exec, grid.neighbors(), sph::TaitEos({1, 1, 1}),
+                                              owned_rho, owned_p, owned_a, at_wall, {}, false).ok());
+    EXPECT_EQ(sampled_ids, (std::vector<std::uint64_t>{30}));
+}
+
 TEST(SphWcsphOperators, EmptyAndGhostOnlyStatesHaveNoPressureRows) {
     const sph::WcsphParameters parameters{1, 2, 7};
     for (const auto& state :

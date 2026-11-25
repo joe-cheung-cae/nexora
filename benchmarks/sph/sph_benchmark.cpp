@@ -270,7 +270,7 @@ void verify(const Snapshot& state, std::size_t clusters, std::size_t rows, std::
             expected = static_cast<long double>(numerator) * scale / fixture::denominator;
         }
         const real result = state.density(row);
-        check(std::isfinite(result) && std::abs(result - expected) <=
+        check(std::abs(result - expected) <=
                                           epsilon_multiplier * eps * std::abs(expected),
               "unexpected SPH density");
         if (before_reorder)
@@ -288,8 +288,7 @@ void verify(const Snapshot& state, std::size_t clusters, std::size_t rows, std::
                                             fixture::denominator;
     const long double relative_tolerance =
         clusters > 0 ? 2 * nu / (1 - nu) + eps : fixture::sum_epsilon * eps;
-    check(std::isfinite(state.owned_density_sum) &&
-              std::abs(state.owned_density_sum - reference) <= relative_tolerance * reference,
+    check(std::abs(state.owned_density_sum - reference) <= relative_tolerance * reference,
           "unexpected SPH owned density sum");
     if (before_reorder)
         check(state.owned_density_sum == before_reorder->owned_density_sum,

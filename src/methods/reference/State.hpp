@@ -37,14 +37,15 @@ struct Config {
     Control control_seed{};
 };
 
-// Pure input checks shared by application preflight and the allocating lifecycle.
-// They neither initialize Kokkos nor allocate numerical storage.
+enum class ConfigField { ids, x, q, lambda };
+
 struct AllocationSize {
     std::size_t ids_bytes = 0;
     std::size_t bank_bytes = 0;
 };
-Result<AllocationSize> validate_config(const Config& config, double time);
-Status validate_interval(const TimeInterval& interval, real lambda);
+// Check owned initial field data without initializing Kokkos or allocating Views.
+Result<AllocationSize> validate_initial_fields(const Config& config,
+                                               ConfigField* invalid_field = nullptr);
 
 // Copies share the read grants on accepted values. Destroy all snapshots before
 // application-owned Kokkos finalization, even if the participant is gone.
@@ -112,12 +113,12 @@ class State {
     friend class Participant;
 
     enum class Phase { created, initialized, finalized };
-    Result<AllocationSize> preflight_initialize(double time) const;
+    Status preflight_initialize() const;
     Result<std::size_t> preflight_step(const TimeInterval& interval) const;
     Status initialize(double time, const Kokkos::Serial& exec);
     void cancel_initialization() noexcept;
     void finish_initialization() noexcept;
-    static Status evaluate(const Kokkos::Serial& exec, real dt, real lambda,
+    static Status evaluate(const Kokkos::Serial& exec, real factor,
                            const ConstValues& x, const ConstValues& q,
                            const Values& next_x, const Values& next_q,
                            const History& history, std::uint64_t sequence);

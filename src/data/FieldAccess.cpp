@@ -127,6 +127,8 @@ Result<FieldIssuer> FieldIssuer::claim(const AllocationTracker& tracker, FieldSt
 Result<FieldIssuer> FieldIssuer::claim_external(StorageRange range,
                                                 std::shared_ptr<const void> owner, FieldStamp stamp,
                                                 bool mutable_storage) {
+    if (auto valid = stamp.validate(); !valid.ok())
+        return valid;
     auto authority = std::make_shared<FieldAuthority>(range.base, range.bytes, std::move(owner),
                                                       mutable_storage && !stamp.accepted);
     return register_authority(std::move(authority), stamp);
@@ -134,8 +136,6 @@ Result<FieldIssuer> FieldIssuer::claim_external(StorageRange range,
 
 Result<FieldIssuer> FieldIssuer::register_authority(std::shared_ptr<FieldAuthority> authority,
                                                     FieldStamp stamp) {
-    if (auto valid = stamp.validate(); !valid.ok())
-        return valid;
     if (stamp.storage_incarnation != 0)
         return Status{StatusCode::invalid_argument, "new field stamp already has an incarnation"};
 
@@ -235,6 +235,7 @@ Result<FieldIssuer::StorageRange> FieldIssuer::validate_stamp_and_storage(
     FieldOwnership ownership) const {
     if (!authority_)
         return Status{StatusCode::invalid_state, "field issuer has no allocation"};
+    // This equality also authenticates time against the validated owned stamp.
     if (expected != stamp_)
         return Status{StatusCode::invalid_state, "field stamp is stale or does not match the binding"};
 

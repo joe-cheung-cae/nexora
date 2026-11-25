@@ -16,12 +16,16 @@ struct TimeConstraint {
     double maximum_step = 1.0;
     double minimum_step = 0.0;
     std::optional<double> fixed_quantum;
+    // Unavailable lifecycle/configuration state is distinct from an exhausted
+    // finite domain, whose available maximum_step is zero.
+    bool available = true;
 };
 
 inline Status validate_time_constraint(const TimeConstraint& constraint) {
-    if (!std::isfinite(constraint.maximum_step) || constraint.maximum_step < 0.0 ||
-        !std::isfinite(constraint.minimum_step) || constraint.minimum_step < 0.0 ||
-        constraint.minimum_step > constraint.maximum_step) {
+    if (!constraint.available)
+        return {StatusCode::invalid_state, "participant time constraint is unavailable"};
+    if (!(0.0 <= constraint.minimum_step && constraint.minimum_step <= constraint.maximum_step &&
+          constraint.maximum_step <= std::numeric_limits<double>::max())) {
         return {StatusCode::invalid_argument, "invalid participant step bounds"};
     }
     if (constraint.fixed_quantum &&
@@ -36,11 +40,9 @@ inline Status validate_time_step(const TimeConstraint& constraint, double step) 
     if (!status.ok()) {
         return status;
     }
-    const bool finite_positive_step = std::isfinite(step) && step > 0.0;
-    if (finite_positive_step && constraint.maximum_step == 0.0) {
-        return {StatusCode::invalid_argument, "participant finite time domain is exhausted"};
-    }
-    if (!finite_positive_step || step < constraint.minimum_step || step > constraint.maximum_step) {
+    if (!(step > 0.0 && step >= constraint.minimum_step && step <= constraint.maximum_step)) {
+        if (constraint.maximum_step == 0.0 && step > 0.0 && std::isfinite(step))
+            return {StatusCode::invalid_argument, "participant finite time domain is exhausted"};
         return {StatusCode::invalid_argument, "requested step violates participant bounds"};
     }
     if (constraint.fixed_quantum) {
@@ -50,7 +52,7 @@ inline Status validate_time_step(const TimeConstraint& constraint, double step) 
         // an uncapped relative tolerance could accept a half-quantum step.
         const double tolerance = std::min(0.125, 8.0 * std::numeric_limits<double>::epsilon() *
                                                      std::max(1.0, std::abs(count)));
-        if (!std::isfinite(count) || nearest < 1.0 || count > 0x1p53 ||
+        if (nearest < 1.0 || count > 0x1p53 ||
             std::abs(count - nearest) > tolerance) {
             return {StatusCode::invalid_argument, "requested step is not a fixed-quantum multiple"};
         }

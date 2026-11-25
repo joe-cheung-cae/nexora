@@ -60,6 +60,7 @@ class WcsphStep3D {
     friend class WcsphParticipant3D;
     void* observer_context_{};
     void (*observe_)(void*, StepStage3D, const NeighborView3D&){};
+    bool observe_kinematics_{};
     using Ticket = detail::ResourceBudget::Ticket;
     template <class V> struct Buffer {
         Ticket ticket;
@@ -81,28 +82,28 @@ class WcsphStep3D {
     Ticket wall_storage_;
     struct WallGroup {
         std::uint64_t id;
-        std::size_t sample_offset, phase_index;
+        std::size_t phase_index;
         std::variant<SphBoundary::FixedWall3D, SphBoundary::PrescribedMovingWall3D> boundary;
         const SphBoundary::SolidWallBoundary3D& source() const;
         const SphBoundary::PrescribedMovingWall3D* moving() const;
     };
-    using WallSamples = Buffer<Kokkos::View<SphBoundary::WallKinematics3D*, Kokkos::HostSpace>>;
+    using WallMotions = Buffer<Kokkos::View<SphBoundary::SampledWallMotion3D*, Kokkos::HostSpace>>;
     std::vector<WallGroup> walls_;
-    std::size_t wall_count_{}, moving_count_{}, moving_groups_{};
+    std::size_t wall_count_{}, moving_groups_{};
     void capture_groups(const std::vector<SphBoundary::WallGroupInput3D>&, std::size_t fluid_count);
     Ticket reserve_wall_stage(std::size_t bytes);
     WallPhases3D::non_const_type phase_storage(WcsphState3D&);
-    WallSamples sample_groups(const WallPhases3D&);
-    void set_next_step(WcsphState3D&) const;
-    SphBoundary::WallKinematics3D sample_at(const WallGroup&, const SphBoundary::WallParticle3D&,
-                                           const WallSamples&) const;
-    template <class Write>
-    void write_wall_slots(const ParticleFields3D&, const WallSamples&, const char*, const Write&) const;
+    WallMotions sample_groups(const WallPhases3D&, SphBoundary::WallMotionUse3D);
+    void set_next_step(WcsphState3D&, double largest_speed_squared) const;
+    bool write_wall_slot(const ParticleFields3D&, const WallMotions&, const Velocity3D& output,
+                         LocalIndex slot, bool positions) const;
+    void write_wall_stage(const ParticleFields3D&, const WallMotions&, const Velocity3D& output,
+                          bool positions) const;
     Result<SphBoundary::WallTrajectoryTime3D> wall_time(std::uint64_t particle_id, const WallPhases3D&) const;
 
     std::unique_ptr<CellGrid> committed_grid_;
     Workspace workspace_;
 
-    void evaluate_pressure(WcsphState3D&, const CellGrid&, const BindFields3D&, Workspace*, const WallSamples&);
+    void evaluate_pressure(WcsphState3D&, const CellGrid&, const BindFields3D&, Workspace*, const WallMotions&);
 };
 } // namespace nexora::sph

@@ -41,7 +41,7 @@ q=0,1
 
 其他构建报告 `validated=false`，普通 `run` 会在预检后拒绝运行。启用 `BUILD_TESTING` 的构建提供 `nexora run --fixture <case>`，用于显式执行受控夹具并收集证据。普通运行在已匹配的 profile 上直接使用 `nexora run <case>`。
 
-`run` 在应用的 Kokkos `ScopeGuard` 内创建 Reference 和 `Simulation`，将预检生成的全部时长一次交给 `Simulation::run`。每个成功步发布字段和时钟。运行期间的首个失败结束该算例并执行清理。成功输出包含 `accepted_time`、`state_version`、`accepted_steps` 及按 case 顺序排列的稳定 ID 与 `x/q`。浮点输出使用各自类型的 `max_digits10`。预检失败退出码为 2。运行期间发现的数值或资源失败退出码为 1，报告失败步并省略成功摘要。
+CLI 预检创建 Reference 参与者并保留已验证的初值和步长约束。`run` 在应用的 Kokkos `ScopeGuard` 内通过 `Simulation` 初始化该参与者的数值存储，将预检生成的全部时长一次交给 `Simulation::run`。每个成功步发布字段和时钟。运行期间的首个失败结束该算例并执行清理。成功输出包含 `accepted_time`、`state_version`、`accepted_steps` 及按 case 顺序排列的稳定 ID 与 `x/q`。浮点输出使用各自类型的 `max_digits10`。预检失败退出码为 2。运行期间发现的数值或资源失败退出码为 1，报告失败步并省略成功摘要。
 
 ## 本地验收
 

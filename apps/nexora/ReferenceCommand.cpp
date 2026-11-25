@@ -37,7 +37,7 @@ void print_plan(const ReferenceCase& input) {
               << "validated=" << (build_info::reference_validated ? "true" : "false") << '\n'
               << "validation_evidence=" << build_info::reference_validation_evidence << '\n'
               << "participant=reference\n"
-              << "entities=" << input.config.ids.size() << '\n'
+              << "entities=" << input.entities << '\n'
               << std::setprecision(std::numeric_limits<double>::max_digits10)
               << "start=" << input.start << '\n'
               << "end=" << input.end << '\n'
@@ -104,15 +104,15 @@ Status run_and_summarize(Simulation& simulation, const reference::Participant& p
 
 int run_reference_case(ReferenceCase input) {
     const Kokkos::ScopeGuard runtime;
-    reference::Participant participant{std::move(input.config)};
-    Simulation simulation{participant, input.start};
+    auto participant = std::move(input.participant);
+    Simulation simulation{*participant, input.start};
     std::ostringstream summary;
     summary.exceptions(std::ios::badbit | std::ios::failbit);
 
     Status run_status;
     try {
         // The snapshot and its leases are destroyed before finalizing Simulation.
-        run_status = run_and_summarize(simulation, participant, input.steps, input.end, summary);
+        run_status = run_and_summarize(simulation, *participant, input.steps, input.end, summary);
     } catch (...) {
         if (const auto status = simulation.finalize(); !status.ok()) {
             std::cerr << "reference finalize failed: " << status.message() << '\n';

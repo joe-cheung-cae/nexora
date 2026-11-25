@@ -53,7 +53,7 @@ Status Simulation::initialize() {
                 return {StatusCode::invalid_argument, "participant port IDs must be unique"};
         }
     }
-    const auto status = participant_.initialize(time_.accepted_time);
+    const auto status = participant_.initialize_at_finite_time(time_.accepted_time);
     if (status.ok())
         phase_ = Phase::ready;
     return status;

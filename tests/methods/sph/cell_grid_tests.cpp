@@ -657,9 +657,13 @@ TEST(SphCellGrid, ValidatesCaseSupport) {
 TEST(SphCellGrid, RejectsInvalidPhysicalFields) {
     Kokkos::Serial exec;
     Fields fields({{{0, 0, 0}, 1, 1, 0}});
+    const auto accepted = checked(sph::CellGrid::build(exec, fields.get(), 100));
     for (const real mass : {real{0}, std::numeric_limits<real>::infinity()}) {
         fields.mass(0) = mass;
         EXPECT_EQ(sph::CellGrid::build(exec, fields.get(), 100).status().code(),
+                  StatusCode::invalid_argument)
+            << mass;
+        EXPECT_EQ(accepted.update(exec, fields.get(), 100).status().code(),
                   StatusCode::invalid_argument)
             << mass;
     }
@@ -667,11 +671,201 @@ TEST(SphCellGrid, RejectsInvalidPhysicalFields) {
     fields.ghost(0) = 2;
     EXPECT_EQ(sph::CellGrid::build(exec, fields.get(), 100).status().code(),
               StatusCode::invalid_argument);
+    EXPECT_EQ(accepted.update(exec, fields.get(), 100).status().code(),
+              StatusCode::invalid_argument);
     fields.ghost(0) = 0;
     fields.position(0, 0) = std::numeric_limits<real>::quiet_NaN();
     EXPECT_EQ(sph::CellGrid::build(exec, fields.get(), 100).status().code(),
               StatusCode::invalid_argument);
+    EXPECT_EQ(accepted.update(exec, fields.get(), 100).status().code(),
+              StatusCode::invalid_argument);
 }
+
+TEST(SphCellGrid, PositionUpdateRetainsValidatedFieldsAndRejectsInvalidCoordinates) {
+    Kokkos::Serial exec;
+    const Fields fields({{{0, 0, 0}, 2, 10, 0}, {{1, 0, 0}, 3, 20, 1}});
+    const auto grid = checked(sph::CellGrid::build(exec, fields.get(), 4));
+    const Fields shifted({{{0, 0, 0}, 2, 10, 0}, {{2.5, 0, 0}, 3, 20, 1}});
+    const auto updated = checked(grid.update_positions(exec, shifted.position, 4));
+    EXPECT_EQ(updated.cell_begin().extent(0), 3u);
+    compare(updated, {{{0, 0, 0}, 2, 10, 0}, {{2.5, 0, 0}, 3, 20, 1}}, exec);
+    const auto previous = grid.neighbors();
+    std::vector<std::uint64_t> ids;
+    previous.for_each_neighbor(0, [&](LocalIndex slot, double) {
+        ids.push_back(previous.fields().ids(slot));
+    });
+    EXPECT_EQ(ids, (std::vector<std::uint64_t>{20}));
+
+    const auto limit = real{0x1p64};
+    shifted.position(0, 0) = limit;
+    EXPECT_EQ(grid.update_positions(exec, shifted.position, 4).status().code(), StatusCode::unsupported);
+    shifted.position(1, 0) = std::numeric_limits<real>::quiet_NaN();
+    EXPECT_EQ(grid.update_positions(exec, shifted.position, 4).status().code(), StatusCode::invalid_argument);
+}
+
+TEST(SphCellGrid, PositionUpdatesReuseSortedColumnsAndResetNonidentityPermutations) {
+    Kokkos::Serial exec;
+    const std::vector<Particle> initial{{{2.25, .125, 0}, 3, 30, 1},
+                                        {{.75, .25, 0}, 2, 20, 0},
+                                        {{.25, .125, 0}, 1, 10, 0}};
+    const Fields original_source(initial);
+    const auto original = checked(sph::CellGrid::build(exec, original_source.get(), 4));
+    ASSERT_EQ(original.sorted_to_input()(0), 2u);
+    std::vector<Particle> sorted{{{.5, .125, 0}, 1, 10, 0},
+                                  {{1, .25, 0}, 2, 20, 0},
+                                  {{2.5, .125, 0}, 3, 30, 1}};
+    std::vector<sph::CellGrid::StorageGroup> admissions;
+    const auto admit = [&](sph::CellGrid::StorageGroup group, std::size_t)
+        -> Result<sph::CellGrid::Ticket> {
+        admissions.push_back(group);
+        return sph::CellGrid::Ticket{};
+    };
+    const Fields first_source(sorted);
+    const auto first = checked(original.update_positions(exec, first_source.position, 4, admit));
+    // Const input Views may have writable caller aliases. The accepted grid's
+    // copied values, including the newly shared mass column, must not alias them.
+    original_source.mass(0) = 99;
+    original_source.ids(0) = 999;
+    original_source.ghost(0) = 0;
+    first_source.position(0, 0) = 100;
+    for (std::size_t i = 0; i < sorted.size(); ++i) {
+        EXPECT_EQ(first.sorted_to_input()(i), i);
+        EXPECT_EQ(first.input_to_sorted()(i), i);
+    }
+    EXPECT_EQ(first.cell_begin().data(), original.cell_begin().data());
+    EXPECT_EQ(first.fields().mass.data(), original.fields().mass.data());
+    EXPECT_EQ(first.fields().ids.data(), original.fields().ids.data());
+    EXPECT_EQ(first.sorted_to_input().data(), first.input_to_sorted().data());
+    EXPECT_EQ(admissions, (std::vector{sph::CellGrid::StorageGroup::permutations,
+                                      sph::CellGrid::StorageGroup::position}));
+    ASSERT_NO_FATAL_FAILURE(compare(first, sorted, exec));
+
+    for (auto& particle : sorted)
+        particle.position[0] += real{.125};
+    admissions.clear();
+    const auto second = checked(first.update_positions(exec, Fields(sorted).position, 4, admit));
+    EXPECT_EQ(second.cell_begin().data(), first.cell_begin().data());
+    EXPECT_EQ(second.fields().mass.data(), first.fields().mass.data());
+    EXPECT_EQ(second.sorted_to_input().data(), first.sorted_to_input().data());
+    EXPECT_EQ(second.input_to_sorted().data(), first.input_to_sorted().data());
+    EXPECT_EQ(admissions, (std::vector{sph::CellGrid::StorageGroup::position}));
+    ASSERT_NO_FATAL_FAILURE(compare(second, sorted, exec));
+
+    // Exchange cells without changing the bounding box. Mass and ownership must
+    // follow IDs when the positional membership test requires a fresh ordering.
+    sorted[0].position[0] = real{2.875};
+    sorted[2].position[0] = real{.875};
+    const auto crossed = checked(second.update_positions(exec, Fields(sorted).position, 4));
+    EXPECT_EQ(crossed.sorted_to_input()(0), 1u);
+    EXPECT_EQ(crossed.input_to_sorted()(0), 2u);
+    EXPECT_NE(crossed.cell_begin().data(), second.cell_begin().data());
+    EXPECT_EQ(crossed.fields().ids(0), 20u);
+    EXPECT_EQ(crossed.fields().ids(1), 30u);
+    EXPECT_EQ(crossed.fields().ids(2), 10u);
+    ASSERT_NO_FATAL_FAILURE(compare(crossed, sorted, exec));
+    ASSERT_NO_FATAL_FAILURE(compare(original, initial, exec));
+}
+
+TEST(SphCellGrid, PositionUpdatesResolveExternalRemapsWithoutExtraPermutationStorage) {
+    Kokkos::Serial exec;
+    const std::vector<Particle> sorted{{{.25, 0, 0}, 1, 10, 0},
+                                       {{.75, 0, 0}, 2, 20, 0},
+                                       {{2.25, 0, 0}, 3, 30, 1}};
+    auto reversed = sorted;
+    std::reverse(reversed.begin(), reversed.end());
+    const Fields positions(sorted);
+    const auto built = checked(sph::CellGrid::build(exec, positions.get(), 4));
+    const auto remapped = checked(built.update(exec, Fields(reversed).get(), 4));
+    const auto restored = checked(remapped.update(exec, positions.get(), 4));
+    std::vector<sph::CellGrid::StorageGroup> admissions;
+    const auto admit = [&](sph::CellGrid::StorageGroup group, std::size_t)
+        -> Result<sph::CellGrid::Ticket> {
+        admissions.push_back(group);
+        return sph::CellGrid::Ticket{};
+    };
+    const auto check_identity_reuse = [&](const sph::CellGrid& old) {
+        admissions.clear();
+        const auto next = checked(old.update_positions(exec, positions.position, 4, admit));
+        EXPECT_EQ(admissions, (std::vector{sph::CellGrid::StorageGroup::position}));
+        EXPECT_EQ(next.sorted_to_input().data(), old.sorted_to_input().data());
+        EXPECT_EQ(next.input_to_sorted().data(), old.input_to_sorted().data());
+        EXPECT_EQ(next.fields().mass.data(), old.fields().mass.data());
+        for (std::size_t i = 0; i < sorted.size(); ++i) {
+            EXPECT_EQ(next.sorted_to_input()(i), i);
+            EXPECT_EQ(next.input_to_sorted()(i), i);
+        }
+        ASSERT_NO_FATAL_FAILURE(compare(next, sorted, exec));
+    };
+    ASSERT_NO_FATAL_FAILURE(check_identity_reuse(built));
+    ASSERT_NO_FATAL_FAILURE(check_identity_reuse(restored));
+    admissions.clear();
+    const auto next = checked(remapped.update_positions(exec, positions.position, 4, admit));
+    EXPECT_EQ(admissions, (std::vector{sph::CellGrid::StorageGroup::permutations,
+                                      sph::CellGrid::StorageGroup::position}));
+    ASSERT_NO_FATAL_FAILURE(compare(next, sorted, exec));
+    ASSERT_NO_FATAL_FAILURE(compare(remapped, reversed, exec));
+}
+
+TEST(SphCellGrid, PositionUpdateBudgetRejectsIdentityAndPositionBeforePublishing) {
+    constexpr std::size_t limit = 4096, n = 3;
+    constexpr std::size_t identity_bytes = n * sizeof(LocalIndex);
+    constexpr std::size_t position_bytes = 3 * n * sizeof(real);
+    Kokkos::Serial exec;
+    detail::ResourceBudget budget({0, limit});
+    GridAllocations trace(budget);
+    const auto admit = [&](sph::CellGrid::StorageGroup, std::size_t bytes) {
+        return budget.reserve(bytes);
+    };
+    const std::vector<Particle> initial{{{2.25, 0, 0}, 3, 30, 1},
+                                        {{.75, 0, 0}, 2, 20, 0},
+                                        {{.25, 0, 0}, 1, 10, 0}};
+    const auto original = checked(sph::CellGrid::build(exec, Fields(initial).get(), 4, admit));
+    const auto retained = budget.usage().controlled_bytes;
+    const std::vector<Particle> sorted{{{.5, 0, 0}, 1, 10, 0},
+                                       {{1, 0, 0}, 2, 20, 0},
+                                       {{2.5, 0, 0}, 3, 30, 1}};
+    const Fields positions(sorted);
+    auto occupied = checked(budget.reserve(limit - retained - identity_bytes + 1));
+    auto mark = trace.events.size();
+    EXPECT_EQ(original.update_positions(exec, positions.position, 4, admit).status().code(),
+              StatusCode::resource_exhausted);
+    EXPECT_EQ(trace.events.size(), mark);
+    occupied.reset();
+    EXPECT_EQ(budget.usage().controlled_bytes, retained);
+
+    occupied = checked(budget.reserve(limit - retained - identity_bytes - position_bytes + 1));
+    mark = trace.events.size();
+    EXPECT_EQ(original.update_positions(exec, positions.position, 4, admit).status().code(),
+              StatusCode::resource_exhausted);
+    EXPECT_EQ(trace.count(mark, "sph.grid.identity", true), 1u);
+    EXPECT_EQ(trace.count(mark, "sph.grid.identity", false), 1u);
+    EXPECT_EQ(trace.count(mark, "sph.grid.position"), 0u);
+    EXPECT_EQ(trace.count(mark, "sph.grid.mass"), 0u);
+    occupied.reset();
+    EXPECT_EQ(budget.usage().controlled_bytes, retained);
+    ASSERT_NO_FATAL_FAILURE(compare(original, initial, exec));
+
+    {
+        const auto first = checked(original.update_positions(exec, positions.position, 4, admit));
+        const auto first_retained = retained + identity_bytes + position_bytes;
+        EXPECT_EQ(budget.usage().controlled_bytes, first_retained);
+        occupied = checked(budget.reserve(limit - first_retained - position_bytes + 1));
+        mark = trace.events.size();
+        EXPECT_EQ(first.update_positions(exec, positions.position, 4, admit).status().code(),
+                  StatusCode::resource_exhausted);
+        EXPECT_EQ(trace.events.size(), mark);
+        occupied.reset();
+        EXPECT_EQ(budget.usage().controlled_bytes, first_retained);
+        const auto second = checked(first.update_positions(exec, positions.position, 4, admit));
+        EXPECT_EQ(budget.usage().controlled_bytes, first_retained + position_bytes);
+        EXPECT_EQ(second.fields().mass.data(), original.fields().mass.data());
+        EXPECT_EQ(second.input_to_sorted().data(), first.input_to_sorted().data());
+        ASSERT_NO_FATAL_FAILURE(compare(second, sorted, exec));
+    }
+    EXPECT_EQ(budget.usage().controlled_bytes, retained);
+    ASSERT_NO_FATAL_FAILURE(compare(original, initial, exec));
+}
+
 TEST(SphCellGrid, ExactComponentSupportBothDirectionsAndInputOrders) {
     const real inside_two = std::nextafter(real{2}, real{0});
     const real outside_two = std::nextafter(real{2}, real{4});

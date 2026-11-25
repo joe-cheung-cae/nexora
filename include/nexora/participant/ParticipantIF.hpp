@@ -27,8 +27,8 @@ class ParticipantIF {
         const auto status = validate_time_step(time_constraint(), interval.duration());
         if (!status.ok())
             return status;
-        if (!std::isfinite(interval.begin) || !std::isfinite(interval.end) ||
-            interval.end <= interval.begin || interval.end != interval.begin + interval.duration()) {
+        if (!std::isfinite(interval.end) || !(interval.end > interval.begin) ||
+            interval.end != interval.begin + interval.duration()) {
             return {StatusCode::invalid_argument, "step does not produce a finite advancing endpoint"};
         }
         return do_step(interval);
@@ -41,6 +41,12 @@ class ParticipantIF {
     // Success publishes the full requested step and the next state's constraint.
     // Failure releases temporary state and preserves all accepted results.
     virtual Status do_step(const TimeInterval& interval) = 0;
+
+  private:
+    friend class Simulation;
+    // Simulation has checked the clock. Existing participants can keep their
+    // ordinary initialize override; built-in implementations share its body.
+    virtual Status initialize_at_finite_time(double time) { return initialize(time); }
 };
 
 } // namespace nexora

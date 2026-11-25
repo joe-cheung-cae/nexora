@@ -200,6 +200,22 @@ TEST(SimulationTest, ExhaustedTimeDomainPreservesInvalidInputDiagnostics) {
     EXPECT_EQ(positive_bound.message(), "requested step violates participant bounds");
 }
 
+TEST(SimulationTest, UnavailableConstraintIsDistinctFromExhaustedTimeDomain) {
+    TestParticipant participant;
+    participant.constraint.available = false;
+    Simulation simulation(participant);
+    ASSERT_TRUE(simulation.initialize().ok());
+    const auto status = simulation.run(0.25);
+    EXPECT_EQ(status.code(), StatusCode::invalid_state);
+    EXPECT_EQ(status.message(), "participant time constraint is unavailable");
+    EXPECT_EQ(participant.constraint_queries, 1);
+    EXPECT_EQ(participant.evaluations, 0);
+    EXPECT_EQ(participant.publications, 0);
+    EXPECT_EQ(simulation.time().accepted_steps, 0);
+    EXPECT_DOUBLE_EQ(simulation.time().accepted_time, 0.0);
+    ASSERT_TRUE(simulation.finalize().ok());
+}
+
 TEST(SimulationTest, FinalizesAfterInitializationOrFinalizationFailure) {
     TestParticipant broken;
     broken.fail_initialize = true;

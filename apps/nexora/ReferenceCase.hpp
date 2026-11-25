@@ -1,12 +1,15 @@
 #pragma once
 
+#include <cstddef>
 #include <filesystem>
+#include <memory>
 #include <participants/reference/Participant.hpp>
 #include <vector>
 
 namespace nexora::cli {
 struct ReferenceCase {
-    reference::Config config;
+    std::unique_ptr<reference::Participant> participant;
+    std::size_t entities = 0;
     double start = 0.0;
     double end = 0.0;
     // Authoritative requested durations, including a separately validated tail.

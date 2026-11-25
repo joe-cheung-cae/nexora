@@ -7,6 +7,8 @@
 
 namespace nexora::sph {
 
+class WcsphStep3D;
+
 struct FixedWallParticles3D {
     decltype(ParticleFields3D::position) position;
     decltype(ParticleFields3D::mass) mass;
@@ -45,6 +47,12 @@ class SolidWallBoundary3D {
                                                       WallTrajectoryTime3D time) const = 0;
 
   private:
+    friend class ::nexora::sph::WcsphStep3D;
+    // Production assembly validates masses and the combined ID set at its
+    // initial grid boundary. Moving reference positions enter trajectory
+    // arithmetic earlier and must be finite before invoking user motion.
+    static Result<ParticleView> capture_for_grid(const Kokkos::Serial&,
+                                                 const FixedWallParticles3D&, bool moving);
     ParticleView particles_;
 };
 

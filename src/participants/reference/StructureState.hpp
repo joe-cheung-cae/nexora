@@ -36,13 +36,18 @@ template <class View> struct StructureField {
 };
 
 struct StructureBank {
+    // Banks are assembled by StructureState from an admitted logical stamp.
+    class ConstructionKey {
+        friend class StructureState;
+        ConstructionKey() = default;
+    };
     detail::EntityOrder order;
     detail::CsrAdjacency adjacency;
     FieldStamp logical;
     StructureField<StructureIds> ids;
     StructureField<ConstStructureValues> x, q, history;
 
-    StructureBank(detail::EntityOrder, detail::CsrAdjacency, FieldStamp,
+    StructureBank(ConstructionKey, detail::EntityOrder, detail::CsrAdjacency, FieldStamp,
                   const std::array<FieldDescriptor, 4>&, ConstStructureValues,
                   ConstStructureValues, ConstStructureValues);
     void close() noexcept;

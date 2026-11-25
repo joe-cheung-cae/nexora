@@ -37,6 +37,20 @@ class NeighborView3D {
     // Source-centered stencils are also needed for locally reconstructed ghost density.
     template <class Callback>
     void for_each_neighbor_of_slot(LocalIndex self, Callback&& visit) const {
+        for_each_neighbor_impl(self,
+            [&](LocalIndex j, double d2, double, double, double) { visit(j, d2); });
+    }
+
+    // The displacement is position(neighbor) - position(center), using the
+    // same double differences already evaluated by the neighbor cutoff.
+    template <class Callback>
+    void for_each_neighbor_with_displacement(std::size_t row, Callback&& visit) const {
+        for_each_neighbor_impl(owned_slots_(row), std::forward<Callback>(visit));
+    }
+
+  private:
+    template <class Callback>
+    void for_each_neighbor_impl(LocalIndex self, Callback&& visit) const {
         std::array<double, 3> center{};
         std::array<std::size_t, 3> lo{}, hi{};
         for (int axis = 0; axis < 3; ++axis) {
@@ -61,13 +75,12 @@ class NeighborView3D {
                     // A component just outside R can round to R on subtraction.
                     // Only a squared-distance tie can admit that candidate.
                     if (d2 < radius_squared_ || (d2 == radius_squared_ && components_within_support(self, j)))
-                        visit(j, d2);
+                        visit(j, d2, dx, dy, dz);
                 }
             }
         }
     }
 
-  private:
     friend class CellGrid;
     NeighborView3D() = default;
     void swap(NeighborView3D& other) {

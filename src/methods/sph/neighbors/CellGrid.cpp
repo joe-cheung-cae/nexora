@@ -38,13 +38,19 @@ Result<CellGrid::Ticket> reserve_group(
     return admit ? admit(group, bytes) : Result<CellGrid::Ticket>{CellGrid::Ticket{}};
 }
 
-struct PackedValues {
+template <bool CaptureMass = true> struct PackedValues {
     decltype(ParticleFields3D::position)::non_const_type position;
     decltype(ParticleFields3D::mass)::non_const_type mass;
 
     PackedValues(const Kokkos::Serial& exec, std::size_t n)
         : position(Kokkos::view_alloc(exec, Kokkos::WithoutInitializing, "sph.grid.position"), n),
-          mass(Kokkos::view_alloc(exec, Kokkos::WithoutInitializing, "sph.grid.mass"), n) {}
+          mass([&] {
+              if constexpr (CaptureMass)
+                  return decltype(mass)(Kokkos::view_alloc(exec, Kokkos::WithoutInitializing,
+                                                          "sph.grid.mass"), n);
+              else
+                  return decltype(mass){};
+          }()) {}
 
     void gather(std::size_t slot, const ParticleFields3D& input, LocalIndex i) const {
         for (int axis = 0; axis < 3; ++axis)
@@ -78,9 +84,31 @@ Result<CellGrid> CellGrid::build(const Kokkos::Serial& exec, const ParticleField
     return prepare(exec, input, max_cells, nullptr, admit, smoothing_length);
 }
 
+Result<CellGrid> CellGrid::build_initial(const Kokkos::Serial& exec, const ParticleFields3D& input,
+                                        std::size_t fluid_count, std::size_t max_cells,
+                                        const AdmitStorage& admit, double smoothing_length) {
+    return prepare(exec, input, max_cells, nullptr, admit, smoothing_length,
+                   InputKind::initial, fluid_count);
+}
+
+Result<CellGrid> CellGrid::rebuild_committed(const Kokkos::Serial& exec, const ParticleFields3D& input,
+                                            std::size_t owned_count, std::size_t max_cells,
+                                            const AdmitStorage& admit, double smoothing_length) {
+    return prepare(exec, input, max_cells, nullptr, admit, smoothing_length,
+                   InputKind::committed, owned_count);
+}
+
 Result<CellGrid> CellGrid::update(const Kokkos::Serial& exec, const ParticleFields3D& input,
                                   std::size_t max_cells, const AdmitStorage& admit) const {
     return prepare(exec, input, max_cells, this, admit, smoothing_length());
+}
+
+Result<CellGrid> CellGrid::update_positions(const Kokkos::Serial& exec,
+                                           const decltype(ParticleFields3D::position)& position,
+                                           std::size_t max_cells, const AdmitStorage& admit) const {
+    const auto& old = fields();
+    return prepare(exec, {position, old.mass, old.ids, old.ghost}, max_cells, this, admit,
+                   smoothing_length(), InputKind::positions);
 }
 
 std::int64_t NeighborView3D::absolute_bin(double x) const {
@@ -105,29 +133,71 @@ std::size_t CellGrid::cell_of(const ParticleFields3D& fields, std::size_t i) con
     return bin[0] + query_.shape_[0] * (bin[1] + query_.shape_[1] * bin[2]);
 }
 
-// The new bounding box matches the old one. Verify membership by ID before sharing offsets.
+// The new bounding box matches the old one. External updates establish membership
+// by ID; position-only updates retain the old sorted slots by contract.
+template <bool PositionsOnly>
 Result<bool> CellGrid::try_reuse(const Kokkos::Serial& exec, const ParticleFields3D& input,
                                  const CellGrid& old, const AdmitStorage& admit) {
     const auto n = input.ids.extent(0);
     const Policy particles(exec, 0, n);
     bool reordered = false, reusable = true;
-    Kokkos::parallel_for("sph.grid.check_membership", particles, [&](std::size_t i) {
-        const auto slot = old.input_to_sorted_(i);
-        if (old.query_.fields_.ids(slot) != input.ids(i)) {
-            reordered = true;
-            return;
+    bool existing_identity = old.input_order_ == InputOrder::identity;
+    if constexpr (PositionsOnly) {
+        // update_positions is defined in this grid's sorted slots. Identity,
+        // ownership and mass are the immutable columns of that same snapshot.
+        const auto contains_slot = [&](std::size_t slot) {
+            const auto c = cell_of(input, slot);
+            return slot >= old.query_.cell_begin_(c) && slot < old.query_.cell_begin_(c + 1);
+        };
+        if (old.input_order_ == InputOrder::unknown) {
+            // An external grid never needed this metadata. Resolve it inside
+            // the required new-position membership traversal, without a scan.
+            std::size_t reordered_slots{};
+            Kokkos::parallel_reduce("sph.grid.check_membership", particles,
+                [&](std::size_t slot, std::size_t& reordered) {
+                    if (!contains_slot(slot))
+                        reusable = false;
+                    reordered += old.sorted_to_input_(slot) != slot;
+                }, reordered_slots);
+            existing_identity = reordered_slots == 0;
+        } else {
+            Kokkos::parallel_for("sph.grid.check_membership", particles, [&](std::size_t slot) {
+                if (!contains_slot(slot))
+                    reusable = false;
+            });
         }
-        const auto c = cell_of(input, i);
-        if (slot < old.query_.cell_begin_(c) || slot >= old.query_.cell_begin_(c + 1) ||
-            old.query_.fields_.ghost(slot) != input.ghost(i))
-            reusable = false;
-    });
+    } else {
+        Kokkos::parallel_for("sph.grid.check_membership", particles, [&](std::size_t i) {
+            const auto slot = old.input_to_sorted_(i);
+            if (old.query_.fields_.ids(slot) != input.ids(i)) {
+                reordered = true;
+                return;
+            }
+            const auto c = cell_of(input, i);
+            if (slot < old.query_.cell_begin_(c) || slot >= old.query_.cell_begin_(c + 1) ||
+                old.query_.fields_.ghost(slot) != input.ghost(i))
+                reusable = false;
+        });
+    }
     if (!reusable)
         return false;
 
     auto permutations_ticket = old.permutations_ticket_;
     Indices to_input = old.sorted_to_input_, from_input = old.input_to_sorted_;
-    if (reordered) {
+    auto input_order = PositionsOnly ? InputOrder::identity : old.input_order_;
+    if (PositionsOnly && !existing_identity) {
+        // The first update from a reordered input needs an identity mapping;
+        // subsequent updates share it instead of allocating permutations again.
+        auto ticket = reserve_group(admit, StorageGroup::permutations, {{n, sizeof(LocalIndex)}});
+        if (!ticket.ok())
+            return ticket.status();
+        permutations_ticket = std::move(ticket).value();
+        Slots identity(Kokkos::view_alloc(exec, Kokkos::WithoutInitializing, "sph.grid.identity"), n);
+        Kokkos::parallel_for("sph.grid.identity", particles,
+                             [&](std::size_t i) { identity(i) = static_cast<LocalIndex>(i); });
+        to_input = identity;
+        from_input = identity;
+    } else if (reordered) {
         // Cell-local IDs are sorted and unique. n is a valid missing marker because
         // particle slots range from zero to n-1, even at full LocalIndex capacity.
         auto ticket = reserve_group(admit, StorageGroup::permutations, {{n, 2 * sizeof(LocalIndex)}});
@@ -158,6 +228,7 @@ Result<bool> CellGrid::try_reuse(const Kokkos::Serial& exec, const ParticleField
             sorted(first) = static_cast<LocalIndex>(i);
             inverse(i) = first;
         });
+        input_order = InputOrder::unknown;
         exec.fence("sph.grid.remap_checked");
         if (!reusable)
             return false;
@@ -168,75 +239,124 @@ Result<bool> CellGrid::try_reuse(const Kokkos::Serial& exec, const ParticleField
     auto position = reserve_group(admit, StorageGroup::position, {{n, 3 * sizeof(real)}});
     if (!position.ok())
         return position.status();
-    auto mass = reserve_group(admit, StorageGroup::mass, {{n, sizeof(real)}});
+    auto mass = [&] {
+        if constexpr (PositionsOnly)
+            return Result<Ticket>{old.query_.field_storage_[1]};
+        else
+            return reserve_group(admit, StorageGroup::mass, {{n, sizeof(real)}});
+    }();
     if (!mass.ok())
         return mass.status();
 
-    const PackedValues values(exec, n);
-    Kokkos::parallel_for("sph.grid.refresh_values", particles,
-                         [&](std::size_t s) { values.gather(s, input, to_input(s)); });
+    const PackedValues<!PositionsOnly> values(exec, n);
+    if constexpr (PositionsOnly) {
+        Kokkos::parallel_for("sph.grid.refresh_positions", particles, [&](std::size_t s) {
+            for (int axis = 0; axis < 3; ++axis)
+                values.position(s, axis) = input.position(s, axis);
+        });
+    } else {
+        Kokkos::parallel_for("sph.grid.refresh_values", particles,
+                             [&](std::size_t s) { values.gather(s, input, to_input(s)); });
+    }
     exec.fence("sph.grid.updated_snapshot_ready");
     query_.field_storage_ = {std::move(position).value(), std::move(mass).value(),
                              old.query_.field_storage_[2]};
     query_.cells_ticket_ = old.query_.cells_ticket_;
     permutations_ticket_ = std::move(permutations_ticket);
-    query_.fields_ = {values.position, values.mass, old.query_.fields_.ids, old.query_.fields_.ghost};
+    query_.fields_ = {values.position, PositionsOnly ? old.query_.fields_.mass : values.mass,
+                     old.query_.fields_.ids, old.query_.fields_.ghost};
     query_.cell_begin_ = old.query_.cell_begin_;
     query_.owned_slots_ = old.query_.owned_slots_;
     sorted_to_input_ = to_input;
     input_to_sorted_ = from_input;
+    input_order_ = input_order;
     return true;
 }
 
 Result<CellGrid> CellGrid::prepare(const Kokkos::Serial& exec, const ParticleFields3D& input,
                                    std::size_t max_cells, const CellGrid* previous,
-                                   const AdmitStorage& admit, double smoothing_length) {
+                                   const AdmitStorage& admit, double smoothing_length,
+                                   InputKind kind, std::size_t owned_count) {
     if (!Kokkos::is_initialized() || Kokkos::is_finalized())
         return Status{StatusCode::invalid_state, "3D SPH grid requires active Kokkos"};
     const auto n = input.position.extent(0);
-    if (input.mass.extent(0) != n || input.ids.extent(0) != n || input.ghost.extent(0) != n)
-        return Status{StatusCode::invalid_argument, "3D SPH particle field extents disagree"};
-    if (n > std::numeric_limits<LocalIndex>::max() ||
-        n > std::numeric_limits<std::size_t>::max() / std::max(sizeof(SortEntry), 3 * sizeof(real)))
-        return Status{StatusCode::resource_exhausted,
-                      "3D SPH particle count exceeds index capacity"};
-    if (n &&
-        (!input.position.data() || !input.mass.data() || !input.ids.data() || !input.ghost.data()))
-        return Status{StatusCode::invalid_argument, "3D SPH input has a null particle field"};
+    if (kind == InputKind::external) {
+        if (input.mass.extent(0) != n || input.ids.extent(0) != n || input.ghost.extent(0) != n)
+            return Status{StatusCode::invalid_argument, "3D SPH particle field extents disagree"};
+        if (n &&
+            (!input.position.data() || !input.mass.data() || !input.ids.data() || !input.ghost.data()))
+            return Status{StatusCode::invalid_argument, "3D SPH input has a null particle field"};
+    } else if (kind == InputKind::positions) {
+        if (n != previous->fields().position.extent(0) || (n && !input.position.data()))
+            return Status{StatusCode::invalid_argument, "3D SPH position update has invalid storage or extent"};
+    }
+    // External input counts are checked on reception. A position update has
+    // the accepted count; committed geometry has already passed this capacity.
+    if (kind == InputKind::external || kind == InputKind::initial) {
+        if (n > std::numeric_limits<LocalIndex>::max() ||
+            n > std::numeric_limits<std::size_t>::max() / std::max(sizeof(SortEntry), 3 * sizeof(real)))
+            return Status{StatusCode::resource_exhausted,
+                          "3D SPH particle count exceeds index capacity"};
+    }
 
     CellGrid grid;
     grid.query_.smoothing_length_ = smoothing_length;
     const double radius = grid.support_radius();
-    grid.query_.radius_squared_ = radius * radius;
-    if (!(smoothing_length > 0) || !(grid.query_.radius_squared_ > 0) ||
-        !std::isfinite(grid.query_.radius_squared_))
-        return Status{StatusCode::invalid_argument,
-                      "3D SPH requires positive smoothing length with finite positive squared support"};
+    if (previous) {
+        grid.query_.radius_squared_ = previous->query_.radius_squared_;
+    } else {
+        grid.query_.radius_squared_ = radius * radius;
+        if (kind != InputKind::committed &&
+            ((kind == InputKind::external && !(smoothing_length > 0)) ||
+             !(grid.query_.radius_squared_ > 0) || !std::isfinite(grid.query_.radius_squared_)))
+            return Status{StatusCode::invalid_argument,
+                          "3D SPH requires positive smoothing length with finite positive squared support"};
+    }
     const double bin_limit = 0x1p63 * radius;
     grid.query_.origin_.fill(std::numeric_limits<std::int64_t>::max());
     std::array<std::int64_t, 3> largest;
     largest.fill(std::numeric_limits<std::int64_t>::min());
-    std::size_t owned = 0;
+    std::size_t owned = kind == InputKind::positions ? previous->owned_slots().extent(0) : owned_count;
     bool invalid_field = false, unsupported_bin = false;
     const Policy particles(exec, 0, n);
-    // Serial preflight computes the bounding box before allocating the dense table.
-    Kokkos::parallel_for("sph.grid.validate", particles, [&](std::size_t i) {
-        if (!std::isfinite(input.mass(i)) || input.mass(i) <= 0 || input.ghost(i) > 1)
-            invalid_field = true;
-        owned += input.ghost(i) == 0;
-        for (int axis = 0; axis < 3; ++axis) {
-            const double x = input.position(i, axis);
-            if (!std::isfinite(x)) {
-                invalid_field = true;
-            } else if (x < -bin_limit || x >= bin_limit) {
-                unsupported_bin = true;
-            } else {
+    // Select the reception contract once before dispatch. Every particle then
+    // executes only that entry's mass/ownership/coordinate requirements.
+    const auto preflight = [&]<InputKind Kind>() {
+        Kokkos::parallel_for("sph.grid.validate", particles, [&](std::size_t i) {
+            if constexpr (Kind == InputKind::external) {
+                const real mass = input.mass(i);
+                if (!std::isfinite(mass) || mass <= 0 || input.ghost(i) > 1)
+                    invalid_field = true;
+                owned += input.ghost(i) == 0;
+            } else if constexpr (Kind == InputKind::initial) {
+                // Assembled masses enter once; ownership is already established.
+                const real mass = input.mass(i);
+                if (!std::isfinite(mass) || mass <= 0)
+                    invalid_field = true;
+            }
+            for (int axis = 0; axis < 3; ++axis) {
+                const double x = input.position(i, axis);
+                if constexpr (Kind != InputKind::committed) {
+                    if (!(x >= -bin_limit && x < bin_limit)) {
+                        if (std::isfinite(x))
+                            unsupported_bin = true;
+                        else
+                            invalid_field = true;
+                        continue;
+                    }
+                }
                 const auto bin = grid.query_.absolute_bin(x);
                 grid.query_.origin_[axis] = std::min(grid.query_.origin_[axis], bin);
                 largest[axis] = std::max(largest[axis], bin);
             }
-        }
-    });
+        });
+    };
+    switch (kind) {
+    case InputKind::external: preflight.operator()<InputKind::external>(); break;
+    case InputKind::positions: preflight.operator()<InputKind::positions>(); break;
+    case InputKind::initial: preflight.operator()<InputKind::initial>(); break;
+    case InputKind::committed: preflight.operator()<InputKind::committed>(); break;
+    }
     if (invalid_field)
         return Status{StatusCode::invalid_argument, "invalid 3D SPH position, mass or ghost flag"};
     if (unsupported_bin)
@@ -260,7 +380,8 @@ Result<CellGrid> CellGrid::prepare(const Kokkos::Serial& exec, const ParticleFie
         if (previous && previous->query_.fields_.ids.extent(0) == n && previous->query_.origin_ == grid.query_.origin_ &&
             previous->query_.shape_ == grid.query_.shape_ && previous->query_.owned_slots_.extent(0) == owned &&
             previous->query_.cell_begin_.extent(0) == cells + 1) {
-            auto reuse = grid.try_reuse(exec, input, *previous, admit);
+            auto reuse = kind == InputKind::positions ? grid.try_reuse<true>(exec, input, *previous, admit)
+                                                     : grid.try_reuse<false>(exec, input, *previous, admit);
             if (!reuse.ok())
                 return reuse.status();
             if (reuse.value())
@@ -298,21 +419,23 @@ Result<CellGrid> CellGrid::prepare(const Kokkos::Serial& exec, const ParticleFie
             keys(i) = {grid.cell_of(input, i), input.ids(i), static_cast<LocalIndex>(i)};
         });
         if (n > 1) {
-            Kokkos::sort(exec, keys,
-                         [](const SortEntry& a, const SortEntry& b) { return a.id < b.id; });
-            bool duplicate = false;
-            Kokkos::parallel_for("sph.grid.unique_ids", Policy(exec, 1, n), [&](std::size_t i) {
-                if (keys(i - 1).id == keys(i).id)
-                    duplicate = true;
-            });
-            if (duplicate)
-                return Status{StatusCode::invalid_argument, "3D SPH particle IDs must be unique"};
+            if (kind == InputKind::external || kind == InputKind::initial) {
+                Kokkos::sort(exec, keys,
+                             [](const SortEntry& a, const SortEntry& b) { return a.id < b.id; });
+                bool duplicate = false;
+                Kokkos::parallel_for("sph.grid.unique_ids", Policy(exec, 1, n), [&](std::size_t i) {
+                    if (keys(i - 1).id == keys(i).id)
+                        duplicate = true;
+                });
+                if (duplicate)
+                    return Status{StatusCode::invalid_argument, "3D SPH particle IDs must be unique"};
+            }
             Kokkos::sort(exec, keys, [](const SortEntry& a, const SortEntry& b) {
                 return a.cell == b.cell ? a.id < b.id : a.cell < b.cell;
             });
         }
 
-        const PackedValues values(exec, n);
+        const PackedValues<> values(exec, n);
         decltype(input.ids)::non_const_type ids(
             Kokkos::view_alloc(exec, Kokkos::WithoutInitializing, "sph.grid.ids"), n);
         decltype(input.ghost)::non_const_type ghost(
@@ -323,7 +446,7 @@ Result<CellGrid> CellGrid::prepare(const Kokkos::Serial& exec, const ParticleFie
         Slots rows(Kokkos::view_alloc(exec, Kokkos::WithoutInitializing, "sph.grid.owned_slots"),
                    owned);
         Slots begin(Kokkos::view_alloc(exec, "sph.grid.cell_begin"), cells + 1);
-        Kokkos::parallel_for("sph.grid.gather", particles, [&](std::size_t s) {
+        const auto gather = [&](std::size_t s) {
             const auto key = keys(s);
             sorted(s) = key.input;
             inverse(key.input) = static_cast<LocalIndex>(s);
@@ -331,7 +454,17 @@ Result<CellGrid> CellGrid::prepare(const Kokkos::Serial& exec, const ParticleFie
             ids(s) = key.id;
             ghost(s) = input.ghost(key.input);
             ++begin(key.cell);
-        });
+            return key.input;
+        };
+        if (kind == InputKind::external) {
+            Kokkos::parallel_for("sph.grid.gather", particles, [&](std::size_t s) { gather(s); });
+        } else {
+            std::size_t reordered_slots{};
+            Kokkos::parallel_reduce("sph.grid.gather", particles,
+                [&](std::size_t s, std::size_t& reordered) { reordered += gather(s) != s; },
+                reordered_slots);
+            grid.input_order_ = reordered_slots ? InputOrder::nonidentity : InputOrder::identity;
+        }
         exec.fence("sph.grid.keys_consumed");
         keys = {};
         keys_ticket.value().reset();

@@ -92,7 +92,7 @@ FieldDescriptor density_field(FieldAccess access) {
 
 ReadField<ConstView<real>> bind_read(ConstView<real> view, FieldDescriptor field, FieldStamp stamp) {
     stamp.storage_incarnation = 0;
-    auto issuer = require(FieldIssuer::create(view, stamp));
+    auto issuer = require(FieldIssuer::create_at_validated_time(view, stamp));
     const std::array axes{FieldAxis{view.extent(0)}};
     return require(issuer.read(view, field, issuer.stamp(), {field.association, field.units, axes}));
 }
@@ -204,13 +204,19 @@ Participant::Participant(Config config, ParticipantId id, ResourceLimits limits)
     : config_(std::move(config)), id_(id), budget_(limits) {}
 
 Status Participant::initialize(double initial_time) {
+    if (!std::isfinite(initial_time))
+        return {StatusCode::invalid_argument, "invalid SPH initial time"};
+    return initialize_at_finite_time(initial_time);
+}
+
+Status Participant::initialize_at_finite_time(double initial_time) {
     if (accepted_ || finalized_ || !Kokkos::is_initialized() || Kokkos::is_finalized())
         return {StatusCode::invalid_state, "SPH initialization requires a new participant and active Kokkos"};
     const auto count = config_.column_ids.size();
-    if (!std::isfinite(initial_time) || config_.row_ids.empty() ||
+    if (config_.row_ids.empty() ||
         config_.positions.size() != count || config_.masses.size() != count ||
         config_.ghost.size() != count || config_.boundary.size() != count)
-        return {StatusCode::invalid_argument, "invalid SPH initial time or field extents"};
+        return {StatusCode::invalid_argument, "invalid SPH initial field extents"};
     try {
         const auto rows_count = config_.row_ids.size();
         const auto edges = config_.indices.size();
@@ -268,7 +274,7 @@ Status Participant::do_step(const TimeInterval& interval) {
         {
             auto write_stamp = stamp;
             write_stamp.accepted = false;
-            auto issuer = require(FieldIssuer::create(values, write_stamp));
+            auto issuer = require(FieldIssuer::create_at_validated_time(values, write_stamp));
             const std::array axes{FieldAxis{count}};
             const auto write = require(issuer.write(values, density_field(FieldAccess::overwrite),
                                                     issuer.stamp(), {Association::particle, "kg/m", axes},

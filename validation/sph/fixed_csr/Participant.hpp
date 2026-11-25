@@ -96,6 +96,7 @@ class Participant final : public ParticipantIF {
   private:
     using Geometry = Snapshot::Geometry;
     static Snapshot layout_snapshot(const std::shared_ptr<const Geometry>& geometry);
+    Status initialize_at_finite_time(double time) override;
     Status do_step(const TimeInterval& interval) override;
 
     Config config_;

@@ -10,8 +10,18 @@ using Vector = std::array<double, 3>;
 Vector cross(const Vector& a, const Vector& b) {
     return {a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]};
 }
-bool finite(const Vector& v) {
-    return std::all_of(v.begin(), v.end(), [](double x) { return std::isfinite(x); });
+std::optional<std::array<real, 3>> store_vector(const Vector& value) {
+    std::array<real, 3> stored;
+    for (int k = 0; k < 3; ++k) {
+        if (!(std::abs(value[k]) <= std::numeric_limits<real>::max()))
+            return std::nullopt;
+        stored[k] = static_cast<real>(value[k]);
+    }
+    return stored;
+}
+Vector arm_at(const std::array<real, 3>& reference, const Vector& center) {
+    return {double(reference[0]) - center[0], double(reference[1]) - center[1],
+            double(reference[2]) - center[2]};
 }
 double periodic_phase(WallTrajectoryTime3D time, double period) {
     const auto initial = std::fmod(time.initial_phase, period);
@@ -67,128 +77,197 @@ template <class F, class... Args> auto call_trajectory(const F& f, Args... args)
 } // namespace
 
 PrescribedMovingWall3D::PrescribedMovingWall3D(ParticleView particles, PrescribedWallTrajectory3D trajectory)
-    : SolidWallBoundary3D(std::move(particles)), trajectory_(std::move(trajectory)) {}
+    : SolidWallBoundary3D(std::move(particles)), trajectory_(std::move(trajectory)),
+      last_elapsed_(inward_difference(trajectory_.last_phase, trajectory_.initial_phase)) {}
 
 bool PrescribedMovingWall3D::in_domain(WallTrajectoryTime3D time) const {
     // Anchor the domain at initialization. A large initial phase can round a
     // still-interior sample up to last_phase if the two clock components are added first.
     const auto origin = time.initial_phase;
-    return origin == trajectory_.initial_phase && std::isfinite(origin) &&
+    return origin == trajectory_.initial_phase &&
            origin >= trajectory_.first_phase && origin <= trajectory_.last_phase &&
-           time.elapsed >= 0 && time.elapsed <= inward_difference(trajectory_.last_phase, origin) &&
-           std::isfinite(origin + time.elapsed);
+           time.elapsed >= 0 && std::isfinite(origin + time.elapsed) &&
+           time.elapsed <= last_elapsed_;
 }
 
 Status PrescribedMovingWall3D::validate() const {
+    return initial_step_limit().status();
+}
+
+Result<double> PrescribedMovingWall3D::initial_step_limit() const {
     if (!trajectory_.motion ||
         !(trajectory_.period >= 0 && std::isfinite(trajectory_.period)) ||
         !(trajectory_.time_resolution >= 0 && std::isfinite(trajectory_.time_resolution)))
-        return {StatusCode::invalid_argument, "invalid WCSPH moving wall trajectory"};
-    const auto limit = maximum_sample_step(initial_time());
-    return limit.status();
+        return Status{StatusCode::invalid_argument, "invalid WCSPH moving wall trajectory"};
+    return maximum_sample_step(initial_time());
 }
 
 Result<WallTrajectoryTime3D> PrescribedMovingWall3D::advance_time(
     WallTrajectoryTime3D start, double dt, double certified_limit) const {
+    if (!in_domain(start))
+        return Status{StatusCode::numerical_failure, "WCSPH wall time span exceeds trajectory certification"};
+    return advance_endpoint(start, dt, certified_limit);
+}
+
+Result<WallTrajectoryTime3D> PrescribedMovingWall3D::advance_endpoint(
+    WallTrajectoryTime3D start, double dt, double limit) const {
     const WallTrajectoryTime3D end{start.initial_phase, start.elapsed + dt};
     const double delta = end.elapsed - start.elapsed;
-    if (!in_domain(start) || !in_domain(end) || !(delta > 0 && delta <= certified_limit) ||
+    if (!(delta > 0 && delta <= limit && end.elapsed <= last_elapsed_) ||
+        !std::isfinite(end.initial_phase + end.elapsed) ||
         !(std::abs(delta - dt) <= trajectory_.time_resolution))
         return Status{StatusCode::numerical_failure, "WCSPH wall time span exceeds trajectory certification"};
     return end;
 }
 
+Result<std::pair<WallTrajectoryTime3D, double>> PrescribedMovingWall3D::advance_certified_time(
+    WallTrajectoryTime3D start, double dt, double limit) const {
+    const auto end = advance_endpoint(start, dt, limit);
+    if (!end.ok())
+        return end.status();
+    const auto next_limit = step_limit_in_domain(end.value());
+    if (!next_limit.ok())
+        return next_limit.status();
+    return std::pair{end.value(), next_limit.value()};
+}
+
 Result<double> PrescribedMovingWall3D::maximum_sample_step(WallTrajectoryTime3D time) const {
     if (!in_domain(time))
         return Status{StatusCode::invalid_argument, "WCSPH wall cannot certify this trajectory time"};
-    const auto span = trajectory_.sample_step_limit;
-    if (!(span > 0 && std::isfinite(span)))
+    if (!(trajectory_.sample_step_limit > 0 && std::isfinite(trajectory_.sample_step_limit)))
         return Status{StatusCode::invalid_argument,
                       "WCSPH wall requires a finite positive sampling limit valid throughout its trajectory"};
+    return step_limit_in_domain(time);
+}
+
+Result<double> PrescribedMovingWall3D::step_limit_in_domain(WallTrajectoryTime3D time) const {
     // An inward-rounded last elapsed value can still be strictly inside the domain.
     const double width = trajectory_.last_phase - time.initial_phase;
     if (time.elapsed == width &&
         difference_residual(trajectory_.last_phase, time.initial_phase, width) == 0)
         return 0.;
-    const double end_elapsed = inward_difference(trajectory_.last_phase, time.initial_phase);
-    const double remaining = inward_difference(end_elapsed, time.elapsed);
-    const double safe = std::min(span, remaining);
+    const double remaining = inward_difference(last_elapsed_, time.elapsed);
+    const double safe = std::min(trajectory_.sample_step_limit, remaining);
     const double next_elapsed = std::nextafter(time.elapsed, std::numeric_limits<double>::infinity());
     if (!(next_elapsed - time.elapsed <= safe))
         return Status{StatusCode::numerical_failure, "WCSPH wall has no positive remaining trajectory interval"};
     return safe;
 }
 
-Result<RigidWallMotion3D> PrescribedMovingWall3D::motion_at(WallTrajectoryTime3D time) const {
-    if (!in_domain(time) || !trajectory_.motion)
-        return Status{StatusCode::invalid_argument, "WCSPH wall sample outside its trajectory"};
+Result<SampledWallMotion3D>
+PrescribedMovingWall3D::motion_at_certified_time(WallTrajectoryTime3D time, WallMotionUse3D use) const {
     const double phase = trajectory_.period > 0 ? periodic_phase(time, trajectory_.period)
                                                 : time.initial_phase + time.elapsed;
     auto sampled = call_trajectory(trajectory_.motion, time, phase);
     if (!sampled.ok())
         return sampled.status();
-    auto& m = sampled.value();
-    const double axis_scale = std::max({std::abs(m.axis[0]), std::abs(m.axis[1]), std::abs(m.axis[2])});
-    if (!finite(m.translation) || !finite(m.velocity) || !finite(m.acceleration) ||
-        !finite(m.center) || !finite(m.axis) || axis_scale == 0 || !std::isfinite(m.angle) ||
-        !std::isfinite(m.angular_speed) || !std::isfinite(m.angular_acceleration))
-        return Status{StatusCode::numerical_failure, "nonfinite WCSPH rigid motion or invalid rotation axis"};
-    // The axis is a direction. Rescale before normalizing so even finite subnormal
-    // or near-maximum components represent the same rotation as a unit direction.
+    return SampledWallMotion3D{std::move(sampled).value(), use};
+}
+
+SampledWallMotion3D::SampledWallMotion3D(RigidWallMotion3D sampled, WallMotionUse3D use)
+    : motion(std::move(sampled)) {
+    auto& m = motion;
+    if ((use == WallMotionUse3D::position && m.angle == 0) ||
+        (use == WallMotionUse3D::velocity && m.angular_speed == 0) ||
+        (m.angle == 0 && m.angular_speed == 0 && m.angular_acceleration == 0))
+        return;
+
+    // Rescaling preserves finite subnormal and near-maximum directions.
+    // An invalid axis propagates through any rotation that actually uses it.
+    const double scale = std::max({std::abs(m.axis[0]), std::abs(m.axis[1]), std::abs(m.axis[2])});
     for (auto& component : m.axis)
-        component /= axis_scale;
+        component /= scale;
     const double norm = std::hypot(m.axis[0], m.axis[1], m.axis[2]);
     for (auto& component : m.axis)
         component /= norm;
-    return sampled;
+    if (m.angle != 0) {
+        sine = std::sin(m.angle);
+        const double half_sine = std::sin(.5 * m.angle);
+        one_minus_cosine = 2 * half_sine * half_sine;
+    }
 }
 
-Result<WallKinematics3D> PrescribedMovingWall3D::apply(const std::array<real, 3>& reference,
-                                                        const RigidWallMotion3D& m) {
-    Vector position{}, velocity = m.velocity, acceleration = m.acceleration;
-    if (m.angle == 0 && m.angular_speed == 0 && m.angular_acceleration == 0) {
-        for (int k = 0; k < 3; ++k) position[k] = double(reference[k]) + m.translation[k];
-    } else {
-        Vector arm{};
-        for (int k = 0; k < 3; ++k) arm[k] = double(reference[k]) - m.center[k];
-        const auto tangent = cross(m.axis, arm);
-        const auto normal = cross(m.axis, tangent);
-        const double sine = std::sin(m.angle), half_sine = std::sin(.5 * m.angle);
-        const double one_minus_cosine = 2 * half_sine * half_sine;
-        Vector rotated{};
-        for (int k = 0; k < 3; ++k) {
-            const double displacement = sine * tangent[k] + one_minus_cosine * normal[k];
-            rotated[k] = arm[k] + displacement;
-            position[k] = double(reference[k]) + m.translation[k] + displacement;
-        }
-        const auto direction = cross(m.axis, rotated);
-        Vector rotation_velocity{};
-        for (int k = 0; k < 3; ++k) {
-            rotation_velocity[k] = m.angular_speed * direction[k];
-            velocity[k] += rotation_velocity[k];
-        }
-        const auto centripetal = cross(m.axis, rotation_velocity);
+Vector SampledWallMotion3D::displacement(const Vector& arm) const {
+    const auto tangent = cross(motion.axis, arm);
+    const auto normal = cross(motion.axis, tangent);
+    Vector result;
+    for (int k = 0; k < 3; ++k)
+        result[k] = sine * tangent[k] + one_minus_cosine * normal[k];
+    return result;
+}
+
+Vector SampledWallMotion3D::direction(const std::array<real, 3>& reference) const {
+    auto rotated = arm_at(reference, motion.center);
+    if (motion.angle != 0) {
+        const auto offset = displacement(rotated);
         for (int k = 0; k < 3; ++k)
-            acceleration[k] += m.angular_acceleration * direction[k] + m.angular_speed * centripetal[k];
+            rotated[k] += offset[k];
     }
-    WallKinematics3D sample;
-    for (int k = 0; k < 3; ++k) {
-        constexpr double max = std::numeric_limits<real>::max();
-        if (!(std::abs(position[k]) <= max && std::abs(velocity[k]) <= max && std::isfinite(acceleration[k])))
-            return Status{StatusCode::numerical_failure, "WCSPH wall sample exceeds field range"};
-        sample.position[k] = static_cast<real>(position[k]);
-        sample.velocity[k] = static_cast<real>(velocity[k]);
-        sample.acceleration[k] = acceleration[k];
+    return cross(motion.axis, rotated);
+}
+
+Vector SampledWallMotion3D::position(const std::array<real, 3>& reference) const {
+    Vector position;
+    for (int k = 0; k < 3; ++k)
+        position[k] = double(reference[k]) + motion.translation[k];
+    if (motion.angle != 0) {
+        const auto offset = displacement(arm_at(reference, motion.center));
+        for (int k = 0; k < 3; ++k)
+            position[k] += offset[k];
     }
-    return sample;
+    return position;
+}
+
+std::optional<std::array<real, 3>>
+SampledWallMotion3D::checked_position(const std::array<real, 3>& reference) const {
+    return store_vector(position(reference));
+}
+
+std::optional<std::array<real, 3>> SampledWallMotion3D::velocity(const std::array<real, 3>& reference) {
+    if (motion.angular_speed == 0) {
+        // Every particle has the same translational velocity at this stage.
+        // Cache even a failed conversion so a later Serial row cannot repeat it.
+        if (!checked_translation_velocity_) {
+            translation_velocity_ = store_vector(motion.velocity);
+            checked_translation_velocity_ = true;
+        }
+        return translation_velocity_;
+    }
+    const auto tangent = direction(reference);
+    auto velocity = motion.velocity;
+    for (int k = 0; k < 3; ++k)
+        velocity[k] += motion.angular_speed * tangent[k];
+    return store_vector(velocity);
+}
+
+Vector SampledWallMotion3D::acceleration(const std::array<real, 3>& reference) const {
+    auto acceleration = motion.acceleration;
+    if (motion.angular_speed != 0 || motion.angular_acceleration != 0) {
+        const auto tangent = direction(reference);
+        Vector rotational_velocity;
+        for (int k = 0; k < 3; ++k)
+            rotational_velocity[k] = motion.angular_speed * tangent[k];
+        const auto centripetal = cross(motion.axis, rotational_velocity);
+        for (int k = 0; k < 3; ++k)
+            acceleration[k] += motion.angular_acceleration * tangent[k] + motion.angular_speed * centripetal[k];
+    }
+    return acceleration;
 }
 
 Result<WallKinematics3D> PrescribedMovingWall3D::sample_reference(
     const std::array<real, 3>& reference, WallTrajectoryTime3D time) const {
-    const auto motion = motion_at(time);
+    if (!in_domain(time) || !trajectory_.motion)
+        return Status{StatusCode::invalid_argument, "WCSPH wall sample outside its trajectory"};
+    auto motion = motion_at_certified_time(time);
     if (!motion.ok())
         return motion.status();
-    return apply(reference, motion.value());
+    auto& sample = motion.value();
+    const auto position = sample.checked_position(reference), velocity = sample.velocity(reference);
+    const auto acceleration = sample.acceleration(reference);
+    if (!position || !velocity ||
+        !std::all_of(acceleration.begin(), acceleration.end(), [](double a) { return std::isfinite(a); }))
+        return Status{StatusCode::numerical_failure, "WCSPH wall sample exceeds field range"};
+    return WallKinematics3D{*position, *velocity, acceleration};
 }
 
 } // namespace nexora::sph::SphBoundary

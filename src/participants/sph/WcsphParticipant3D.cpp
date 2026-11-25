@@ -81,9 +81,8 @@ template <class View> auto owned_axes(const View& values) {
 }
 
 template <class View>
-auto read_field(const View& values, FieldDescriptor descriptor, FieldStamp stamp) {
-    stamp.storage_incarnation = 0;
-    auto issuer = require(detail::FieldIssuer::create(values, stamp));
+auto read_field(const View& values, FieldDescriptor descriptor, const FieldStamp& stamp) {
+    auto issuer = require(detail::FieldIssuer::create_at_validated_time(values, stamp));
     const auto axes = owned_axes(values);
     const detail::FieldBindingSpec spec{Association::particle, descriptor.units, axes};
     return require(issuer.read(values, descriptor, issuer.stamp(), spec));
@@ -92,8 +91,7 @@ auto read_field(const View& values, FieldDescriptor descriptor, FieldStamp stamp
 template <class View>
 auto write_field(const View& values, FieldDescriptor descriptor, FieldStamp stamp) {
     stamp.accepted = false;
-    stamp.storage_incarnation = 0;
-    auto issuer = require(detail::FieldIssuer::create(values, stamp));
+    auto issuer = require(detail::FieldIssuer::create_at_validated_time(values, stamp));
     const auto axes = owned_axes(values);
     const detail::FieldBindingSpec spec{Association::particle, descriptor.units, axes};
     return require(issuer.write(values, descriptor, issuer.stamp(), spec, FieldAccess::overwrite));
@@ -227,17 +225,22 @@ TimeConstraint WcsphParticipant3D::time_constraint() const {
 }
 
 Status WcsphParticipant3D::initialize(double time) {
+    if (!std::isfinite(time))
+        return {StatusCode::invalid_argument, "invalid 3D SPH initial time"};
+    return initialize_at_finite_time(time);
+}
+
+Status WcsphParticipant3D::initialize_at_finite_time(double time) {
     if (finalized_ || accepted_ || active_ || !Kokkos::is_initialized() || Kokkos::is_finalized())
         return {StatusCode::invalid_state,
                 "3D SPH initialization requires a new participant and active Kokkos"};
-    if (!std::isfinite(time))
-        return {StatusCode::invalid_argument, "invalid 3D SPH initial time"};
 
     const ActiveScope evaluation(active_);
     const auto result = guarded([&]() -> Status {
         step_.emplace(exec_.emplace(), budget_, max_cells_, parameters_);
         step_->observer_context_ = observer_context_;
         step_->observe_ = observe_;
+        step_->observe_kinematics_ = observe_kinematics_;
         auto candidate = std::make_unique<WcsphState3D>();
         auto& stamp = candidate->stamp;
         stamp.accepted = true;

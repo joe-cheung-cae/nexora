@@ -124,23 +124,26 @@ TEST(Reference, SuccessfulStepsPublishOnceAndRetainSnapshots) {
 
 TEST(Reference, LaterNumericalFailureKeepsCompletedStep) {
     const real large = std::numeric_limits<real>::max();
-    const Config config{{12}, {large}, {large / real{2}}, real{0.5}};
+    const Config config{{5, 12, 19}, {real{1}, large, real{-2}},
+                        {real{0}, large / real{2}, real{1}}, real{0.5}};
     Participant participant(config);
     Simulation simulation(participant);
     ASSERT_TRUE(simulation.initialize().ok());
     auto initial = snapshot(participant);
-    // Step one gives x=max/2, q=max. The next q addition overflows.
+    // The middle row gives x=max/2, q=max; its next q addition overflows,
+    // while both surrounding rows remain finite.
     ASSERT_EQ(simulation.run(1.0, 3).code(), StatusCode::numerical_failure);
     ASSERT_EQ(simulation.time().accepted_time, 1.0);
     ASSERT_EQ(simulation.time().accepted_steps, 1);
     auto accepted = snapshot(participant);
-    ASSERT_NO_FATAL_FAILURE(check_snapshot(accepted, config.ids, {large / real{2}}, {large}, 1.0, 1));
+    ASSERT_NO_FATAL_FAILURE(check_snapshot(accepted, config.ids, {real{0.5}, large / real{2}, real{-1}},
+                                           {real{0.5}, large, real{0}}, 1.0, 1));
     ASSERT_EQ(accepted.history(0), 1);
     ASSERT_EQ(accepted.control.sequence, 1);
     ASSERT_EQ(accepted.diagnostic, 2);
     ASSERT_NO_FATAL_FAILURE(check_snapshot(initial, config.ids, config.x, config.q, 0.0, 0));
     ASSERT_TRUE(simulation.finalize().ok());
-    ASSERT_EQ(accepted.q(0), large);
+    ASSERT_EQ(accepted.q(1), large);
     initial = {};
     accepted = {};
     ASSERT_EQ(participant.resource_usage().controlled_bytes, 0);
@@ -158,6 +161,12 @@ TEST(Reference, RejectInvalidInputs) {
                                Config{{1}, {1}, {0}, infinity}, Config{{1}, {1}, {0}, 0.0},
                                Config{{1}, {1}, {0}, -1.0}}) {
         Participant participant(config);
+        if (!std::isfinite(config.lambda) || config.lambda <= 0) {
+            ASSERT_FALSE(participant.time_constraint().available);
+            ASSERT_EQ(Participant::case_time_constraint(config.lambda).status().code(),
+                      StatusCode::invalid_argument);
+            ASSERT_EQ(participant.step({0.0, 0.25, 0.25}).code(), StatusCode::invalid_state);
+        }
         ASSERT_EQ(participant.initialize(0.0).code(), StatusCode::invalid_argument);
         ASSERT_EQ(participant.snapshot().status().code(), StatusCode::invalid_state);
         ASSERT_TRUE(participant.finalize().ok());
@@ -182,6 +191,7 @@ TEST(Reference, RejectInvalidInputs) {
     ASSERT_NO_FATAL_FAILURE(check_snapshot(accepted, {0}, {1.0}, {0.0}, 0.0, 0));
     ASSERT_NO_FATAL_FAILURE(check_snapshot(snapshot(participant), {0}, {0.75}, {0.25}, 0.25, 1));
     ASSERT_TRUE(participant.finalize().ok());
+    ASSERT_EQ(participant.step(interval).code(), StatusCode::invalid_state);
 }
 
 #if !NEXORA_ENABLE_DOUBLE_PRECISION
@@ -206,7 +216,7 @@ TEST(Reference, RejectUnrepresentableRealSteps) {
 
 TEST(Reference, AdvertisedTimeConstraintEndpointsAreUsable) {
     const std::array lambdas{real{1}, std::numeric_limits<real>::denorm_min(),
-                             std::numeric_limits<real>::max(), real{0x1.34p126},
+                             std::numeric_limits<real>::max(), real{0x1.8p-1}, real{0x1.34p126},
                              real{0x1.06ee48p126}};
     for (const real lambda : lambdas) {
         Participant probe(Config{{0}, {1}, {0}, lambda});
@@ -232,6 +242,16 @@ TEST(Reference, AdvertisedTimeConstraintEndpointsAreUsable) {
             ASSERT_TRUE(simulation.finalize().ok());
         }
     }
+}
+
+TEST(Reference, StableTransferHandlesBothSignsAtRealLimit) {
+    constexpr real maximum = std::numeric_limits<real>::max();
+    Participant participant(Config{{2, 3}, {maximum, -maximum}, {real{0}, real{0}}, real{1}});
+    ASSERT_TRUE(participant.initialize(0.0).ok());
+    ASSERT_TRUE(participant.step({0.0, 1.0, 1.0}).ok());
+    ASSERT_NO_FATAL_FAILURE(check_snapshot(snapshot(participant), {2, 3}, {real{0}, real{0}},
+                                           {maximum, -maximum}, 1.0, 1));
+    ASSERT_TRUE(participant.finalize().ok());
 }
 
 TEST(Reference, RequestedDurationSurvivesEndpointRounding) {

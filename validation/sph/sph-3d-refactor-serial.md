@@ -173,3 +173,67 @@ Kokkos 5.2.2 Serial 下 Debug float 和 Debug double 分别通过全部 27 项�
 | 尖括号绝对路径引用同一头 | 0 | 1 |
 
 分别停用相对路径例外和绝对路径查找后，完整入口均因内置回归退出 1。隔离复验于 2026-11-24T16:54:23+08:00 完成。四种 Serial 目标图、Release `BUILD_TESTING=OFF` 构建与目标图守卫、Release double 搬迁安装消费（1/1）均通过。执行记录位于本机 `results/sph-refactor-followup/private-include-guard/compact/`。
+
+## 非有限值检查清理
+
+运动壁按实际分支求运动学，纯平移允许未使用的旋转轴和中心含 NaN。WCSPH 在数值写入处报告窄化失败，密度校正统一拒绝两端非有限率造成的无效密度，终速写入同时归约声学 CFL 所需的最大速度平方。Reference 的候选值检查并入更新归约，纯置换去除逐元素复查。`TimeConstraint::available` 表示约束可用性，可用约束的零上限表示有限时间域已耗尽。[现行 WCSPH 契约](../../docs/architecture/sph-3d-refactor-plan.md#现行单求解器契约) · [步长契约](../../include/nexora/participant/TimeConstraint.hpp)
+
+Apple M2 Pro arm64，macOS 27.2.1，AppleClang 21.0.0，CMake 4.4.3，Ninja 1.13.2。使用本地 Kokkos 5.2.2 Serial 和 GoogleTest 1.17.0，Debug、Release 使用各自配套安装。四套均通过依赖守卫、Reference 80 位 Decimal 对照和 CTest，其中包含搬迁安装消费和 CLI 测试。
+
+| Serial 配置 | CTest 通过 | 失败或跳过 | 完成时间 |
+|---|---:|---:|---|
+| Debug float | 165/165 | 0 | `2026-11-25T10:47:15+08:00` |
+| Debug double | 164/164 | 0 | `2026-11-25T10:47:15+08:00` |
+| Release float | 165/165 | 0 | `2026-11-25T10:47:01+08:00` |
+| Release double | 164/164 | 0 | `2026-11-25T10:47:09+08:00` |
+
+Release 配对计时从 `2026-11-25T10:47:22+08:00` 至 `2026-11-25T10:48:16+08:00`。基线取自本轮改动前的本地源码副本。两边使用同一工具链、Kokkos 安装和 `-O3 -DNDEBUG`，每个工况 7 对，交替执行前后顺序。建格和可复用的独立 `CellGrid::update` 使用 32³ 个源槽，预热 10 次后每次计量 500 个操作。完整步用 20³ 流体粒子，混合壁另有固定壁与规定轨迹壁各 800 粒子。预热 3 步后每次计量 40 个 `Simulation::run` 完整步，排除初始化、结束和 I/O。在各工况与精度内，前后格索引和字段或已提交数值状态的校验值全部相同。
+
+| 工况 | float 前 → 后，ms | float 成对变化 | double 前 → 后，ms | double 成对变化 |
+|---|---:|---:|---:|---:|
+| 从输入建格 | 1.460 → 1.309 | −10.4% | 1.331 → 1.259 | −5.5% |
+| 独立格网更新 | 0.570 → 0.522 | −9.8% | 0.575 → 0.512 | −11.5% |
+| 无壁完整步 | 8.687 → 8.654 | −0.9% | 8.171 → 7.979 | −2.3% |
+| 混合壁完整步 | 11.803 → 12.302 | +2.3% | 11.377 → 11.134 | −1.6% |
+
+耗时为每操作的批次平均值取中位数。成对变化为每对后／前耗时比例的中位数减一。此平台测量未固定 CPU affinity 或频率。
+
+float 混合壁另于 `2026-11-25T10:48:44+08:00` 至 `2026-11-25T10:49:19+08:00` 用相同二进制重复 9 对，每批 160 步。前后耗时中位数为 12.230 → 11.412 ms，成对变化 −1.8%，各对变化范围 −6.7% 至 +4.4%，18 次校验值一致。该工况在两组测量中的成对变化方向不同。
+
+记录和测量程序位于本机 `results/nan-cleanup-serial/`。
+
+## 第二轮数值检查清理
+
+本轮以第一次清理后的当前源码重新建立基线。Apple M2 Pro 上 Kokkos 5.2.2 Serial 的 Debug/Release 四组全套回归于 `2026-11-25T11:42:27+08:00` 完成。float 每组 172/172。double 每组 171/171。依赖策略、搬迁安装消费和 80 位 Decimal 对照全部通过。
+
+32³ 格网仅位置更新的配对耗时变化为 float -10.0%、double -8.6%。20³ 流体加固定壁和运动壁时，完整步分别为 11.461 → 9.721 ms、11.144 → 9.612 ms。每个场景和精度的已提交数值校验值一致。初次建格、通用更新、无壁步、各对波动和运行参数见[第二轮完整测量记录](../../results/nan-cleanup-round2-serial/report.md)。
+
+## 第三轮数值检查清理
+
+本轮以第二轮清理后的当前源码重新建立基线。Apple M2 Pro 上 Kokkos 5.2.2 Serial 的 Debug/Release 四组全套回归于 `2026-11-25T13:38:44+08:00` 完成。float 每组 178/178。double 每组 177/177。依赖策略、搬迁安装消费和 80 位 Decimal 对照全部通过。
+
+32³ 格网仅位置更新的配对耗时变化为 float −0.2%、double 约 0.0%。20³ 流体加固定壁和运动壁时，完整步分别为 9.538 → 9.358 ms、9.181 → 8.940 ms。每个场景和精度的已提交数值校验值一致。初次建格、通用更新、无壁步、各对波动和运行参数见[第三轮完整测量记录](../../results/nan-cleanup-round3-serial/report.md)。
+
+## 固定壁检查简化
+
+初始化按已有壁组与组内粒子顺序写入独立输入数组：固定组直接复制，运动组保留位置计算失败归约。固定壁坐标、质量及组合 ID 集合仍由初始格网检查。纯固定壁的起点连续性先写入零壁速，再调用普通阶段率计算；终点预测所需的就绪缓冲、运动壁按需取样和数值失败回滚保持原有流程。数组归属、预算和初始化末尾的 fence 不变。
+
+macOS 27.2.1 arm64、AppleClang 21.0.0.21000401、CMake 4.4.3、Ninja 1.13.2，使用本地 Kokkos 5.2.2 Serial 和 GoogleTest 1.17.0。以下命令均退出 0，于 `2026-11-25T14:06:29+08:00` 核对结果：float Debug 与 double Release 的三维 SPH 测试各 107/107，无失败或跳过。本轮未运行整库 CTest 或安装消费。
+
+```sh
+cmake --build build/current-review-float-debug --target nexora_sph_tests -j 4
+cmake --build build/current-review-double-release --target nexora_sph_tests -j 4
+build/current-review-float-debug/tests/methods/sph/nexora_sph_tests --gtest_brief=1 --gtest_output=xml:results/fixed-wall-check-cleanup/float-debug.xml
+build/current-review-double-release/tests/methods/sph/nexora_sph_tests --gtest_brief=1 --gtest_output=xml:results/fixed-wall-check-cleanup/double-release.xml
+```
+
+现有独立 M₄ 解析回归覆盖无观测固定壁的压缩与膨胀，Adami 回归覆盖固定壁初态与多步受力。壁组重排、非法固定壁输入、运动壁位置失败回滚及空流体回归均执行，原数值容差未变。
+
+另以修改前暂存的 `WcsphStep3D.cpp` 与当前版本分别编译，驱动和其余静态库共用，执行 Release double 配对测量。18³ 个流体粒子、两组各 648 个固定壁粒子，每项预热 3 次，每批 40 次，7 对交替顺序，时间为 `2026-11-25T14:07:03+08:00` 至 `2026-11-25T14:07:11+08:00`。每项 14 次运行的已提交流体数值字段、固定壁、时钟、接受步数与下一步上限逐字节一致。
+
+| 工况 | 修改前 → 后中位数，ms/次 | 成对变化中位数 | 成对变化范围 |
+|---|---:|---:|---:|
+| 初始化 | 2.882 → 2.831 | −0.11% | −34.47% 至 +49.36% |
+| 完整步 | 7.729 → 7.737 | −3.76% | −15.84% 至 +24.79% |
+
+本次测量波动跨零，不据此声称稳定提速。复现命令为 `python3 results/fixed-wall-check-cleanup/build.py` 和 `python3 results/fixed-wall-check-cleanup/pairs.py`。源码、二进制和共用库摘要、编译命令、原始测量及 JUnit 记录均位于本机 `results/fixed-wall-check-cleanup/`。

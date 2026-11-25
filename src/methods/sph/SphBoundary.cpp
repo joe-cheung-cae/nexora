@@ -36,8 +36,10 @@ FixedWall3D::sample_reference(const std::array<real, 3>& position, WallTrajector
     return kinematics(position);
 }
 
+namespace {
 Result<SolidWallBoundary3D::ParticleView>
-capture_wall_particles(const Kokkos::Serial& exec, const FixedWallParticles3D& input) {
+capture_records(const Kokkos::Serial& exec, const FixedWallParticles3D& input,
+                bool independent, bool moving) {
     const auto n = input.ids.extent(0);
     if (input.position.extent(0) != n || input.mass.extent(0) != n ||
         (n && (!input.position.data() || !input.mass.data() || !input.ids.data())))
@@ -47,33 +49,56 @@ capture_wall_particles(const Kokkos::Serial& exec, const FixedWallParticles3D& i
     SolidWallBoundary3D::ParticleView::non_const_type records(
         Kokkos::view_alloc(exec, Kokkos::WithoutInitializing, "sph.wall.particles"), n);
     using Policy = Kokkos::RangePolicy<Kokkos::Serial, Kokkos::IndexType<std::size_t>>;
+    const auto record_at = [&](std::size_t i) {
+        return WallParticle3D{input.ids(i),
+                              {input.position(i, 0), input.position(i, 1), input.position(i, 2)},
+                              input.mass(i)};
+    };
     std::size_t invalid{};
-    Kokkos::parallel_reduce(
-        "sph.wall.capture_particles", Policy(exec, 0, n),
-        [&](std::size_t i, std::size_t& errors) {
-            const std::array position{input.position(i, 0), input.position(i, 1),
-                                      input.position(i, 2)};
-            const real mass = input.mass(i);
-            if (!Kokkos::isfinite(mass) || mass <= 0 || !Kokkos::isfinite(position[0]) ||
-                !Kokkos::isfinite(position[1]) || !Kokkos::isfinite(position[2]))
-                ++errors;
-            records(i) = {input.ids(i), position, mass};
-        },
-        invalid);
-    if (invalid)
-        return Status{StatusCode::invalid_argument, "invalid SPH wall position or mass"};
+    if (independent || moving) {
+        Kokkos::parallel_reduce(
+            "sph.wall.capture_particles", Policy(exec, 0, n),
+            [&](std::size_t i, std::size_t& errors) {
+                const auto record = record_at(i);
+                if ((independent && (!Kokkos::isfinite(record.mass) || record.mass <= 0)) ||
+                    !Kokkos::isfinite(record.reference_position[0]) ||
+                    !Kokkos::isfinite(record.reference_position[1]) ||
+                    !Kokkos::isfinite(record.reference_position[2]))
+                    ++errors;
+                records(i) = record;
+            }, invalid);
+        if (invalid)
+            return Status{StatusCode::invalid_argument, "invalid SPH wall position or mass"};
+    } else {
+        Kokkos::parallel_for("sph.wall.capture_particles", Policy(exec, 0, n),
+                             [&](std::size_t i) { records(i) = record_at(i); });
+    }
     if (n > 1) {
         Kokkos::sort(exec, records, [](const WallParticle3D& a, const WallParticle3D& b) {
             return a.id < b.id;
         });
-        Kokkos::parallel_reduce(
-            "sph.wall.unique_ids", Policy(exec, 1, n),
-            [&](std::size_t i, std::size_t& errors) { errors += records(i - 1).id == records(i).id; },
-            invalid);
-        if (invalid)
-            return Status{StatusCode::invalid_argument, "SPH wall particle IDs must be unique"};
+        if (independent) {
+            Kokkos::parallel_reduce(
+                "sph.wall.unique_ids", Policy(exec, 1, n),
+                [&](std::size_t i, std::size_t& errors) { errors += records(i - 1).id == records(i).id; },
+                invalid);
+            if (invalid)
+                return Status{StatusCode::invalid_argument, "SPH wall particle IDs must be unique"};
+        }
     }
     return SolidWallBoundary3D::ParticleView(records);
+}
+} // namespace
+
+Result<SolidWallBoundary3D::ParticleView>
+capture_wall_particles(const Kokkos::Serial& exec, const FixedWallParticles3D& input) {
+    return capture_records(exec, input, true, false);
+}
+
+Result<SolidWallBoundary3D::ParticleView>
+SolidWallBoundary3D::capture_for_grid(const Kokkos::Serial& exec, const FixedWallParticles3D& input,
+                                     bool moving) {
+    return capture_records(exec, input, false, moving);
 }
 
 } // namespace nexora::sph::SphBoundary

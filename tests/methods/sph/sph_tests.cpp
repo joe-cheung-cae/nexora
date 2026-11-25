@@ -33,7 +33,6 @@ template <class T> T require(Result<T> result) {
 }
 
 void check_close(real actual, long double expected, long double epsilon_multiplier) {
-    ASSERT_TRUE(std::isfinite(actual));
     const long double tolerance =
         epsilon_multiplier * std::numeric_limits<real>::epsilon() * std::abs(expected);
     const long double error = std::abs(static_cast<long double>(actual) - expected);

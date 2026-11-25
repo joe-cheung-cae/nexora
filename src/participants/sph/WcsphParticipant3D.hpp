@@ -67,6 +67,7 @@ class WcsphParticipant3D final : public ParticipantIF {
   private:
     friend struct WcsphTestAccess;
 
+    Status initialize_at_finite_time(double time) override;
     Status do_step(const TimeInterval& interval) override;
     BindFields3D bind_fields(WcsphState3D& candidate) const;
     bool idle_with_state() const;
@@ -86,6 +87,7 @@ class WcsphParticipant3D final : public ParticipantIF {
     mutable bool active_{};
     void* observer_context_{};
     void (*observe_)(void*, StepStage3D, const NeighborView3D&){};
+    bool observe_kinematics_{};
 };
 
 } // namespace nexora::sph

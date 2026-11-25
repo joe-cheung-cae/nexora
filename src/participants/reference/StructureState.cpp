@@ -18,7 +18,7 @@ template <class T> T require(Result<T> result) {
 }
 template <class View>
 StructureField<View> accepted_field(View values, const FieldDescriptor& field, FieldStamp stamp) {
-    auto issuer = require(FieldIssuer::create(values, stamp));
+    auto issuer = require(FieldIssuer::create_at_validated_time(values, stamp));
     const std::array axes{FieldAxis{values.extent(0)}};
     auto grant = require(issuer.read(values, field, issuer.stamp(),
                                      {field.association, field.units, axes}));
@@ -30,7 +30,7 @@ std::array<FieldDescriptor, 4> fields(const StructureBank& bank) {
 }
 } // namespace
 
-StructureBank::StructureBank(detail::EntityOrder entity_order, detail::CsrAdjacency graph,
+StructureBank::StructureBank(ConstructionKey, detail::EntityOrder entity_order, detail::CsrAdjacency graph,
                              FieldStamp stamp, const std::array<FieldDescriptor, 4>& fields,
                              ConstStructureValues positions, ConstStructureValues values,
                              ConstStructureValues previous)
@@ -94,7 +94,8 @@ Result<std::unique_ptr<StructureState>> StructureState::create(
         Kokkos::deep_copy(exec, h, Input(config.history.data(), count));
         exec.fence("structure initial state ready");
         auto bank = std::make_shared<StructureBank>(
-            std::move(order), std::move(graph), config.stamp, config.fields, x, q, h);
+            StructureBank::ConstructionKey{}, std::move(order), std::move(graph), config.stamp,
+            config.fields, x, q, h);
         return std::unique_ptr<StructureState>(new StructureState(exec, std::move(bank)));
     } catch (const Failure& failure) {
         return failure.status;
@@ -176,15 +177,11 @@ Status StructureState::reorder(std::span<const GlobalEntityId> requested, Fault 
             exec_, order, order, stamp.topology,
             std::span<const Offset>(offsets.data(), offsets.extent(0)),
             std::span<const LocalIndex>(indices.data(), indices.extent(0))));
-        // Validate finite fields and exact permutation consistency before
-        // constructing read grants. No published allocation was written.
-        for (std::size_t i = 0; i < count; ++i) {
-            if (!std::isfinite(x(i)) || !std::isfinite(q(i)) || !std::isfinite(h(i)) ||
-                x(i) != old_x(forward(i)) || q(i) != old_q(forward(i)) || h(i) != old_h(forward(i)))
-                return {StatusCode::execution_failure, "invalid reordered candidate"};
-        }
+        // The validated permutation gathers immutable accepted finite fields
+        // exactly; no arithmetic can create a new invalid numerical value.
         auto candidate = std::make_shared<StructureBank>(
-            std::move(order), std::move(graph), stamp, fields(*accepted_), x, q, h);
+            StructureBank::ConstructionKey{}, std::move(order), std::move(graph), stamp,
+            fields(*accepted_), x, q, h);
         if (fault == Fault::before_publish)
             return {StatusCode::execution_failure, "injected prepared publication failure"};
         publish(std::move(candidate));
@@ -222,7 +219,8 @@ Status StructureState::commit_values(std::span<const real> supplied) {
                                                      stamp.layout, accepted_->order.ids()));
         // Same logical order/topology: the immutable CSR may stay shared.
         auto candidate = std::make_shared<StructureBank>(
-            std::move(order), accepted_->adjacency, stamp, fields(*accepted_), x, q, h);
+            StructureBank::ConstructionKey{}, std::move(order), accepted_->adjacency, stamp,
+            fields(*accepted_), x, q, h);
         publish(std::move(candidate));
         return {};
     } catch (const Failure& failure) {

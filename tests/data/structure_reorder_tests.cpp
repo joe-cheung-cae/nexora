@@ -21,6 +21,17 @@ TEST(StructureReorder, Configuration) {
     config.stamp.accepted = false;
     ASSERT_FALSE(StructureState::create(exec, config).ok());
     config = fixture_config();
+    config.stamp.time.physical_time = std::numeric_limits<double>::quiet_NaN();
+    const auto invalid_time = StructureState::create(exec, config);
+    ASSERT_EQ(invalid_time.status().code(), StatusCode::invalid_argument);
+    ASSERT_EQ(invalid_time.status().message(), "invalid field time or validity interval");
+    config = fixture_config();
+    config.stamp.valid_from = 1.0;
+    config.stamp.valid_until = 2.0;
+    const auto outside_time = StructureState::create(exec, config);
+    ASSERT_EQ(outside_time.status().code(), StatusCode::invalid_argument);
+    ASSERT_EQ(outside_time.status().message(), "field time is outside its validity interval");
+    config = fixture_config();
     config.fields[2].components = 2;
     ASSERT_FALSE(StructureState::create(exec, config).ok());
     config = fixture_config();

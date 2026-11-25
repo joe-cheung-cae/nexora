@@ -1,6 +1,5 @@
 #include <fixed_csr/Density.hpp>
 
-#include <cmath>
 #include <cstddef>
 #include <limits>
 
@@ -44,7 +43,9 @@ Result<real> evaluate_density(const Kokkos::Serial& exec, const DensityInput& in
             output(row) = density;
             total += density;
         }, sum);
-    if (!std::isfinite(sum) || sum > std::numeric_limits<real>::max())
+    // Positive validated masses and supported M4 distances yield nonnegative
+    // rows; this bound rejects NaN and infinity as well as real overflow.
+    if (!(sum <= std::numeric_limits<real>::max()))
         return Status{StatusCode::numerical_failure, "SPH density or owned sum exceeds real range"};
     return static_cast<real>(sum);
 }

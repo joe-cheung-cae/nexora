@@ -527,6 +527,7 @@ def verify_precision(args, profile, precision):
         "nexora_sph_fixed_csr_tests.Sph.FrozenLayoutAndReorder",
         "nexora_sph_fixed_csr_tests.Sph.MultiStepRunPublishesEachStepOnce",
         "nexora_reference_tests.Reference.LaterNumericalFailureKeepsCompletedStep",
+        "nexora_reference_tests.Reference.StableTransferHandlesBothSignsAtRealLimit",
         "nexora_simulation_tests.SimulationTest.RunsScheduleAndPublishesEachStepOnce",
         "nexora_simulation_tests.SimulationTest.FailedStepStopsRunAndPreservesLastPublication",
         "nexora_sph_tests.SphCellGrid.ThreeDimensionalShuffledStableIdsAndGhosts",
@@ -539,10 +540,14 @@ def verify_precision(args, profile, precision):
         "nexora_sph_tests.SphCellGrid.RebuildFallbackAndComparisonRespectScratchLifetimes",
         "nexora_sph_tests.SphCellGrid.AssignmentKeepsReplacedArraysChargedUntilDeallocation",
         "nexora_sph_tests.SphCellGrid.CrossStepReuseAndRebuildMatchesExplicitCsr",
+        "nexora_sph_tests.SphCellGrid.PositionUpdatesReuseSortedColumnsAndResetNonidentityPermutations",
+        "nexora_sph_tests.SphCellGrid.PositionUpdatesResolveExternalRemapsWithoutExtraPermutationStorage",
+        "nexora_sph_tests.SphCellGrid.PositionUpdateBudgetRejectsIdentityAndPositionBeforePublishing",
         "nexora_sph_tests.SphGeometry3D.VersionsDescribeGeometryLayoutAndTopologySeparately",
         "nexora_sph_tests.SphGeometry3D.ThreeAxisCrossingAndInputReorderCompareGeometryById",
         "nexora_sph_tests.SphWcsphOperators.ChangingOwnedSetPublishesPressureRowsByStableId",
         "nexora_sph_tests.SphWcsphOperators.SourceOutsideOwnedSupportChangesGhostPressureForceOnly",
+        "nexora_sph_tests.SphWcsphOperators.PressureValidatesOnlyContributingWallData",
         "nexora_sph_tests.SphWcsphOperators.LinearEquationOfStateResolvesBothSidesOfRestDensity",
         "nexora_sph_tests.SphWcsphOperators.UnequalMassPairAnalyticDirectionAndForceBalanceIncludingTension",
         "nexora_sph_tests.SphVerlet.UniformVelocityCrossesCells",
@@ -550,6 +555,7 @@ def verify_precision(args, profile, precision):
         "nexora_sph_tests.SphVerlet.MovingWallActualSpanMustFitItsExplicitLimit",
         "nexora_sph_tests.SphVerlet.DriftOverflowPreservesRowsAndTime",
         "nexora_sph_tests.SphVerletOperators.CflReductionIncludesNonfiniteVelocityAmongFiniteRows",
+        "nexora_sph_tests.SphVerletOperators.StandaloneKickDriftRejectsOverflowWithoutGridAdmission",
         "nexora_sph_tests.SphVerlet.UnequalMassTrajectoryMatchesIndependentCsrAndMomentum",
         "nexora_sph_tests.SphVerlet.ReusedWorkspaceIsReleasedWithoutChangingCommittedRows",
         "nexora_sph_tests.SphVerlet.WorkspaceBudgetPressurePreservesHistoricalStepCapacity",
@@ -566,6 +572,7 @@ def verify_precision(args, profile, precision):
         "nexora_sph_tests.SphVerlet.SimulationFinalizeFailsDuringCommittedRowVisit",
         "nexora_sph_tests.SphVerlet.VelocityPublicationAllocationFailurePreservesLastStep",
         "nexora_sph_tests.SphVerlet.FixedWallBudgetRejectionPreservesRowsAndWall",
+        "nexora_sph_tests.SphVerlet.WallReceptionKeepsStandaloneAndAssemblyValidationBoundaries",
         "nexora_sph_tests.SphVerlet.MovingWallRejectsUnrepresentableGroupDurationBeforeSampling",
         "nexora_sph_tests.SphVerlet.MovingWallFiniteEndpointPublishesAndRejectsAnotherStep",
         "nexora_sph_tests.SphVerlet.RoundTripPistonResolvesTransientContact",
@@ -575,6 +582,8 @@ def verify_precision(args, profile, precision):
         "nexora_sph_tests.SphVerlet.MovingWallLimitsComposeAndUseNextEndpointBound",
         "nexora_sph_tests.SphVerlet.MovingWallLocalDurationSurvivesLargeAbsoluteTime",
         "nexora_sph_tests.SphVerlet.MovingWallRejectsInvalidGroupsAndSamples",
+        "nexora_sph_tests.SphVerlet.UnusedMovingWallKinematicsDoNotRejectTheStep",
+        "nexora_sph_tests.SphVerlet.MovingWallPositionFailurePreservesTheLastGridAndClock",
         "nexora_sph_tests.SphVerlet.MovingWallFiniteDomainRejectsRoundedUpRelativeWidth",
         "nexora_sph_tests.SphVerlet.MovingWallFiniteDomainRoundsExtremeWidthInward",
         "nexora_sph_tests.SphVerlet.MovingWallPeriodicFoldAndThrowingCallbackPreserveLastStep",
@@ -589,14 +598,18 @@ def verify_precision(args, profile, precision):
         "nexora_sph_tests.SphHydrostaticInitial.AirSideStaysOpen",
         "nexora_sph_tests.SphContinuity.SmoothCoupledPairHasSecondOrderDensityError",
         "nexora_sph_tests.SphContinuity.NonpositiveCandidateDensityPreservesAcceptedRows",
+        "nexora_sph_tests.SphContinuity.PredictionReadsOnlyActualGeometricContributors",
         "nexora_sph_tests.SphContinuity.InvalidExplicitDensityAndExtentPublishNoRows",
         "nexora_data_uninitialized_tests.DataPreinitialization.FieldIssuerRequiresInitializedRuntime",
         "nexora_data_uninitialized_tests.DataPreinitialization.ExternalFieldRequiresInitializedRuntime",
         "nexora_reference_uninitialized_tests.ReferenceUninitialized.RejectUninitializedRuntime",
         mpi_test,
-    ] + (["nexora_sph_tests.SphVerlet.DriftJustAboveFloatRangeCannotRoundBackToLargestPosition"]
+    ] + (["nexora_sph_tests.SphVerlet.DriftJustAboveFloatRangeCannotRoundBackToLargestPosition",
+          "nexora_sph_tests.SphVerlet.PredictorRangeAppliesOnlyToConsumedVelocity"]
          if precision == "float" else
-         ["nexora_sph_tests.SphVerlet.LateCflFailurePreservesPublishedFieldsAndReleasesCandidate"]))
+         ["nexora_sph_tests.SphVerlet.LateCflFailurePreservesPublishedFieldsAndReleasesCandidate",
+          "nexora_sph_tests.SphContinuity.RoundedSubnormalSupportTieStillConsumesVelocity",
+          "nexora_sph_tests.SphVerletOperators.DoubleStepRejectsKickOrDriftOverflowAtGridBoundary"]))
     test_log = build / "Testing/Temporary/LastTest.log"
     shutil.copyfile(test_log, logs / "reference-ctest.log")
     command([sys.executable, ROOT / "tools/check_reference_precision.py", "--log", test_log,
