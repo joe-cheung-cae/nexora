@@ -12,6 +12,24 @@
 
 验证脚本依次执行配置、编译、依赖图检查、测试和独立 Decimal oracle。最后由包测试执行干净安装、搬迁、独立消费者构建与运行，并检查拒绝路径。GitHub Actions 的 Linux Serial job 用 `unshare --net` 创建隔离网络命名空间，降回 runner 用户执行验证。Windows Serial 和 MPI smoke job 使用本地依赖。
 
+### 可选 API 文档验证
+
+Linux GCC 13 / Release job 复用已有 Serial 构建和安装消费测试，在同一禁网环境先验证缺少 Doxygen，再生成和检查 float、double 两份公开手册和一份 float 维护者手册。CI 复跑入口是 [workflow](../../.github/workflows/ci.yml) 中的 `ci_doxygen.sh prepare` 和 `ci_doxygen.sh verify`。前者联网缓存 Ubuntu 发行包，后者在 `unshare --net` 中运行。运行后查阅 `Linux GCC-Release-validation/doxygen/` 工件中的签名索引、制品摘要、工具版本、命令日志与 `docs-validation.json`。三份 HTML 由 `Nexora-API-manuals` 工件保存。[本地复跑步骤](../../CONTRIBUTING.md#api-documentation) · [发行包锁与许可](../../third_party/README.md#doxygen-ci-provenance)
+
+本次开发验证在 macOS 27.2.1 arm64、AppleClang 21.0.0.21000401、CMake 4.4.3、Ninja 1.13.2 和 Serial Kokkos 5.2.2 上执行。默认关闭文档，构建、搬迁安装与 3 个消费者均通过。单独开启文档时，缺工具配置返回 1 并指出缺少 `DOXYGEN_EXECUTABLE`。另用 CI 的搜索范围复验，即使原 PATH 提供了可运行的 Doxygen，独立探针也能证实该范围内没有工具。
+
+从 `2026-11-25T16:15:23+08:00` 至 `2026-11-25T16:15:32+08:00`，本机使用 Doxygen 1.9.8 在禁网沙箱中执行了 float 和 double 文档验收。工具由无本地补丁的官方源码归档 `doxygen-1.9.8.src.tar.gz`（SHA-256 `05e3d228e8384b5f3af9c8fd6246d22804acb731a3a24ce285c8986ed7e14f62`）编译。float 配置和普通构建后均无首页，显式目标生成首页。两种精度的索引、正文、成员可见性和实际别名均通过检查。两个错误注释样例各返回 1，分别指出错写的参数和无法解析的引用。`2026-11-25T16:15:44+08:00`，离线 Chromium 148 从两份本地首页分别打开了 ReadField 正文并跳转到 protected do_step 锚点。此记录的 Linux GCC 13 / Release、APT 签名校验和 `unshare --net` 执行证据待 CI 首次运行补充。
+
+维护者手册在上述 macOS arm64 / Doxygen 1.9.8 环境完成本地验证。`2026-11-25T16:28:47+08:00`，离线 Chromium 148 从 `ParticipantIF` 和 `SolidWallBoundary3D` 的本地 PNG 继承图进入四个派生类，核对了返回基类的链接及 WCSPH 私有成员表。`2026-11-25T16:30:25+08:00`，最终 HTML/XML 通过双向继承边、六幅类图、`budget_`、`step_` 和 `accepted_` 的类型及访问级别检查。普通构建和单独生成公开手册均未生成维护者首页；单独构建 `nexora_internal_docs` 后公开手册仍通过范围检查。Linux GCC Release 的新增检查待 CI 实跑。
+
+维护者类页面已增加 Graphviz 协作图。`2026-11-25T16:37:04+08:00`，Doxygen 1.9.8 和 Graphviz 16.1.0 在上述 macOS Serial 环境通过禁网验证，核对了 Simulation 的两条成员关联、节点链接、本地图例和无协作图的 TimeState。正常查找范围没有 `dot` 时，普通构建和公开手册仍可生成，显式内部目标报告缺少 Graphviz。`2026-11-25T16:39:40+08:00`，离线 Chromium 148 验证了更新后的协作图、字段类型链接和搜索结果。Simulation 与 WcsphParticipant3D 的字段表在 390 像素视口内可读，宽图可单独横向滚动。Linux runner 的 Graphviz 供应及渲染待 CI 执行。
+
+维护者手册的继承图和协作图现使用本地 UML SVG。Doxygen 1.9.8 在 UML 模式下隐藏原生图例入口，也会给没有关系边的类生成单节点协作图。内部目标在有关系的图下链接到手册的 UML 图例，并从类页面移除无边的协作图。`2026-11-25T16:52:46+08:00`，离线 Chromium 148 从本地 HTML 读到类框内的 `- bool operation_active_` 和 `+ double accepted_time`，沿 `participant_`、`time_` 关联进入目标页，并验证了 ParticipantIF 与 WcsphParticipant3D 的双向继承导航。在 390 像素视口中，两页的成员表宽度均为 361 像素，宽图可在各自区域横向滚动。
+
+`2026-11-25T16:53:47+08:00`，新的 macOS Serial 禁网构建通过 `tools/validate_docs.py`。检查覆盖六张 SVG 继承图、类框中的字段与访问符、WCSPH 的全部 16 个私有字段及三个关键字段的声明类型。float 和 double 公开手册均通过精度、契约和可见性检查，两个错误注释样例均按预期失败。此次 UML 验证限于本机，Linux CI 待运行。
+
+同页双图在上述本地工具链完成复验。`2026-11-25T17:06:00+08:00`，按 XML 索引核查了 100 个类型页面，共有 8 对继承图和 46 对协作图。每对图的节点、边、成员标签和本地类型链接一致，简图位于对应详图之前。离线 Chromium 在两种图上分别点击了 ParticipantIF 的两个派生类、Simulation 的两个关联类型，并在 390 像素视口核查了 WCSPH 的四幅图和 16 行私有成员表。独立样例在同一目录重建，成员改名后两图的边标签同步更新，移除关联后页面不再展示该对图。全新 float、double 文档目录的禁网检查和告警反例均通过。Linux CI 未执行。
+
 ## 受控 runner 实测
 
 Apple M2 Pro arm64，macOS 27.2.1 build 26B131，AppleClang `21.0.0.21000401`，CMake `4.4.3`，Ninja `1.13.2`，Python `3.14.7`。MPI 关闭。

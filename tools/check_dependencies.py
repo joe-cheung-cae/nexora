@@ -472,6 +472,10 @@ def policy_self_test() -> list[str]:
         failures.append("checker self-test failed to reject typed data from participant API")
     if not check_link_policy("nexora_core", ["Kokkos::kokkos"]):
         failures.append("checker self-test failed to reject Kokkos from nexora_core")
+    for target in ("nexora", "nexora_core", "nexora_data", "nexora_simulation"):
+        for docs_target in ("nexora_docs", "nexora_internal_docs", "Doxygen::doxygen"):
+            if not check_link_policy(target, [*ALLOWED_LINKS[target], docs_target]):
+                failures.append(f"checker self-test allowed {target} to depend on {docs_target}")
     cli_links = ["nexora_core", "nexora_simulation", "nexora_participants_reference", "Kokkos::kokkos"]
     if check_link_policy("nexora", cli_links + ["MPI::MPI_C"]):
         failures.append("checker self-test failed to allow the CLI's optional MPI diagnostic")

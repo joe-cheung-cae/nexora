@@ -1,0 +1,60 @@
+<doxygenlayout version="1.0">
+  <!-- Override class pages only; Doxygen supplies the other page layouts and navigation. -->
+  <class>
+    <briefdescription visible="no"/>
+    <detaileddescription title="Description"/>
+    <includes visible="$SHOW_HEADERFILE"/>
+    <inheritancegraph visible="$CLASS_GRAPH"/>
+    <collaborationgraph visible="yes"/>
+    <memberdecl>
+      <publicattributes/>
+      <publicstaticattributes/>
+      <protectedattributes/>
+      <protectedstaticattributes/>
+      <packageattributes/>
+      <packagestaticattributes/>
+      <privateattributes/>
+      <privatestaticattributes/>
+      <nestedclasses visible="yes"/>
+      <publictypes/>
+      <services/>
+      <interfaces/>
+      <publicslots/>
+      <signals/>
+      <publicmethods/>
+      <publicstaticmethods/>
+      <protectedtypes/>
+      <protectedslots/>
+      <protectedmethods/>
+      <protectedstaticmethods/>
+      <packagetypes/>
+      <packagemethods/>
+      <packagestaticmethods/>
+      <properties/>
+      <events/>
+      <privatetypes/>
+      <privateslots/>
+      <privatemethods/>
+      <privatestaticmethods/>
+      <friends/>
+      <related/>
+      <membergroups visible="yes"/>
+    </memberdecl>
+    <memberdef>
+      <variables title="Field Documentation"/>
+      <inlineclasses/>
+      <typedefs/>
+      <enums/>
+      <services/>
+      <interfaces/>
+      <constructors/>
+      <functions/>
+      <related/>
+      <properties/>
+      <events/>
+    </memberdef>
+    <allmemberslink visible="yes"/>
+    <usedfiles visible="$SHOW_USED_FILES"/>
+    <authorsection visible="yes"/>
+  </class>
+</doxygenlayout>

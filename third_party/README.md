@@ -81,3 +81,40 @@ source locks and compiler/configuration metadata. CI acquires dependencies befor
 the Linux network-isolated configure/build/test/install-consumer phase, which
 checks both installation manifests. Do not reuse a Release/MSVC runtime prefix
 for a different configuration or compiler.
+
+## Doxygen CI provenance
+
+The optional `nexora_docs` build target uses a local Doxygen executable. The
+Ubuntu 24.04 GCC 13 Release Serial CI job uses the following reviewed binary lock.
+
+| Field | Value |
+| --- | --- |
+| Upstream and distribution | [Doxygen](https://www.doxygen.nl/), [Ubuntu Noble source package](https://packages.ubuntu.com/source/noble-updates/doxygen), universe |
+| Source and binary version | `1.9.8+ds-2ubuntu0.1`, binary architecture `amd64` |
+| Artifact | [doxygen_1.9.8+ds-2ubuntu0.1_amd64.deb](https://packages.ubuntu.com/noble-updates/amd64/doxygen/download) |
+| SHA-256 | `76a3a24a594d0cb6315eae5bfc78aa4b036b3ba981e3c8fadddcb4dea1792b7c` |
+| Patches and license | Ubuntu's security revision removes the polyfill CDN reference. Nexora applies no patches. Doxygen uses GPL-2.0-only. The package's `copyright` records per-file licenses, exceptions and notices. |
+
+[The CI script](../tools/ci_doxygen.sh) refreshes private APT indexes using
+Ubuntu's archive signing keyring. The [2026-07-01T00:00:00Z snapshot](https://snapshot.ubuntu.com/ubuntu/20260701T000000Z/)
+retains the locked package as Noble receives further updates. APT can resolve
+missing runtime libraries against the runner's installed packages and the current
+Noble archive. CI retains signed InRelease files and the exact package record,
+compares the downloaded tool with both the authenticated index digest and the
+lock above, and records the digests of any downloaded libraries. After the missing-tool cases, it rechecks the local archives and
+unpacks them into a fresh private prefix inside the same isolated network namespace.
+The `Linux GCC-Release-validation` artifact contains the command logs, runner
+image and architecture, timestamps, tool versions, source package version,
+copyright, license text and distribution changelog under `doxygen/`.
+
+The same CI job uses [Graphviz](https://graphviz.org/) to generate collaboration
+diagrams for the internal reference. It reuses the Ubuntu runner's `graphviz`
+package when present. Otherwise it downloads the selected
+[Ubuntu Noble package](https://packages.ubuntu.com/noble/graphviz) and its missing
+dependencies from the signed APT archive, checks the package SHA-256 against the
+authenticated index, and installs from the local archives before entering the
+network-isolated phase. The validation artifact records the exact installed
+binary and source package versions, APT package metadata, distribution
+changelog, copyright and license notices, `dot -V` output, executable SHA-256, and downloaded archive digests
+when CI supplies the package. The isolated validation rechecks the executable
+digest before building the internal reference.

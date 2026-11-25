@@ -13,8 +13,15 @@ namespace detail {
 struct TransportBuilder;
 struct TransportReceiver;
 }
-// Keep the host binding alive through the operation. Capture only the native
-// View in Kokkos kernels. A copied View does not extend the access grant.
+/** @brief Read-only binding of a native Kokkos View to field metadata and a read lease.
+ *
+ * The binding is move-only and stays on the host. Capture the native View in
+ * Kokkos kernels. Copying the Kokkos View does not extend access authorization.
+ * Keep the binding alive with an active lease until every operation using the
+ * View completes.
+ *
+ * @tparam View A Kokkos View type. `view()` returns its element-const type.
+ */
 template <class View> class ReadField {
     static_assert(Kokkos::is_view<View>::value);
 
@@ -25,6 +32,9 @@ template <class View> class ReadField {
     ReadField(const ReadField&) = delete;
     ReadField& operator=(const ReadField&) = delete;
 
+    /** @brief Copy the element-const View handle for the operation.
+     * @throws std::logic_error if the binding has no active lease.
+     */
     view_type view() const & {
         if (!lease_)
             throw std::logic_error("read field has no active lease");
@@ -55,6 +65,14 @@ template <class View> class ReadField {
     std::array<bool, View::rank()> component_axes_;
 };
 
+/** @brief Writable binding of a native Kokkos View to field metadata and an exclusive lease.
+ *
+ * The binding is move-only and stays on the host. Capture the native View in
+ * Kokkos kernels and keep the binding alive with an active lease until all work
+ * that uses the View completes.
+ *
+ * @tparam View A Kokkos View type with writable elements.
+ */
 template <class View> class WriteField {
     static_assert(Kokkos::is_view<View>::value);
     static_assert(!std::is_const_v<typename View::value_type>);
@@ -66,6 +84,9 @@ template <class View> class WriteField {
     WriteField(const WriteField&) = delete;
     WriteField& operator=(const WriteField&) = delete;
 
+    /** @brief Copy the writable View handle for the operation.
+     * @throws std::logic_error if the binding has no active lease.
+     */
     View view() const & {
         if (!lease_)
             throw std::logic_error("write field has no active lease");

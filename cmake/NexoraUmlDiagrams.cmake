@@ -1,0 +1,93 @@
+cmake_minimum_required(VERSION 3.25.2)
+
+foreach(directory IN ITEMS HTML_DIR OVERVIEW_HTML_DIR)
+    if(NOT IS_ABSOLUTE "${${directory}}" OR NOT IS_DIRECTORY "${${directory}}")
+        message(FATAL_ERROR "${directory} must be an absolute generated HTML directory.")
+    endif()
+endforeach()
+file(REAL_PATH "${HTML_DIR}" detail_dir)
+file(REAL_PATH "${OVERVIEW_HTML_DIR}" overview_dir)
+if(detail_dir STREQUAL overview_dir)
+    message(FATAL_ERROR "HTML_DIR and OVERVIEW_HTML_DIR must be separate renders.")
+endif()
+
+# Match one complete Doxygen 1.9.8 static SVG block. The bounded text matches
+# stop at the original header and frame, before the next graph or member table.
+function(find_diagram html kind suffix)
+    string(CONCAT pattern
+        "<div class=\"dynheader\"[^<>]*>[^<]*</div>[ \t\r\n]*"
+        "(<div class=\"dyncontent\">[ \t\r\n]*<div class=\"center\">"
+        "<iframe[^<>]* src=\"([A-Za-z0-9_]+__${kind}__${suffix}[.]svg)\"[^<>]*>"
+        "<p><b>[^<]*</b></p></iframe></div>[ \t\r\n]*</div>)")
+    string(REGEX MATCH "${pattern}" block "${html}")
+    set(diagram_block "${block}" PARENT_SCOPE)
+    set(diagram_content "${CMAKE_MATCH_1}" PARENT_SCOPE)
+    set(diagram_svg "${CMAKE_MATCH_2}" PARENT_SCOPE)
+endfunction()
+
+function(format_diagram content anchor title output)
+    string(REGEX REPLACE "<iframe( title=\"[^\"]*\")?"
+        "<iframe title=\"${title}\"" content "${content}")
+    set("${output}" "<div class=\"dynheader\" id=\"${anchor}\">${title}</div>\n${content}" PARENT_SCOPE)
+endfunction()
+
+file(GLOB class_pages RELATIVE "${HTML_DIR}"
+    "${HTML_DIR}/class*.html" "${HTML_DIR}/struct*.html" "${HTML_DIR}/union*.html")
+set(legend [=[<p class="legend"><a href="index.html#maintainer_uml_legend">UML diagram legend</a></p>]=])
+
+foreach(page IN LISTS class_pages)
+    file(READ "${HTML_DIR}/${page}" html)
+    set(original_html "${html}")
+    foreach(kind IN ITEMS inherit coll)
+        find_diagram("${html}" "${kind}" graph)
+        if(NOT diagram_block)
+            continue()
+        endif()
+        set(detail_block "${diagram_block}")
+        set(detail_content "${diagram_content}")
+        set(detail_svg "${diagram_svg}")
+        file(READ "${HTML_DIR}/${detail_svg}" detail_graph)
+        set(old_block "${detail_block}")
+        string(FIND "${html}" "${detail_block}\n${legend}" legend_position)
+        if(NOT legend_position EQUAL -1)
+            string(APPEND old_block "\n${legend}")
+        endif()
+
+        find_diagram("${html}" "${kind}" overview)
+        if(diagram_block)
+            string(REPLACE "${diagram_block}\n" "" html "${html}")
+        endif()
+        if(NOT detail_graph MATCHES "<g[^<>]*[ \t\r\n]class=\"edge\"")
+            string(REPLACE "${old_block}\n" "" html "${html}")
+            continue()
+        endif()
+
+        file(READ "${OVERVIEW_HTML_DIR}/${page}" overview_html)
+        find_diagram("${overview_html}" "${kind}" graph)
+        if(NOT diagram_block)
+            message(FATAL_ERROR "Overview for ${detail_svg} is missing from ${OVERVIEW_HTML_DIR}/${page}.")
+        endif()
+        file(READ "${OVERVIEW_HTML_DIR}/${diagram_svg}" overview_graph)
+        if(NOT overview_graph MATCHES "<g[^<>]*[ \t\r\n]class=\"edge\"")
+            message(FATAL_ERROR "Overview graph ${OVERVIEW_HTML_DIR}/${diagram_svg} has no relationship edges.")
+        endif()
+
+        string(REGEX REPLACE "__graph[.]svg$" "__overview.svg" overview_svg "${detail_svg}")
+        file(COPY_FILE "${OVERVIEW_HTML_DIR}/${diagram_svg}" "${HTML_DIR}/${overview_svg}" ONLY_IF_DIFFERENT)
+        string(REPLACE "src=\"${diagram_svg}\"" "src=\"${overview_svg}\""
+            overview_content "${diagram_content}")
+        if(kind STREQUAL "inherit")
+            set(anchor "inheritance")
+            set(title "Inheritance")
+        else()
+            set(anchor "collaboration")
+            set(title "Collaboration")
+        endif()
+        format_diagram("${overview_content}" "${anchor}-overview" "${title} overview" overview_block)
+        format_diagram("${detail_content}" "${anchor}-uml" "${title} UML detail" detail_block)
+        string(REPLACE "${old_block}" "${overview_block}\n${detail_block}\n${legend}" html "${html}")
+    endforeach()
+    if(NOT html STREQUAL original_html)
+        file(WRITE "${HTML_DIR}/${page}" "${html}")
+    endif()
+endforeach()

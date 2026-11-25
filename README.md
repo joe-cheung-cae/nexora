@@ -19,6 +19,30 @@ The example reports `accepted_steps=3`. See the [Reference case guide](docs/arch
 
 ## Documentation
 
+Build the C++ API reference for the installed interfaces with a local Doxygen
+installation and the same Kokkos package used to configure Nexora. The
+`NEXORA_BUILD_DOCS` option defaults to `OFF`, and the documentation target runs
+only when requested explicitly. Doxygen is needed only to generate the reference.
+
+```sh
+cmake -S . -B build/api-docs -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_TESTING=OFF -DNEXORA_BUILD_DOCS=ON
+cmake --build build/api-docs --target nexora_docs
+```
+
+Open `build/api-docs/docs/html/index.html` in a browser for offline use.
+
+For the maintainer reference, make Graphviz's `dot` executable available when
+configuring the build. Class pages show inheritance and collaboration in two
+views. A compact type overview appears above each detailed UML diagram.
+
+```sh
+cmake --build build/api-docs --target nexora_internal_docs
+```
+
+Open `build/api-docs/docs-internal/html/index.html` in a browser for offline use.
+See the [contribution guide](CONTRIBUTING.md#api-documentation) for validation.
+
 - [Build and validation](docs/architecture/build-and-validation.md)
 - [Architecture and roadmap](docs/architecture/overview.md)
 - [Serial SPH validation](validation/sph/serial.md)

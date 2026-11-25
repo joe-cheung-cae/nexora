@@ -12,6 +12,7 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 option(NEXORA_ENABLE_MPI "Build the MPI C API smoke probe" OFF)
+option(NEXORA_BUILD_DOCS "Enable the public and internal documentation targets" OFF)
 option(NEXORA_ENABLE_DOUBLE_PRECISION "Use double instead of float for nexora::real" OFF)
 set(NEXORA_REAL_IS_DOUBLE 0)
 if(NEXORA_ENABLE_DOUBLE_PRECISION)
@@ -72,6 +73,10 @@ add_subdirectory(src/methods/sph)
 add_subdirectory(src/participants/reference)
 add_subdirectory(src/participants/sph)
 add_subdirectory(apps/nexora)
+if(NEXORA_BUILD_DOCS)
+    include(cmake/NexoraDocs.cmake)
+endif()
+
 add_subdirectory(validation/sph/fixed_csr)
 add_subdirectory(benchmarks/sph)
 

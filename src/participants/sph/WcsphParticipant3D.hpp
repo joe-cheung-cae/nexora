@@ -32,6 +32,7 @@ struct WallValue3D {
     friend bool operator==(const WallValue3D&, const WallValue3D&) = default;
 };
 
+/// Synchronous participant that owns and publishes accepted 3D WCSPH state.
 class WcsphParticipant3D final : public ParticipantIF {
   public:
     using ResourceLimits = detail::ResourceBudget::Limits;
@@ -72,16 +73,26 @@ class WcsphParticipant3D final : public ParticipantIF {
     BindFields3D bind_fields(WcsphState3D& candidate) const;
     bool idle_with_state() const;
 
+    /// Retained input View handles released after publication of the initial state or at cleanup.
     ParticleFields3D initial_;
     std::size_t max_cells_;
     WcsphVerletParameters parameters_;
+    /// Initial velocity in owned-fluid input order, retained with the other inputs.
     Velocity3D::const_type initial_velocity_;
+    /// Initial density in owned-fluid input order, retained with the other inputs.
     Values::const_type initial_density_;
+    /// Wall input groups retained until initial publication or cleanup.
     std::vector<SphBoundary::WallGroupInput3D> initial_walls_;
     ParticipantId id_;
+    /// Tracks admitted storage for accepted data, candidates and stepping workspace.
     detail::ResourceBudget budget_;
+    /// Participant-owned execution instance that outlives the stepper borrowing it.
     std::optional<Kokkos::Serial> exec_;
+    /// Owns wall groups and reusable workspace. Borrows the execution instance and budget.
     std::optional<WcsphStep3D> step_;
+    /// @brief Sole owner of the latest accepted state and its read bindings.
+    ///
+    /// Replaced after successful evaluation and released at cleanup.
     std::unique_ptr<WcsphState3D> accepted_;
     bool finalized_{};
     mutable bool active_{};

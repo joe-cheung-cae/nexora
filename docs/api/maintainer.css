@@ -1,0 +1,119 @@
+/* Supplement Doxygen's theme. Keep links, anchors and search under its control. */
+div.header {
+    background-image: none;
+    padding: .55rem clamp(.9rem, 2.5vw, 2rem);
+}
+
+div.headertitle {
+    padding: .3rem 0;
+}
+
+div.header .title {
+    font-size: clamp(1.35rem, 2vw, 1.8rem);
+    line-height: 1.25;
+    overflow-wrap: anywhere;
+}
+
+div.summary {
+    float: none;
+    width: auto;
+    text-align: start;
+    font-size: .8rem;
+    line-height: 1.55;
+}
+
+div.contents {
+    max-inline-size: 76rem;
+    margin-inline: clamp(.9rem, 2.5vw, 2rem);
+}
+
+div.contents > .textblock {
+    max-inline-size: 78ch;
+}
+
+div.contents > p > code:has(> a[href*="_source.html"]) {
+    display: inline-block;
+    max-inline-size: 100%;
+    box-sizing: border-box;
+    overflow-wrap: anywhere;
+    padding: .35rem .6rem;
+    background: var(--memdecl-background-color);
+    border-inline-start: 3px solid var(--group-header-separator-color);
+}
+
+table.memberdecls {
+    inline-size: 100%;
+    margin-block: 0.9rem 1.25rem;
+}
+
+table.memberdecls td[class^="memItemLeft"],
+table.memberdecls td[class^="memItemRight"] {
+    padding-block: 0.22rem;
+    vertical-align: baseline;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+table.memberdecls td[class^="memItemLeft"] {
+    text-align: start;
+    padding-inline-end: 1rem;
+}
+
+table.memberdecls td[class^="memItemRight"] {
+    inline-size: 65%;
+}
+
+table.memberdecls td[class^="mdescRight"] {
+    padding-block-end: 0.35rem;
+}
+
+.memitem {
+    /* A table's intrinsic width can otherwise stretch the entire page for a constructor. */
+    display: block !important;
+    clear: both;
+}
+
+.memproto {
+    overflow-x: auto;
+}
+
+div.dynheader {
+    margin-block-start: 0.9rem;
+    font-weight: 600;
+}
+
+div.dyncontent {
+    overflow-x: auto;
+    margin-block: .3rem 1.1rem;
+    border-block: 1px solid var(--memdecl-separator-color);
+    padding-block: .55rem;
+}
+
+/* Preserve the SVG's natural text size. Wide diagrams scroll inside their section. */
+div.dyncontent iframe {
+    display: block;
+    margin-inline: auto;
+    border: 0;
+}
+
+div.dyncontent + .legend {
+    margin-top: -.85rem;
+    font-size: .8rem;
+    text-align: center;
+    text-underline-offset: 0.15em;
+}
+
+@media (max-width: 42rem) {
+    .memdoc {
+        overflow-wrap: anywhere;
+        overflow-x: auto;
+    }
+
+    table.memberdecls td[class^="memItemLeft"] {
+        padding-inline-end: 0.45rem;
+    }
+
+    table.memberdecls td[class^="memItemRight"] {
+        inline-size: auto;
+    }
+}

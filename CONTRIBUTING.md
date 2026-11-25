@@ -33,6 +33,47 @@ The package is required offline; configuration does not download it. `nexora::da
 
 The [Serial validation runner](docs/architecture/serial-ci-validation.md) provisions the checksum-verified archives in a separate step, then uses the local Kokkos and GoogleTest packages for the dependency check, CTest, Decimal oracle and relocated package consumer. For routine validation use float Debug and double Release. For precision, packaging or merge acceptance run both precisions with each build type. Use matching Debug and Release Kokkos packages for MSVC. The CI matrix requests all four combinations on Linux GCC, Linux Clang and Windows MSVC, with the separate MPI smoke on Linux. See the runner record for the profiles actually executed.
 
+## API documentation
+
+Document installed interfaces in their headers, including protected extension
+points for `ParticipantIF` implementations. Use Doxygen comments (`///` or
+`/** ... */`) for caller-facing contracts. Describe relevant preconditions,
+ownership, lifetime, failure behavior and publication rules. Match `@param`
+names to the declaration and use `@ref` for API links. The reference includes
+undocumented public declarations, so check both the API index and the rendered
+text on each page you change. When editing implementation members, document
+their ownership and lifecycle in Doxygen comments and review the rendered
+private member sections in the maintainer reference.
+
+The [README](README.md#documentation) shows how to enable documentation.
+From that build directory, build `nexora_docs` for the installed API reference
+at `docs/html/index.html` or `nexora_internal_docs` for the maintainer reference
+at `docs-internal/html/index.html`. Both pages open offline. The maintainer
+target uses a local Graphviz `dot` for both views on a class page. The
+overview shows the connected types. The UML detail adds fields and methods.
+Read the member declarations and comments for ownership and lifetime details.
+
+To repeat the positive documentation checks with local Doxygen and Graphviz
+and the verified Release Kokkos package, run from the checkout root.
+
+```sh
+docs_checks_root=$(mktemp -d)
+python3 tools/validate_docs.py --kokkos-prefix "<kokkos-release-prefix>" \
+  --work-dir "$docs_checks_root/builds" --logs "$docs_checks_root/logs"
+```
+
+The validator uses clean float and double builds with `BUILD_TESTING=OFF`.
+It checks that an ordinary build leaves the API home page absent and that the
+explicit `nexora_docs` target creates it. It checks navigation, public and
+protected declarations, rendered contracts and the configured `nexora::real`
+alias. It also checks that Doxygen fails with the expected diagnostics for a
+wrong `@param` name and an unresolved explicit `@ref`. For the internal
+reference it checks the same type links and relationships in the overview
+and detailed SVGs, the field declarations in UML nodes, and the private
+member table. Open the
+float build's `docs-internal/html/index.html` to review class pages and their
+clickable diagrams offline.
+
 ## Change expectations after design approval
 
 - Keep changes focused and preserve numerical contracts. Implement the accepted Kokkos boundaries; remove obsolete native/provider routes according to the migration map.

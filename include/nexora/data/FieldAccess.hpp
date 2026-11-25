@@ -7,8 +7,12 @@ struct FieldGrant;
 class FieldIssuer;
 } // namespace detail
 
-// Host-only grants for synchronous access. The operation must finish before its
-// grant is released, including all uses of native Views copied from the binding.
+/** @brief Move-only host lease for synchronous read access to a field allocation.
+ *
+ * A @ref ReadField holds the lease for its binding. Multiple read leases can
+ * coexist for an allocation. Finish all reads, including work using native
+ * Views copied from the binding, before releasing the lease.
+ */
 class ReadLease {
   public:
     ReadLease(ReadLease&&) noexcept = default;
@@ -27,6 +31,11 @@ class ReadLease {
     std::shared_ptr<detail::FieldGrant> grant_;
 };
 
+/** @brief Move-only host lease for exclusive synchronous write access to a field allocation.
+ *
+ * A @ref WriteField holds the lease for its binding. Finish all work that uses
+ * the writable View before releasing the lease.
+ */
 class WriteLease {
   public:
     WriteLease(WriteLease&&) noexcept = default;

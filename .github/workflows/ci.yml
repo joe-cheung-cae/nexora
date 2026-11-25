@@ -40,10 +40,17 @@ jobs:
       NEXORA_CC: ${{ matrix.toolchain.cc }}
       NEXORA_CXX: ${{ matrix.toolchain.cxx }}
       NEXORA_CONFIG: ${{ matrix.config }}
+      NEXORA_DOCS_CI: ${{ matrix.toolchain.name == 'Linux GCC' && matrix.config == 'Release' }}
     steps:
       - name: Set the runner validation path
         shell: bash
-        run: printf 'NEXORA_RUN=%s/nexora\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+        run: |
+          deps="$RUNNER_TEMP/nexora"
+          run="$deps"
+          if [[ "$NEXORA_DOCS_CI" == true ]]; then
+            run=$(mktemp -d "$RUNNER_TEMP/nexora-docs.XXXXXXXX")
+          fi
+          printf 'NEXORA_DEPS=%s\nNEXORA_RUN=%s\n' "$deps" "$run" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - name: Set up MSVC x64 for Ninja
         if: runner.os == 'Windows'
@@ -75,8 +82,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ${{ env.NEXORA_RUN }}/kokkos
-            ${{ env.NEXORA_RUN }}/gtest
+            ${{ env.NEXORA_DEPS }}/kokkos
+            ${{ env.NEXORA_DEPS }}/gtest
           key: ${{ steps.dependencies.outputs.key }}-${{ hashFiles('tools/validate_serial.py') }}
       - name: Acquire and provision the locked Kokkos Serial and GoogleTest dependencies
         if: steps.cache.outputs.cache-hit != 'true'
@@ -84,29 +91,49 @@ jobs:
         run: |
           python tools/validate_serial.py --cc "$NEXORA_CC" --cxx "$NEXORA_CXX" --config "$NEXORA_CONFIG" provision \
             --archive "$NEXORA_RUN/kokkos-5.2.2.tar.gz" --gtest-archive "$NEXORA_RUN/googletest-1.17.0.tar.gz" --download \
-            --prefix "$NEXORA_RUN/kokkos" --gtest-prefix "$NEXORA_RUN/gtest" --logs "$NEXORA_RUN/logs"
+            --prefix "$NEXORA_DEPS/kokkos" --gtest-prefix "$NEXORA_DEPS/gtest" --logs "$NEXORA_RUN/logs"
+      - name: Prepare signed Ubuntu Doxygen and Graphviz packages
+        if: env.NEXORA_DOCS_CI == 'true'
+        run: bash tools/ci_doxygen.sh prepare
+      - name: Verify GCC Release Serial and optional documentation without network access
+        if: env.NEXORA_DOCS_CI == 'true'
+        run: |
+          sudo --non-interactive /usr/bin/unshare --net --setgid "$(id -g)" --setuid "$(id -u)" -- \
+            /usr/bin/env "PATH=$PATH" "ImageOS=${ImageOS:-}" "ImageVersion=${ImageVersion:-}" \
+            "NEXORA_RUN=$NEXORA_RUN" "NEXORA_DEPS=$NEXORA_DEPS" "NEXORA_CC=$NEXORA_CC" \
+            "NEXORA_CXX=$NEXORA_CXX" bash tools/ci_doxygen.sh verify
       - name: Verify Serial without network access
-        if: runner.os == 'Linux' && !matrix.toolchain.mpi
+        if: runner.os == 'Linux' && !matrix.toolchain.mpi && env.NEXORA_DOCS_CI != 'true'
         shell: bash
         run: |
           sudo --non-interactive /usr/bin/unshare --net --setgid "$(id -g)" --setuid "$(id -u)" -- \
             /usr/bin/env "PATH=$PATH" "ImageVersion=${ImageVersion:-}" "$(command -v python)" tools/validate_serial.py \
             --cc "$NEXORA_CC" --cxx "$NEXORA_CXX" --config "$NEXORA_CONFIG" verify \
-            --prefix "$NEXORA_RUN/kokkos" --gtest-prefix "$NEXORA_RUN/gtest" --work-dir "$NEXORA_RUN/build" --logs "$NEXORA_RUN/logs" \
+            --prefix "$NEXORA_DEPS/kokkos" --gtest-prefix "$NEXORA_DEPS/gtest" --work-dir "$NEXORA_RUN/build" --logs "$NEXORA_RUN/logs" \
             --require-network-blocked
       - name: Verify Windows Serial
         if: runner.os == 'Windows'
         shell: bash
         run: |
           python tools/validate_serial.py --cc "$NEXORA_CC" --cxx "$NEXORA_CXX" --config "$NEXORA_CONFIG" verify \
-            --prefix "$NEXORA_RUN/kokkos" --gtest-prefix "$NEXORA_RUN/gtest" --work-dir "$NEXORA_RUN/build" --logs "$NEXORA_RUN/logs"
+            --prefix "$NEXORA_DEPS/kokkos" --gtest-prefix "$NEXORA_DEPS/gtest" --work-dir "$NEXORA_RUN/build" --logs "$NEXORA_RUN/logs"
       - name: Verify the optional two-rank MPI smoke
         if: matrix.toolchain.mpi
         shell: bash
         run: |
           python tools/validate_serial.py --cc "$NEXORA_CC" --cxx "$NEXORA_CXX" --config "$NEXORA_CONFIG" verify \
-            --prefix "$NEXORA_RUN/kokkos" --gtest-prefix "$NEXORA_RUN/gtest" --work-dir "$NEXORA_RUN/build" --logs "$NEXORA_RUN/logs" \
+            --prefix "$NEXORA_DEPS/kokkos" --gtest-prefix "$NEXORA_DEPS/gtest" --work-dir "$NEXORA_RUN/build" --logs "$NEXORA_RUN/logs" \
             --precisions float --mpi
+      - name: Retain the offline public and internal HTML manuals
+        if: env.NEXORA_DOCS_CI == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nexora-API-manuals
+          if-no-files-found: error
+          path: |
+            ${{ env.NEXORA_RUN }}/docs/docs-float/docs/html
+            ${{ env.NEXORA_RUN }}/docs/docs-double/docs/html
+            ${{ env.NEXORA_RUN }}/docs/docs-float/docs-internal/html
       - name: Retain runner logs and validation evidence
         if: always()
         uses: actions/upload-artifact@v4

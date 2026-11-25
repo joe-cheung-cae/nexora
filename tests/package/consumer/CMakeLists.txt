@@ -3,7 +3,7 @@ project(NexoraConsumer LANGUAGES CXX)
 
 set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(Nexora 0.1 CONFIG REQUIRED)
-foreach(internal_target IN ITEMS methods_reference participants_reference methods_sph
+foreach(internal_target IN ITEMS docs internal_docs methods_reference participants_reference methods_sph
                                  participants_sph sph_fixed_csr_fixture sph_fixed_csr_tests
                                  sph_tests sph_benchmark sph_tank_trajectory kokkos_test_main)
     if(TARGET "nexora_${internal_target}" OR TARGET "nexora::${internal_target}"
@@ -11,6 +11,9 @@ foreach(internal_target IN ITEMS methods_reference participants_reference method
         message(FATAL_ERROR "Internal target is exported: ${internal_target}")
     endif()
 endforeach()
+if(TARGET Doxygen::doxygen)
+    message(FATAL_ERROR "The installed Nexora package introduced a Doxygen dependency")
+endif()
 foreach(retired_target IN ITEMS nexora_exec_api nexora_exec_cpu nexora::exec_api nexora::exec_cpu)
     if(TARGET "${retired_target}")
         message(FATAL_ERROR "Retired execution target is still exported: ${retired_target}")
