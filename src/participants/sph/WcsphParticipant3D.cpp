@@ -1,18 +1,14 @@
 #include "WcsphParticipant3D.hpp"
 
-#include <algorithm>
 #include <cmath>
 #include <data/EntityCapacity.hpp>
 #include <data/FieldIssuer.hpp>
-#include <limits>
 #include <new>
 #include <string>
 #include <utility>
 
 namespace nexora::sph {
 namespace {
-
-using SphBoundary::FixedWall3D;
 
 struct Failure {
     Status status;
@@ -149,31 +145,18 @@ WcsphParticipant3D::WcsphParticipant3D(ParticleFields3D fluid, std::size_t max_c
 }
 
 BindFields3D WcsphParticipant3D::bind_fields(WcsphState3D& candidate) const {
-    return [this, &candidate, base = candidate.stamp](WcsphState3D& target, const FieldStamp& stamp,
-                                                     const Geometry3D::Indices& owned_rows,
-                                                     FieldGroup3D group,
-                                                     const FieldWrite3D& write) {
-        auto expected_stamp = base;
-        expected_stamp.topology = candidate.geometry.topology;
-        expected_stamp.geometry = candidate.geometry.geometry;
-        expected_stamp.layout = candidate.geometry.layout;
-        if (&target != &candidate || &owned_rows != &candidate.geometry.owned_row_to_input ||
-            stamp != expected_stamp || stamp != target.stamp)
-            return Status{StatusCode::invalid_state, "WCSPH field grant does not match its stage"};
-        using Group = FieldGroup3D;
-        const auto order = base.accepted ? std::array{Group::density, Group::velocity, Group::pressure}
-                                         : std::array{Group::density, Group::pressure, Group::velocity};
-        const auto bound = std::size_t(target.density.has_value()) +
-                           std::size_t(target.pressure.has_value()) +
-                           std::size_t(target.velocity.has_value());
-        if (bound >= order.size() || group != order[bound])
-            return Status{StatusCode::invalid_state, "WCSPH field grant is out of order"};
-
+    return [this, &candidate](FieldGroup3D group, const FieldWrite3D& write,
+                              const std::function<bool()>& evict_unused) {
         return guarded([&]() -> Status {
-            const auto rows = owned_rows.extent(0);
+            const auto rows = candidate.geometry.owned_row_to_input.extent(0);
+            const auto& stamp = candidate.stamp;
             const auto reserve = [&](std::size_t components) {
-                return require(budget_.reserve(
-                    require(detail::checked_array_bytes(rows, components * sizeof(real)))));
+                const auto bytes = require(detail::checked_array_bytes(rows, components * sizeof(real)));
+                auto storage = budget_.reserve(bytes);
+                if (!storage.ok() && storage.status().code() == StatusCode::resource_exhausted &&
+                    evict_unused && evict_unused())
+                    storage = budget_.reserve(bytes);
+                return require(std::move(storage));
             };
             switch (group) {
             case FieldGroup3D::density: {
@@ -187,8 +170,8 @@ BindFields3D WcsphParticipant3D::bind_fields(WcsphState3D& candidate) const {
                 }
                 auto field = read_field(Values::const_type(values), density_field(FieldAccess::read),
                                         stamp);
-                target.field_storage[0] = std::move(storage);
-                target.density.emplace(std::move(field));
+                candidate.field_storage[0] = std::move(storage);
+                candidate.density.emplace(std::move(field));
                 return {};
             }
             case FieldGroup3D::pressure: {
@@ -210,9 +193,9 @@ BindFields3D WcsphParticipant3D::bind_fields(WcsphState3D& candidate) const {
                                            pressure_field(FieldAccess::read), stamp);
                 auto acceleration = read_field(Acceleration3D::const_type(force),
                                                acceleration_field(FieldAccess::read), stamp);
-                target.field_storage[1] = std::move(storage);
-                target.pressure.emplace(std::move(pressure));
-                target.acceleration.emplace(std::move(acceleration));
+                candidate.field_storage[1] = std::move(storage);
+                candidate.pressure.emplace(std::move(pressure));
+                candidate.acceleration.emplace(std::move(acceleration));
                 return {};
             }
             case FieldGroup3D::velocity: {
@@ -226,8 +209,8 @@ BindFields3D WcsphParticipant3D::bind_fields(WcsphState3D& candidate) const {
                 }
                 auto velocity = read_field(Velocity3D::const_type(values),
                                            velocity_field(FieldAccess::read), stamp);
-                target.field_storage[2] = std::move(storage);
-                target.velocity.emplace(std::move(velocity));
+                candidate.field_storage[2] = std::move(storage);
+                candidate.velocity.emplace(std::move(velocity));
                 return {};
             }
             }
@@ -236,19 +219,7 @@ BindFields3D WcsphParticipant3D::bind_fields(WcsphState3D& candidate) const {
     };
 }
 
-Status WcsphParticipant3D::complete_step(WcsphState3D& candidate) const {
-    const auto& parameters = step_->parameters();
-    const auto maximum = cfl_step_3d(*exec_, candidate.velocity->view(), parameters.eos.sound_speed,
-                                     parameters.cfl, parameters.smoothing_length);
-    if (!maximum.ok())
-        return maximum.status();
-    candidate.maximum_step = maximum.value();
-    for (std::size_t g = 0; g < candidate.wall_phases.extent(0); ++g)
-        candidate.maximum_step = std::min(candidate.maximum_step, candidate.wall_phases(g).maximum_step);
-    return {};
-}
-
-TimeConstraint WcsphParticipant3D::time_constraint(double) const {
+TimeConstraint WcsphParticipant3D::time_constraint() const {
     TimeConstraint result;
     if (accepted_)
         result.maximum_step = accepted_->maximum_step;
@@ -256,13 +227,13 @@ TimeConstraint WcsphParticipant3D::time_constraint(double) const {
 }
 
 Status WcsphParticipant3D::initialize(double time) {
-    if (stage_ != Stage::created || evaluating_ || !Kokkos::is_initialized() || Kokkos::is_finalized())
+    if (finalized_ || accepted_ || active_ || !Kokkos::is_initialized() || Kokkos::is_finalized())
         return {StatusCode::invalid_state,
                 "3D SPH initialization requires a new participant and active Kokkos"};
     if (!std::isfinite(time))
         return {StatusCode::invalid_argument, "invalid 3D SPH initial time"};
 
-    const ActiveScope evaluation(evaluating_);
+    const ActiveScope evaluation(active_);
     const auto result = guarded([&]() -> Status {
         step_.emplace(exec_.emplace(), budget_, max_cells_, parameters_);
         step_->observer_context_ = observer_context_;
@@ -271,19 +242,15 @@ Status WcsphParticipant3D::initialize(double time) {
         auto& stamp = candidate->stamp;
         stamp.accepted = true;
         stamp.time.physical_time = stamp.valid_from = stamp.valid_until = time;
-        if (auto status = step_->initialize_state(time, initial_, initial_velocity_, initial_density_,
+        if (auto status = step_->initialize_state(initial_, initial_velocity_, initial_density_,
                                                   initial_walls_, *candidate, bind_fields(*candidate));
             !status.ok())
             return status;
-        if (auto status = complete_step(*candidate); !status.ok())
-            return status;
-        step_->commit();
         accepted_ = std::move(candidate);
         initial_ = {};
         initial_velocity_ = {};
         initial_density_ = {};
         decltype(initial_walls_){}.swap(initial_walls_);
-        stage_ = Stage::initialized;
         return {};
     });
     if (!result.ok()) {
@@ -293,122 +260,31 @@ Status WcsphParticipant3D::initialize(double time) {
     return result;
 }
 
-Status WcsphParticipant3D::prepare() {
-    if (stage_ != Stage::initialized)
-        return {StatusCode::invalid_state, "3D SPH is not initialized"};
-    stage_ = Stage::ready;
-    return {};
-}
+Status WcsphParticipant3D::do_step(const TimeInterval& interval) {
+    if (!idle_with_state())
+        return {StatusCode::invalid_state, "3D SPH step requires an idle initialized participant"};
+    if (interval.begin != accepted_->stamp.time.physical_time)
+        return {StatusCode::invalid_argument, "3D SPH step must begin at the accepted time"};
 
-Status WcsphParticipant3D::begin_window(const TimeInterval& interval) {
-    if (stage_ != Stage::ready || reading_)
-        return {StatusCode::invalid_state, "3D SPH window requires an idle prepared participant"};
-    if (auto status = validate_time_step(time_constraint(interval.begin), interval.duration());
-        !status.ok())
-        return status;
-    if (interval.duration() > accepted_->maximum_step)
-        return {StatusCode::invalid_argument, "requested 3D SPH step exceeds accepted bound"};
-    if (interval.begin != accepted_->stamp.time.physical_time || !std::isfinite(interval.end) ||
-        interval.end <= interval.begin || interval.end != interval.begin + interval.duration())
-        return {StatusCode::invalid_argument, "invalid 3D SPH window interval"};
-    if (attempt_ == std::numeric_limits<std::uint64_t>::max() ||
-        !detail::checked_next_version(accepted_->stamp.accepted_version).ok())
-        return {StatusCode::resource_exhausted, "3D SPH attempt or accepted version exhausted"};
-    return guarded([&]() -> Status {
-        // The immutable accepted owner remains in place throughout the window.
-        recovery_ = require(budget_.reserve(0, 1));
-        ++attempt_;
-        interval_ = interval;
-        stage_ = Stage::open;
-        return {};
-    });
-}
-
-Status WcsphParticipant3D::advance_trial(const TimeInterval& interval) {
-    if (stage_ != Stage::open || !matches(interval))
-        return {StatusCode::invalid_state, "no matching open 3D SPH window"};
-    const ActiveScope evaluation(evaluating_);
-    stage_ = Stage::failed;
+    const ActiveScope evaluation(active_);
     return guarded([&]() -> Status {
         auto candidate = std::make_unique<WcsphState3D>();
         auto& stamp = candidate->stamp;
-        stamp = accepted_->stamp;
-        stamp.accepted = false;
-        stamp.time = {interval.end, stamp.accepted_version.value() + 1, 0, 0};
+        stamp.accepted = true;
+        stamp.accepted_version = require(detail::checked_next_version(accepted_->stamp.accepted_version));
+        stamp.time = {interval.end, stamp.accepted_version.value(), 0, 0};
         stamp.valid_from = stamp.valid_until = interval.end;
-        stamp.trial = {stamp.time.window, attempt_, 0, 0};
         if (auto status = step_->try_step(interval, *accepted_, *candidate, bind_fields(*candidate));
             !status.ok())
             return status;
-        if (auto status = complete_step(*candidate); !status.ok())
-            return status;
-        trial_ = std::move(candidate);
-        stage_ = Stage::advanced;
+        accepted_ = std::move(candidate);
         return {};
     });
-}
-
-Status WcsphParticipant3D::prepare_commit(const TimeInterval& interval) {
-    if (stage_ != Stage::advanced || !matches(interval))
-        return {StatusCode::invalid_state, "no matching advanced 3D SPH window"};
-    stage_ = Stage::failed;
-    return guarded([&]() -> Status {
-        auto stamp = trial_->stamp;
-        stamp.accepted = true;
-        stamp.trial = {};
-        stamp.accepted_version = StateVersion{stamp.time.window};
-
-        decltype(trial_->field_storage) storage;
-        auto density = trial_->density->view();
-        auto pressure = trial_->pressure->view();
-        auto acceleration = trial_->acceleration->view();
-        auto velocity = trial_->velocity->view();
-        storage = std::move(trial_->field_storage);
-        trial_->density.reset();
-        trial_->pressure.reset();
-        trial_->acceleration.reset();
-        trial_->velocity.reset();
-
-        auto candidate = std::make_unique<WcsphState3D>();
-        candidate->density.emplace(read_field(density, density_field(FieldAccess::read), stamp));
-        candidate->pressure.emplace(read_field(pressure, pressure_field(FieldAccess::read), stamp));
-        candidate->acceleration.emplace(
-            read_field(acceleration, acceleration_field(FieldAccess::read), stamp));
-        candidate->velocity.emplace(read_field(velocity, velocity_field(FieldAccess::read), stamp));
-        candidate->field_storage = std::move(storage);
-        candidate->phase_storage = std::move(trial_->phase_storage);
-        candidate->wall_phases = std::move(trial_->wall_phases);
-        candidate->geometry = std::move(trial_->geometry);
-        candidate->maximum_step = trial_->maximum_step;
-        candidate->stamp = stamp;
-        pending_ = std::move(candidate);
-        stage_ = Stage::precommitted;
-        return {};
-    });
-}
-
-Status WcsphParticipant3D::commit_window(const TimeInterval& interval) {
-    if (stage_ != Stage::precommitted || !matches(interval))
-        return {StatusCode::invalid_state, "no matching prepared 3D SPH commit"};
-    accepted_.swap(pending_);
-    step_->commit();
-    close_window();
-    return {};
-}
-
-Status WcsphParticipant3D::restore_window() {
-    if (evaluating_ || (stage_ != Stage::open && stage_ != Stage::advanced &&
-                        stage_ != Stage::precommitted && stage_ != Stage::failed))
-        return {StatusCode::invalid_state, "no 3D SPH window to restore"};
-    close_window();
-    step_->restore();
-    return {};
 }
 
 Status WcsphParticipant3D::finalize() {
-    if (stage_ == Stage::finalized || reading_ || evaluating_)
+    if (finalized_ || active_)
         return {StatusCode::invalid_state, "3D SPH cannot finalize during an active operation or after closing"};
-    close_window();
     accepted_.reset();
     step_.reset();
     initial_ = {};
@@ -416,15 +292,15 @@ Status WcsphParticipant3D::finalize() {
     initial_density_ = {};
     decltype(initial_walls_){}.swap(initial_walls_);
     exec_.reset();
-    stage_ = Stage::finalized;
+    finalized_ = true;
     return {};
 }
 
 Status WcsphParticipant3D::visit_committed_rows(
     const std::function<void(CommittedRow3D)>& visit) const {
-    if (!can_read())
+    if (!idle_with_state())
         return {StatusCode::invalid_state, "3D SPH committed rows are unavailable"};
-    const ActiveScope access(reading_);
+    const ActiveScope access(active_);
     try {
         const auto& state = *accepted_;
         const auto& geometry = state.geometry;
@@ -445,9 +321,9 @@ Status WcsphParticipant3D::visit_committed_rows(
 }
 
 Result<WallValue3D> WcsphParticipant3D::read_committed_wall(std::uint64_t id) const {
-    if (!can_read())
+    if (!idle_with_state())
         return Status{StatusCode::invalid_state, "3D SPH committed wall is unavailable"};
-    const ActiveScope access(reading_);
+    const ActiveScope access(active_);
     const auto& state = *accepted_;
     const auto& fields = state.geometry.fields();
     for (std::size_t slot = 0; slot < fields.ids.extent(0); ++slot) {
@@ -463,27 +339,14 @@ Result<WallValue3D> WcsphParticipant3D::read_committed_wall(std::uint64_t id) co
 }
 
 Status WcsphParticipant3D::release_workspace() {
-    if (!can_read())
+    if (!idle_with_state())
         return {StatusCode::invalid_state, "3D SPH workspace release requires an idle participant"};
     step_->release_workspace();
     return {};
 }
 
-bool WcsphParticipant3D::matches(const TimeInterval& interval) const {
-    return interval.begin == interval_.begin && interval.end == interval_.end &&
-           interval.duration() == interval_.duration();
-}
-
-bool WcsphParticipant3D::can_read() const {
-    return !reading_ && (stage_ == Stage::initialized || stage_ == Stage::ready);
-}
-
-void WcsphParticipant3D::close_window() noexcept {
-    pending_.reset();
-    trial_.reset();
-    recovery_.reset();
-    interval_ = {};
-    stage_ = Stage::ready;
+bool WcsphParticipant3D::idle_with_state() const {
+    return accepted_ && !active_;
 }
 
 } // namespace nexora::sph

@@ -10,12 +10,11 @@
 #include <nexora/data/FieldBinding.hpp>
 #include <nexora/data/FieldDescriptor.hpp>
 #include <nexora/data/FieldStamp.hpp>
-#include <optional>
 #include <vector>
 
 namespace nexora::reference {
 
-enum class TrialField { x, q };
+enum class Field { x, q };
 using Values = Kokkos::View<real*, Kokkos::HostSpace>;
 using ConstValues = Values::const_type;
 using EntityIds = Kokkos::View<std::uint64_t*, Kokkos::HostSpace>;
@@ -27,11 +26,6 @@ using ConstHistory = History::const_type;
 struct Control {
     std::uint64_t sequence = 0;
     friend bool operator==(const Control&, const Control&) = default;
-};
-
-struct DiagnosticKey {
-    FieldStamp stamp;
-    friend bool operator==(const DiagnosticKey&, const DiagnosticKey&) = default;
 };
 
 struct Config {
@@ -73,7 +67,6 @@ class Snapshot {
     std::uint64_t diagnostic = 0;
     StateVersion version{};
     double time = 0.0;
-    std::uint64_t attempt = 0;
     FieldStamp stamp() const noexcept {
         return accepted_stamp(version, time);
     }
@@ -118,67 +111,29 @@ class State {
   private:
     friend class Participant;
 
-    enum class Phase {
-        created,
-        initialized,
-        ready,
-        open,
-        advanced,
-        failed_trial,
-        commit_ready,
-        failed,
-        finalized
-    };
-
+    enum class Phase { created, initialized, finalized };
     Result<AllocationSize> preflight_initialize(double time) const;
-    Result<std::size_t> preflight_begin(const TimeInterval& interval) const;
-    // Participant must preflight and reserve the returned payload size before
-    // these private allocation stages, without intervening state mutation.
+    Result<std::size_t> preflight_step(const TimeInterval& interval) const;
     Status initialize(double time, const Kokkos::Serial& exec);
     void cancel_initialization() noexcept;
     void finish_initialization() noexcept;
-    Status prepare();
-    Status begin(const TimeInterval& interval, const Kokkos::Serial& exec,
-                 const ConstHistory& accepted_history);
-    Status advance(const TimeInterval& interval, const Kokkos::Serial& exec, const ConstValues& x,
-                   const ConstValues& q, const Values& tx, const Values& tq,
-                   const History& history, const FieldStamp& history_stamp);
-    Status check_commit(const TimeInterval& interval, const FieldStamp& history_stamp) const;
-    Status commit(const TimeInterval& interval);
-    Status restore();
+    static Status evaluate(const Kokkos::Serial& exec, real dt, real lambda,
+                           const ConstValues& x, const ConstValues& q,
+                           const Values& next_x, const Values& next_q,
+                           const History& history, std::uint64_t sequence);
     Status finalize();
     Result<Snapshot> snapshot() const;
-    Result<DiagnosticKey> trial_diagnostic_key() const;
-    Result<std::uint64_t> trial_diagnostic(const DiagnosticKey& key) const;
-    static Status check_finite(const Kokkos::Serial& exec, const ConstValues& values);
-    static Status check_finite(const Kokkos::Serial& exec, const ConstValues& x,
-                               const ConstValues& q);
-    static FieldDescriptor field_descriptor(TrialField field, bool accepted, FieldAccess access);
-    static FieldDescriptor history_descriptor(bool accepted, FieldAccess access);
+    static FieldDescriptor field_descriptor(Field field, FieldAccess access);
+    static FieldDescriptor history_descriptor(FieldAccess access);
     FieldStamp accepted_stamp() const noexcept;
-    FieldStamp trial_stamp() const noexcept;
-    FieldStamp next_accepted_stamp() const noexcept;
-    bool matches(const TimeInterval& interval) const noexcept;
     Config config_;
     Phase phase_ = Phase::created;
     ConstEntityIds ids_;
     ConstValues accepted_x_, accepted_q_;
-    Values trial_x_, trial_q_;
     ConstHistory accepted_history_;
-    History trial_history_;
-    Control accepted_control_, trial_control_;
+    Control accepted_control_;
     std::uint64_t accepted_diagnostic_ = 0;
-    struct DiagnosticCache {
-        // Only history/control contribute; x/q receive does not invalidate it.
-        // The authority stamp carries layout, accepted version, attempt and
-        // storage incarnation. Rebuilt after advance; discarded with its trial.
-        DiagnosticKey key;
-        std::uint64_t value = 0;
-    };
-    std::optional<DiagnosticCache> diagnostic_cache_;
-    TimeInterval interval_{};
-    real trial_dt_ = real{0};
     double time_ = 0.0;
-    std::uint64_t version_ = 0, next_attempt_ = 0, accepted_attempt_ = 0, current_attempt_ = 0;
+    std::uint64_t version_ = 0;
 };
 } // namespace nexora::reference

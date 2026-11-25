@@ -40,24 +40,20 @@ struct StepOutputs3D {
     Velocity3D velocity;
 };
 using FieldWrite3D = std::function<Status(const StepOutputs3D&)>;
-using BindFields3D = std::function<Status(WcsphState3D&, const FieldStamp&,
-                                          const Geometry3D::Indices&, FieldGroup3D,
-                                          const FieldWrite3D&)>;
+using BindFields3D = std::function<Status(FieldGroup3D, const FieldWrite3D&,
+                                          const std::function<bool()>& evict_unused)>;
 enum class StepStage3D { initial, start, end };
 
 class WcsphStep3D {
   public:
     WcsphStep3D(const Kokkos::Serial&, const detail::ResourceBudget&, std::size_t max_cells,
                 WcsphVerletParameters);
-    Status initialize_state(double time, const ParticleFields3D&, const Velocity3D::const_type&,
+    Status initialize_state(const ParticleFields3D&, const Velocity3D::const_type&,
                             const Values::const_type&, const std::vector<SphBoundary::WallGroupInput3D>&,
                             WcsphState3D&, const BindFields3D&);
     Status try_step(const TimeInterval&, const WcsphState3D& current, WcsphState3D& candidate,
                     const BindFields3D&);
-    void commit() noexcept;
-    void restore() noexcept;
     void release_workspace() noexcept;
-    const WcsphVerletParameters& parameters() const { return parameters_; }
 
   private:
     friend struct WcsphTestAccess;
@@ -97,14 +93,14 @@ class WcsphStep3D {
     Ticket reserve_wall_stage(std::size_t bytes);
     WallPhases3D::non_const_type phase_storage(WcsphState3D&);
     WallSamples sample_groups(const WallPhases3D&);
-    void certify(const WallPhases3D::non_const_type&) const;
+    void set_next_step(WcsphState3D&) const;
     SphBoundary::WallKinematics3D sample_at(const WallGroup&, const SphBoundary::WallParticle3D&,
                                            const WallSamples&) const;
     template <class Write>
     void write_wall_slots(const ParticleFields3D&, const WallSamples&, const char*, const Write&) const;
     Result<SphBoundary::WallTrajectoryTime3D> wall_time(std::uint64_t particle_id, const WallPhases3D&) const;
 
-    std::unique_ptr<CellGrid> committed_grid_, candidate_grid_;
+    std::unique_ptr<CellGrid> committed_grid_;
     Workspace workspace_;
 
     void evaluate_pressure(WcsphState3D&, const CellGrid&, const BindFields3D&, Workspace*, const WallSamples&);

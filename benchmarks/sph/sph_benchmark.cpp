@@ -41,7 +41,7 @@ constexpr double step = 0.125;
 
 enum Phase { input, initialize, advance, reorder, advance_reordered, cleanup, phase_count };
 constexpr std::array<std::string_view, phase_count> phase_names{
-    "input", "initialize_prepare", "advance", "reorder", "advance_reordered", "cleanup"};
+    "input", "initialize", "advance", "reorder", "advance_reordered", "cleanup"};
 
 void require(const Status& status) {
     if (!status.ok())
@@ -336,13 +336,20 @@ Sample run_sample(std::size_t clusters) {
     Participant participant(std::move(config), ParticipantId{1},
                             {.controlled_bytes = max_benchmark_view_bytes});
     Simulation simulation(participant);
+    const auto require_lifecycle = [&](const Status& status) {
+        if (!status.ok()) {
+            const auto cleanup_status = simulation.finalize();
+            if (!cleanup_status.ok())
+                std::cerr << "benchmark finalization failed: " << cleanup_status.message() << '\n';
+            require(status);
+        }
+    };
     sample.measure(initialize, [&] {
-        require(simulation.initialize());
-        require(simulation.prepare());
+        require_lifecycle(simulation.initialize());
     });
     Snapshot committed;
     sample.measure(advance, [&] {
-        require(simulation.advance(step));
+        require_lifecycle(simulation.run(step));
         committed = require(participant.snapshot());
     });
     if (validate)
@@ -374,7 +381,7 @@ Sample run_sample(std::size_t clusters) {
 
     Snapshot advanced;
     sample.measure(advance_reordered, [&] {
-        require(simulation.advance(step));
+        require_lifecycle(simulation.run(step));
         advanced = require(participant.snapshot());
     });
     if (validate)

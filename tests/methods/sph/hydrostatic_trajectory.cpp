@@ -97,8 +97,15 @@ void run(int n, const std::filesystem::path& path) {
     sph::WcsphParticipant3D participant(fluid.get(), max_cells, parameters, rest, initial_density,
                                         fixed, ParticipantId{1}, limits);
     Simulation sim(participant);
-    require(sim.initialize());
-    require(sim.prepare());
+    const auto fail = [&](std::string context, const Status& status) {
+        context += status.message();
+        if (const auto finalized = sim.finalize(); !finalized.ok())
+            context += " (finalization failed with " + finalized.message() + ")";
+        throw std::runtime_error(context);
+    };
+    if (const auto status = sim.initialize(); !status.ok())
+        fail("initialize tank: ", status);
+
     std::filesystem::create_directories(path);
     auto steps =
         csv(path / "steps.csv", "n,step,time,dt,cfl_bound,pressure_rms,speed_rms,speed_max,in_tank,"
@@ -110,7 +117,7 @@ void run(int n, const std::filesystem::path& path) {
     auto events = csv(path / "crossings.csv", "n,step,time,id,face,fraction,x,y,z");
     Crossings crossings(tank.fluid.size());
     std::size_t frame = 0;
-    double dt = 0, bound = participant.time_constraint(0).maximum_step;
+    double dt = 0, bound = participant.time_constraint().maximum_step;
     while (true) {
         const double time = sim.time().accepted_time;
         const auto step = sim.time().accepted_steps;
@@ -193,14 +200,10 @@ void run(int n, const std::filesystem::path& path) {
             if (++frame == frame_times.size())
                 break;
         }
-        bound = participant.time_constraint(time).maximum_step;
+        bound = participant.time_constraint().maximum_step;
         dt = std::min({h / 256., .9 * bound, frame_times[frame] - time});
-        if (!(time + dt > time))
-            throw std::runtime_error("time step cannot progress");
-        auto status = sim.advance(dt);
-        if (!status.ok())
-            throw std::runtime_error("advance at t=" + std::to_string(time) + ": " +
-                                     status.message());
+        if (const auto status = sim.run(dt); !status.ok())
+            fail("run tank at t=" + std::to_string(time) + ": ", status);
     }
     require(sim.finalize());
     steps.close();

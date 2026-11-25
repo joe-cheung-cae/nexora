@@ -3,6 +3,7 @@
 #include <array>
 #include <cmath>
 #include <data/CsrAdjacency.hpp>
+#include <data/FieldIssuer.hpp>
 #include <data/Permutation.hpp>
 #include <exception>
 #include <initializer_list>
@@ -203,7 +204,7 @@ Participant::Participant(Config config, ParticipantId id, ResourceLimits limits)
     : config_(std::move(config)), id_(id), budget_(limits) {}
 
 Status Participant::initialize(double initial_time) {
-    if (stage_ != Stage::created || !Kokkos::is_initialized() || Kokkos::is_finalized())
+    if (accepted_ || finalized_ || !Kokkos::is_initialized() || Kokkos::is_finalized())
         return {StatusCode::invalid_state, "SPH initialization requires a new participant and active Kokkos"};
     const auto count = config_.column_ids.size();
     if (!std::isfinite(initial_time) || config_.row_ids.empty() ||
@@ -238,7 +239,6 @@ Status Participant::initialize(double initial_time) {
                                                    ghost, boundary, stamp);
         accepted_ = layout_snapshot(geometry);
         config_ = {};
-        stage_ = Stage::initialized;
         return {};
     } catch (const Failure& failure) {
         return failure.status;
@@ -249,52 +249,26 @@ Status Participant::initialize(double initial_time) {
     }
 }
 
-Status Participant::prepare() {
-    if (stage_ != Stage::initialized)
-        return {StatusCode::invalid_state, "SPH participant is not initialized"};
-    stage_ = Stage::ready;
-    return {};
-}
-
-Status Participant::begin_window(const TimeInterval& interval) {
-    if (stage_ != Stage::ready)
-        return {StatusCode::invalid_state, "SPH window requires a prepared participant"};
-    if (auto status = validate_time_step(time_constraint(interval.begin), interval.duration()); !status.ok())
-        return status;
-    if (interval.begin != accepted_->stamp.time.physical_time || !std::isfinite(interval.end) ||
-        interval.end <= interval.begin || interval.end != interval.begin + interval.duration())
-        return {StatusCode::invalid_argument, "invalid SPH window interval"};
-    if (attempt_ == std::numeric_limits<std::uint64_t>::max() ||
-        !detail::checked_next_version(accepted_->stamp.accepted_version).ok())
-        return {StatusCode::resource_exhausted, "SPH attempt or accepted version exhausted"};
-    const auto count = accepted_->row_count();
-    auto reservation = budget_.reserve(count * sizeof(real));
-    if (!reservation.ok())
-        return reservation.status();
-    trial_budget_ = std::move(reservation).value();
-    interval_ = interval;
-    ++attempt_;
-    stage_ = Stage::open;
-    return {};
-}
-
-Status Participant::advance_trial(const TimeInterval& interval) {
-    if (stage_ != Stage::open || !matches(interval))
-        return Status{StatusCode::invalid_state, "no matching open SPH window"};
-    stage_ = Stage::failed;
+Status Participant::do_step(const TimeInterval& interval) {
+    if (!accepted_)
+        return {StatusCode::invalid_state, "SPH step requires an initialized participant"};
+    if (interval.begin != accepted_->stamp.time.physical_time)
+        return {StatusCode::invalid_argument, "SPH step does not start at the accepted time"};
     try {
         auto stamp = accepted_->stamp;
-        stamp.accepted = false;
+        stamp.accepted_version = require(detail::checked_next_version(stamp.accepted_version));
         stamp.storage_incarnation = 0;
-        stamp.time = {interval.end, stamp.accepted_version.value() + 1, 0, 0};
+        stamp.time = {interval.end, stamp.accepted_version.value(), 0, 0};
         stamp.valid_from = stamp.valid_until = interval.end;
-        stamp.trial = {stamp.time.window, attempt_, 0, 0};
 
         const auto count = accepted_->row_count();
-        const auto values = allocate<real>(*exec_, "sph.trial_density", count);
-        auto issuer = require(FieldIssuer::create(values, stamp));
+        const auto reservation = require(budget_.reserve(require(checked_array_bytes(count, sizeof(real)))));
+        const auto values = allocate<real>(*exec_, "sph.accepted_density", count);
         real sum{};
         {
+            auto write_stamp = stamp;
+            write_stamp.accepted = false;
+            auto issuer = require(FieldIssuer::create(values, write_stamp));
             const std::array axes{FieldAxis{count}};
             const auto write = require(issuer.write(values, density_field(FieldAccess::overwrite),
                                                     issuer.stamp(), {Association::particle, "kg/m", axes},
@@ -305,90 +279,37 @@ Status Participant::advance_trial(const TimeInterval& interval) {
             sum = require(evaluate_density(*exec_, input, write.view()));
         }
         auto candidate = layout_snapshot(accepted_->geometry_);
-        candidate.stamp = issuer.stamp();
-        candidate.density_ = std::make_shared<Snapshot::Density>(trial_budget_, values);
-        trial_budget_.reset();
+        auto grant = bind_read(values, density_field(FieldAccess::read), stamp);
+        candidate.stamp = grant.stamp();
+        candidate.density_ = std::make_shared<Snapshot::Density>(reservation, values);
+        candidate.read_grant_ = std::make_shared<decltype(grant)>(std::move(grant));
         candidate.owned_density_sum = sum;
         candidate.density_valid = true;
-        trial_.emplace(std::move(candidate));
-        trial_issuer_.emplace(std::move(issuer));
-        stage_ = Stage::advanced;
+        accepted_.emplace(std::move(candidate));
         return {};
     } catch (const Failure& failure) {
         return failure.status;
     } catch (const std::bad_alloc&) {
-        return Status{StatusCode::resource_exhausted, "cannot allocate SPH trial"};
+        return {StatusCode::resource_exhausted, "cannot allocate SPH density or its binding"};
     } catch (const std::exception&) {
-        return Status{StatusCode::execution_failure, "cannot compute SPH trial"};
+        return {StatusCode::execution_failure, "cannot compute SPH density"};
     }
-}
-
-Status Participant::prepare_commit(const TimeInterval& interval) {
-    if (stage_ != Stage::advanced || !matches(interval))
-        return {StatusCode::invalid_state, "no matching advanced SPH window"};
-    stage_ = Stage::failed;
-    try {
-        auto published = *trial_;
-        auto stamp = published.stamp;
-        stamp.accepted = true;
-        stamp.trial = {};
-        stamp.accepted_version = StateVersion{stamp.time.window};
-        // A retained trial keeps its allocation and stamp across publication.
-        if (const auto reader = trial_read_.lock()) {
-            const auto count = published.row_count();
-            auto reservation = require(budget_.reserve(count * sizeof(real)));
-            const auto values = allocate<real>(*exec_, "sph.accepted_density", count);
-            Kokkos::deep_copy(*exec_, values, reader->view());
-            exec_->fence("SPH retained trial copied for commit");
-            published.density_ = std::make_shared<Snapshot::Density>(reservation, values);
-        }
-        trial_issuer_.reset();
-        auto grant = bind_read(published.density_->values, density_field(FieldAccess::read), stamp);
-        published.stamp = grant.stamp();
-        published.read_grant_ = std::make_shared<decltype(grant)>(std::move(grant));
-        pending_.emplace(std::move(published));
-        stage_ = Stage::precommitted;
-        return {};
-    } catch (const Failure& failure) {
-        return failure.status;
-    } catch (const std::bad_alloc&) {
-        return {StatusCode::resource_exhausted, "cannot allocate SPH accepted binding"};
-    } catch (const std::exception&) {
-        return {StatusCode::execution_failure, "cannot prepare SPH commit"};
-    }
-}
-
-Status Participant::commit_window(const TimeInterval& interval) {
-    if (stage_ != Stage::precommitted || !matches(interval))
-        return {StatusCode::invalid_state, "no matching prepared SPH commit"};
-    accepted_ = std::move(pending_);
-    close_window();
-    return {};
-}
-
-Status Participant::restore_window() {
-    if (stage_ != Stage::open && stage_ != Stage::advanced &&
-        stage_ != Stage::precommitted && stage_ != Stage::failed)
-        return {StatusCode::invalid_state, "no SPH window to restore"};
-    close_window();
-    return {};
 }
 
 Status Participant::finalize() {
-    if (stage_ == Stage::finalized)
+    if (finalized_)
         return {StatusCode::invalid_state, "SPH participant is finalized"};
-    close_window();
     accepted_.reset();
     exec_.reset();
     config_ = {};
-    stage_ = Stage::finalized;
+    finalized_ = true;
     return {};
 }
 
 Status Participant::reorder(std::span<const GlobalEntityId> row_ids,
                             std::span<const GlobalEntityId> column_ids, const FieldStamp& expected) {
-    if (stage_ != Stage::ready || accepted_->stamp != expected)
-        return {StatusCode::invalid_state, "SPH reorder requires the current prepared layout"};
+    if (!accepted_ || accepted_->stamp != expected)
+        return {StatusCode::invalid_state, "SPH reorder requires the current accepted layout"};
     // Charge the previous storage until the last local View used for reordering is released.
     const auto previous = *accepted_;
     const auto& old_geometry = *previous.geometry_;
@@ -503,53 +424,6 @@ Result<Snapshot> Participant::snapshot() const {
     auto result = *accepted_;
     result.snapshot_record_ = std::move(record).value();
     return result;
-}
-
-Result<FieldStamp> Participant::trial_stamp() const {
-    if (stage_ != Stage::advanced)
-        return Status{StatusCode::invalid_state, "SPH has no readable trial"};
-    return trial_->stamp;
-}
-
-Result<Snapshot> Participant::trial_snapshot(const FieldStamp& expected) const {
-    if (stage_ != Stage::advanced || trial_->stamp != expected)
-        return Status{StatusCode::invalid_state, "SPH trial stamp is stale or unavailable"};
-    try {
-        auto record = require(budget_.reserve(0, 1));
-        auto result = *trial_;
-        result.snapshot_record_ = std::move(record);
-        result.read_grant_ = trial_read_.lock();
-        if (!result.read_grant_) {
-            const std::array axes{FieldAxis{result.row_count()}};
-            auto grant = require(trial_issuer_->read(result.density_->values, density_field(FieldAccess::read),
-                                                     expected, {Association::particle, "kg/m", axes}));
-            result.read_grant_ = std::make_shared<decltype(grant)>(std::move(grant));
-            trial_read_ = result.read_grant_;
-        }
-        return result;
-    } catch (const Failure& failure) {
-        return failure.status;
-    } catch (const std::bad_alloc&) {
-        return Status{StatusCode::resource_exhausted, "cannot retain SPH trial"};
-    } catch (const std::exception&) {
-        return Status{StatusCode::execution_failure, "cannot read SPH trial"};
-    }
-}
-
-bool Participant::matches(const TimeInterval& interval) const noexcept {
-    return interval.begin == interval_.begin && interval.end == interval_.end &&
-           interval.duration() == interval_.duration();
-}
-
-
-void Participant::close_window() noexcept {
-    pending_.reset();
-    trial_read_.reset();
-    trial_issuer_.reset();
-    trial_.reset();
-    trial_budget_.reset();
-    interval_ = {};
-    stage_ = Stage::ready;
 }
 
 } // namespace nexora::sph_fixture

@@ -3,7 +3,7 @@
 #include <Kokkos_Core.hpp>
 #include <cstdint>
 #include <data/CsrAdjacency.hpp>
-#include <data/FieldIssuer.hpp>
+#include <nexora/data/FieldBinding.hpp>
 #include <memory>
 #include <nexora/participant/ParticipantIF.hpp>
 #include <optional>
@@ -82,45 +82,28 @@ class Participant final : public ParticipantIF {
     Participant& operator=(const Participant&) = delete;
 
     ParticipantId id() const noexcept override { return id_; }
-    ParticipantCapabilities capabilities() const override { return {true}; }
     std::vector<PortDescriptor> ports() const override { return {}; }
-    TimeConstraint time_constraint(double) const override { return {}; }
+    TimeConstraint time_constraint() const override { return {}; }
     Status initialize(double initial_time) override;
-    Status prepare() override;
-    Status begin_window(const TimeInterval& interval) override;
-    Status advance_trial(const TimeInterval& interval) override;
-    Status prepare_commit(const TimeInterval& interval) override;
-    Status commit_window(const TimeInterval& interval) override;
-    Status restore_window() override;
     Status finalize() override;
 
     Result<Snapshot> snapshot() const;
-    // Only valid at a prepared safe point. Installation of the new layout is atomic.
+    // Requires the current accepted layout. Installation of the new layout is atomic.
     Status reorder(std::span<const GlobalEntityId> row_ids,
                    std::span<const GlobalEntityId> column_ids, const FieldStamp& expected);
-    Result<FieldStamp> trial_stamp() const;
-    // A retained trial snapshot stays readable after restore or publication.
-    Result<Snapshot> trial_snapshot(const FieldStamp& expected) const;
     detail::ResourceBudget::Usage resource_usage() const { return budget_.usage(); }
 
   private:
     using Geometry = Snapshot::Geometry;
-    enum class Stage { created, initialized, ready, open, advanced, precommitted, failed, finalized };
     static Snapshot layout_snapshot(const std::shared_ptr<const Geometry>& geometry);
-    bool matches(const TimeInterval& interval) const noexcept;
-    void close_window() noexcept;
+    Status do_step(const TimeInterval& interval) override;
 
     Config config_;
     ParticipantId id_;
     detail::ResourceBudget budget_;
-    detail::ResourceBudget::Ticket trial_budget_;
     std::optional<Kokkos::Serial> exec_;
-    std::optional<Snapshot> accepted_, trial_, pending_;
-    std::optional<detail::FieldIssuer> trial_issuer_;
-    mutable std::weak_ptr<const ReadField<ConstView<real>>> trial_read_;
-    Stage stage_ = Stage::created;
-    TimeInterval interval_;
-    std::uint64_t attempt_{};
+    std::optional<Snapshot> accepted_;
+    bool finalized_{};
 };
 
 } // namespace nexora::sph_fixture

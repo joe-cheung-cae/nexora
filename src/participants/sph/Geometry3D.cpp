@@ -7,12 +7,12 @@ namespace nexora::sph {
 Status establish_owned_rows(const Kokkos::Serial& exec, Geometry3D& geometry,
                             const Geometry3D::Indices& owned_slots,
                             const Geometry3D::Indices& sorted_to_input,
-                            const detail::ResourceBudget& budget) {
+                            const std::function<Result<Geometry3D::Ticket>(std::size_t)>& reserve) {
     const auto n = owned_slots.extent(0);
     const auto bytes = detail::checked_array_bytes(n, sizeof(LocalIndex));
     if (!bytes.ok())
         return bytes.status();
-    auto ticket = budget.reserve(bytes.value());
+    auto ticket = reserve(bytes.value());
     if (!ticket.ok())
         return ticket.status();
     Geometry3D::Indices::non_const_type rows(

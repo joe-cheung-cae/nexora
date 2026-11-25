@@ -27,9 +27,7 @@ void run_oracle() {
     Participant participant(config);
     Simulation simulation(participant, start);
     require(simulation.initialize().ok(), "oracle initialize failed");
-    require(simulation.prepare().ok(), "oracle prepare failed");
-    for (double step : steps)
-        require(simulation.advance(step).ok(), "oracle advance failed");
+    require(simulation.run(steps).ok(), "oracle run failed");
 
     const auto state_result = participant.snapshot();
     require(state_result.ok(), "oracle snapshot failed");

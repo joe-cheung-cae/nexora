@@ -53,17 +53,10 @@ class WcsphParticipant3D final : public ParticipantIF {
     WcsphParticipant3D& operator=(const WcsphParticipant3D&) = delete;
 
     ParticipantId id() const noexcept override { return id_; }
-    ParticipantCapabilities capabilities() const override { return {true}; }
     std::vector<PortDescriptor> ports() const override { return {}; }
 
-    TimeConstraint time_constraint(double) const override;
+    TimeConstraint time_constraint() const override;
     Status initialize(double initial_time) override;
-    Status prepare() override;
-    Status begin_window(const TimeInterval& interval) override;
-    Status advance_trial(const TimeInterval& interval) override;
-    Status prepare_commit(const TimeInterval& interval) override;
-    Status commit_window(const TimeInterval& interval) override;
-    Status restore_window() override;
     Status finalize() override;
 
     Status visit_committed_rows(const std::function<void(CommittedRow3D)>& visit) const;
@@ -74,13 +67,9 @@ class WcsphParticipant3D final : public ParticipantIF {
   private:
     friend struct WcsphTestAccess;
 
-    enum class Stage { created, initialized, ready, open, advanced, precommitted, failed, finalized };
-
+    Status do_step(const TimeInterval& interval) override;
     BindFields3D bind_fields(WcsphState3D& candidate) const;
-    Status complete_step(WcsphState3D& candidate) const;
-    bool matches(const TimeInterval& interval) const;
-    bool can_read() const;
-    void close_window() noexcept;
+    bool idle_with_state() const;
 
     ParticleFields3D initial_;
     std::size_t max_cells_;
@@ -92,13 +81,9 @@ class WcsphParticipant3D final : public ParticipantIF {
     detail::ResourceBudget budget_;
     std::optional<Kokkos::Serial> exec_;
     std::optional<WcsphStep3D> step_;
-    std::unique_ptr<WcsphState3D> accepted_, trial_, pending_;
-    detail::ResourceBudget::Ticket recovery_;
-    TimeInterval interval_;
-    std::uint64_t attempt_{};
-    Stage stage_ = Stage::created;
-    mutable bool reading_{};
-    bool evaluating_{};
+    std::unique_ptr<WcsphState3D> accepted_;
+    bool finalized_{};
+    mutable bool active_{};
     void* observer_context_{};
     void (*observe_)(void*, StepStage3D, const NeighborView3D&){};
 };

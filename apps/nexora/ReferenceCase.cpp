@@ -174,9 +174,9 @@ Result<ReferenceCase> load(const std::filesystem::path& path, std::size_t& curre
     // A positive rounded advancement is at most twice the requested duration.
     // Use this conservative lower bound only to reject impossible capacities;
     // enumeration below remains authoritative for every rounded endpoint.
-    constexpr std::size_t maximum_windows = 1000000;
+    constexpr std::size_t maximum_steps = 1000000;
     const auto schedule_limit = [&] {
-        return fail("step", "case step count exceeds version 1 limit of 1000000 windows",
+        return fail("step", "case step count exceeds version 1 limit of 1000000 steps",
                     StatusCode::resource_exhausted);
     };
     // Halve each endpoint before subtracting: long double may have only the
@@ -184,7 +184,7 @@ Result<ReferenceCase> load(const std::filesystem::path& path, std::size_t& curre
     const long double minimum_count =
         (static_cast<long double>(result.end) * 0.5L -
          static_cast<long double>(result.start) * 0.5L) / step;
-    if (minimum_count > static_cast<long double>(maximum_windows))
+    if (minimum_count > static_cast<long double>(maximum_steps))
         return schedule_limit();
     if (minimum_count > static_cast<long double>(result.steps.max_size()) ||
         minimum_count > static_cast<long double>(std::numeric_limits<std::uint64_t>::max()))
@@ -192,8 +192,7 @@ Result<ReferenceCase> load(const std::filesystem::path& path, std::size_t& curre
                     StatusCode::resource_exhausted);
     double time = result.start;
     while (time < result.end) {
-        // Do not inspect or allocate the next window after the v1 limit.
-        if (result.steps.size() == maximum_windows)
+        if (result.steps.size() == maximum_steps)
             return schedule_limit();
         double requested = step;
         double endpoint = time + requested;

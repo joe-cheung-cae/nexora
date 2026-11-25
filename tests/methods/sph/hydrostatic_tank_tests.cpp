@@ -301,7 +301,7 @@ void run_tank(const Tank& tank, bool uncompensated) {
     sph::WcsphParticipant3D participant(fluid.get(), 10000, parameters, rest, initial_density, fixed);
     Simulation simulation(participant);
     ASSERT_TRUE(simulation.initialize().ok());
-    ASSERT_TRUE(simulation.prepare().ok());
+
     const auto initial = observe(participant, tank);
     record_endpoint(prefix + "initial", initial);
 
@@ -320,12 +320,12 @@ void run_tank(const Tank& tank, bool uncompensated) {
     int sample = 1;
     while (simulation.time().accepted_time < end_time) {
         const double time = simulation.time().accepted_time;
-        const double cfl_bound = participant.time_constraint(time).maximum_step;
+        const double cfl_bound = participant.time_constraint().maximum_step;
         const double dt = std::min({maximum_dt, .9 * cfl_bound, end_time - time});
         ASSERT_GT(time + dt, time);
         minimum_dt = std::min(minimum_dt, dt);
-        const auto advance = simulation.advance(dt);
-        ASSERT_TRUE(advance.ok()) << "time " << time << " s, " << advance.message();
+        const auto result = simulation.run(dt);
+        ASSERT_TRUE(result.ok()) << "time " << time << " s, " << result.message();
         last = observe(participant, tank);
         peak_rms_speed = std::max(peak_rms_speed, last.speed.rms());
         peak_max_speed = std::max(peak_max_speed, last.speed.max_absolute);

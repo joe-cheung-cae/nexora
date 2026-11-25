@@ -1,15 +1,15 @@
 # P1-07 一维固定 CSR 验证夹具
 
-`nexora_sph_fixed_csr_fixture` 由一维回归和显式构建的 benchmark 共用。夹具在每个 Simulation 窗口读取既有几何，使用指定的 Kokkos Serial 实例计算 [P1-01b](../baselines/sph-density-1d-v1.md) 的固定 CSR 一维 M₄ 密度。每个 owned 行写入一个独立 trial 值，ghost 只供读取。支持边界和核权重直接由粒子距离求得。同一次 Kokkos 归约把逐行 `real` 密度写入 trial，并用普通 `double` 累加 owned 和。归约值有限且未超过 `real` 上限才转换和发布。 [密度算子](fixed_csr/Density.cpp) · [SPH participant](fixed_csr/Participant.cpp)
+`nexora_sph_fixed_csr_fixture` 由一维回归和显式构建的 benchmark 共用。夹具每步读取既有几何，使用指定的 Kokkos Serial 实例计算 [P1-01b](../baselines/sph-density-1d-v1.md) 的固定 CSR 一维 M₄ 密度。每个 owned 行写入该步独立分配的密度，ghost 只供读取。支持边界和核权重直接由粒子距离求得。同一次 Kokkos 归约把逐行写入 `real` 密度，并用普通 `double` 累加 owned 和。归约值有限且未超过 `real` 上限才转换和发布。 [密度算子](fixed_csr/Density.cpp) · [SPH participant](fixed_csr/Participant.cpp)
 
 ## 状态与验证范围
 
-- 所有数值 Views 位于 HostSpace。participant 验证输入的 ID、owned 行、CSR 边和字段，持有位置与质量的只读 lease。固定邻域的完整性由输入给定，基准用独立扫描核对。试算密度由写 lease 独占。提交时仍有 trial 读授权，则为 accepted 另取独立存储。其余情况下复用试算密度的原分配并签发新的 accepted 读授权与 stamp。原 trial stamp 随窗口关闭而失效。
-- 重排使用已有双向排列同时迁移行列、字段和 CSR，发布时推进 layout 并保留 geometry、topology 和 accepted 时间。首次密度发布前的快照使用当前位置分配的 `storage_incarnation`，密度快照使用其密度分配的身份。重排拒绝过期和其他实例的 stamp。已签发的读快照在新状态发布、回滚和关闭后继续有效。
-- 跨窗口读取持有完整 `Snapshot`。按索引读取返回数值，副本共享同一快照记录和读授权。预算分别绑定整套不可变布局与密度分配，重排另预留临时排列和 CSR 的字节数。最后一个持有者释放后归还额度。默认上限为 64 份快照记录与 256 MiB 受控载荷，受控载荷按 Kokkos 数组逻辑字节计；进程 RSS 包含主机输入、校验容器和运行时开销。 [快照接口](fixed_csr/Participant.hpp)
-- 支持范围为单进程同步 Serial、固定粒子集合和本地 ghost 输入。快照与恢复限进程内。CUDA、跨 rank 通信、动态邻域、持久 restart 和生产 SPH 分别保留在相应任务。 [验收矩阵](../../docs/architecture/phase-1-design-review.md#acceptance)
+- 所有数值 Views 位于 HostSpace。participant 验证输入的 ID、owned 行、CSR 边和字段，持有位置与质量的只读 lease。固定邻域的完整性由输入给定，基准用独立扫描核对。步内密度由写 lease 独占。计算与归约验证完成后，在同一分配上建立只读授权并发布。步失败时释放临时分配与授权，保留上一步布局、密度和时钟。
+- 重排使用已有双向排列同时迁移行列、字段和 CSR，发布时推进 layout 并保留 geometry、topology 和 accepted 时间。首次密度发布前的快照使用当前位置分配的 `storage_incarnation`，密度快照使用其密度分配的身份。重排拒绝过期和其他实例的 stamp。已签发的读快照在新状态发布、后续步失败和关闭后继续有效。
+- 跨步读取持有完整 `Snapshot`。按索引读取返回数值，副本共享同一快照记录和读授权。预算分别绑定整套不可变布局与密度分配，重排另预留临时排列和 CSR 的字节数。最后一个持有者释放后归还额度。默认上限为 64 份快照记录与 256 MiB 受控载荷，受控载荷按 Kokkos 数组逻辑字节计；进程 RSS 包含主机输入、校验容器和运行时开销。 [快照接口](fixed_csr/Participant.hpp)
+- 支持范围为单进程同步 Serial、固定粒子集合和本地 ghost 输入。快照保留限进程内。CUDA、跨 rank 通信、动态邻域、持久 restart 和生产 SPH 分别保留在相应任务。 [验收矩阵](../../docs/architecture/phase-1-design-review.md#acceptance)
 
-## 求解器清理复验
+## 求解器清理复验（历史基线）
 
 基线为 `a9af3bf6a3fdbcac8675a0d258cb5aa9f1967cdf`。一维夹具、冻结输入和独立参考仍验证两套行列 CSR、稳定 ID、逐行密度、owned 归约、保留快照和预算。三维静态构型在网格和压力算子上按 ID 检查邻居与力学字段。事务断言在真实 Velocity Verlet 窗口中执行，覆盖非初始步回滚、相同及较小步长重试、过期或其他实例的 stamp、快照记录上限，以及预提交因读者占用超过字节预算后的恢复。[一维回归](../../tests/methods/sph/sph_tests.cpp) · [几何回归](../../tests/methods/sph/cell_grid_tests.cpp) · [压力回归](../../tests/methods/sph/pressure_3d_tests.cpp) · [积分回归](../../tests/methods/sph/verlet_window_tests.cpp)
 

@@ -56,33 +56,26 @@ void print_plan(const ReferenceCase& input) {
               << "layout_conversion=none\n"
               << "permissions.granularity=whole allocation\n"
               << "permissions.accepted=read-only leases\n"
-              << "permissions.trial=exclusive x and q overwrite and history accumulate leases\n"
-              << "permissions.prepare_commit=register trial fields for read-only publication\n"
+              << "permissions.step=exclusive x and q overwrite and history accumulate leases\n"
+              << "permissions.publish=register completed fields for read-only publication\n"
               << "copy.initialize=host input to stable_ids and x and q plus history seed\n"
-              << "copy.begin=accepted history to independent trial history\n"
-              << "copy.trial_x_q=none\n"
+              << "copy.step=accepted history to independent next history\n"
+              << "copy.step_x_q=none\n"
               << "copy.summary=none\n"
               << "synchronize.initialize=Serial fence before publishing initial state\n"
-              << "synchronize.begin=Serial fence after trial history copy\n"
-              << "synchronize.advance=Serial fence before host diagnostics and commit\n"
+              << "synchronize.step=Serial fence before host diagnostics and publication\n"
               << "synchronize.summary=host reads the completed accepted snapshot\n"
-              << "synchronize.restore=Serial fence before releasing trial on failure\n"
               << "synchronize.finalize=Serial fence before releasing participant state\n";
 }
 
-Status advance_and_summarize(Simulation& simulation, const reference::Participant& participant,
-                             const std::vector<double>& steps, double end, std::ostream& out) {
+Status run_and_summarize(Simulation& simulation, const reference::Participant& participant,
+                         const std::vector<double>& steps, double end, std::ostream& out) {
     if (auto status = simulation.initialize(); !status.ok()) {
         return status;
     }
-    if (auto status = simulation.prepare(); !status.ok()) {
-        return status;
-    }
-    for (const double step : steps) {
-        if (auto status = simulation.advance(step); !status.ok()) {
-            return {status.code(), "step " + std::to_string(simulation.time().accepted_steps + 1) +
-                                       ": " + status.message()};
-        }
+    if (const auto status = simulation.run(steps); !status.ok()) {
+        return {status.code(), "step " + std::to_string(simulation.time().accepted_steps + 1) +
+                                   ": " + status.message()};
     }
 
     const auto& time = simulation.time();
@@ -119,7 +112,7 @@ int run_reference_case(ReferenceCase input) {
     Status run_status;
     try {
         // The snapshot and its leases are destroyed before finalizing Simulation.
-        run_status = advance_and_summarize(simulation, participant, input.steps, input.end, summary);
+        run_status = run_and_summarize(simulation, participant, input.steps, input.end, summary);
     } catch (...) {
         if (const auto status = simulation.finalize(); !status.ok()) {
             std::cerr << "reference finalize failed: " << status.message() << '\n';

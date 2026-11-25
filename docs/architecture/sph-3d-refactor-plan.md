@@ -1,5 +1,18 @@
 # 三维 WCSPH 求解器重构计划
 
+## 现行单求解器契约
+
+应用调用 `Simulation::initialize()`、`run(steps)`（或 `run(dt, count)`）和 `finalize()`。`run` 依次执行给定步长，首个失败的 `Status` 立即结束运行。每个成功步发布一次，随后时钟与已接受步数各更新一次。直接调用 `ParticipantIF::step(interval)` 与通过 `Simulation` 走相同的准入路径。[Simulation](../../include/nexora/simulation/Simulation.hpp) · [ParticipantIF](../../include/nexora/participant/ParticipantIF.hpp)
+
+- **本步准入。** 以当前已接受的速度求声学 CFL，即 `C h / (c₀ + max |v|)`，空流体取 `C h / c₀`。同该状态各运动组的有效采样上限取最小值，保存在状态中。`step` 对请求的正 `dt` 严格检查一次。可直接查询 `time_constraint()`。下一状态的上限随该步结果发布，供随后的一步使用。[步长校验](../../include/nexora/participant/TimeConstraint.hpp) · [声学归约](../../src/methods/sph/Verlet3D.cpp)
+- **运动壁数据。** 每个规定轨迹提供在其整个定义域都能分辨实际运动的有限正常量 `sample_step_limit`。例如，单周期活塞测试中用解析最大壁速和允许的壁行程确定 `1/32` 的全域上限。此前依赖动态上限的轨迹须给出有物理依据的全域安全值才能使用当前接口。缺省、非正或非有限值使初始化失败。有效上限再受定义域剩余可表示历时约束。运动回调只在实际运动学取样时执行。固定壁不引入采样上限。[轨迹声明与输入约束](../../src/methods/sph/PrescribedMovingWall3D.hpp)
+- **组内跨度与终点。** 步进器按请求时长计算各组的 `τ₁ = τ₀ + dt`。在取样前检查两端的定义域、实际跨度 `δ = τ₁ − τ₀ > 0`、`δ <= 该组起点上限` 以及 `abs(δ − dt) <= time_resolution`。周期折返仅用于运动学求值。当起始相位加组内历时精确到达有限右端 `T` 时，允许提交有效的终点数值，该组的下一步上限为零。随后请求任何正步长都会失败并保留终点。若向内舍入的最后可表示历时仍落在定义域内部，又无可表示的正跨度，则下一上限无效，计算该候选的步返回失败。[时间域与采样实现](../../src/methods/sph/PrescribedMovingWall3D.cpp)
+- **数值发布与资源。** 步进器在一次调用中组装两端连续性、压力与 Velocity Verlet。候选的几何、行表、四个只读字段、轨迹相位以及下步约束准备完毕后，参与者一次替换已接受状态。数值计算或资源准入失败会释放候选字段和临时资源，保留最近成功的数值、版本与时钟，调用方可读出结果并关闭。Serial 工作区可在成功步之间复用，参与者关闭时释放自己持有的资源。此实现限于同步单进程，持久化检查点和分布式通信尚未实现。[WCSPH 参与者](../../src/participants/sph/WcsphParticipant3D.cpp) · [数值步](../../src/participants/sph/WcsphStep3D.cpp)
+
+## 原 M0–M5 方案与验收背景（历史记录）
+
+下面的第 1–4 节及附录 A 保留当时的设计、测量条件和验收步骤。其中的窗口、跨调用候选授权、失败后缩步重试、用户步长回调及终点必须有正余量等约定已由上文替代。
+
 本设计提案最初提交于 `e8b01a1`。冻结的 6³ 轨迹和历史测试集取自 `ce54294`。M1/M2 的实施起点为 `d5bfb10` 加当前工作树中尚未提交的实现补丁，包含 [ParticipantIF](../../include/nexora/participant/ParticipantIF.hpp) 的 `Status` 窗口接口和数值窄化修订。可复算的补丁指纹和两个时期的测试清单见 [M0](#m0-固定对照)。本计划细化三维 WCSPH 重构，并为 IISPH 和显式 ISPH 保留独立参与者入口。现有单进程 Kokkos Serial 基线已验证流体与 Adami 固定壁。多壁组和指定轨迹运动壁是本次确认的设计，数值验收列于 M5。设计遵循[架构入口](overview.md)、[Kokkos 数据与执行契约](kokkos-design.md)及[现行 SPH 路线](migration-roadmap.md#sph-cell-begin)。
 
 ## 1. 从三个具体改动划分职责

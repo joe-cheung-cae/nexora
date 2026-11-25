@@ -1,9 +1,6 @@
 nexora_add_test(nexora_reference_tests reference_tests.cpp KOKKOS
     nexora_participants_reference nexora::simulation)
 
-nexora_add_test(nexora_reference_transport_tests reference_transport_tests.cpp KOKKOS
-    nexora_participants_reference nexora::simulation)
-
 nexora_add_test(nexora_reference_resource_tests reference_resource_tests.cpp KOKKOS
     nexora_participants_reference nexora::simulation)
 

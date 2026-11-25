@@ -63,7 +63,7 @@ CPU 和可选 GPU 均以 Kokkos 作为唯一计算及数值存储基础。具体
 | 历史阶段 | 当前范围、依赖与出口 |
 |---|---|
 | P0 | 由 `P1-01` 接架构、依赖和现状基线，`P1-02` 接实际构建。登记参考算例和可复现报告规范。`BASE-001` 的真实 SPH/DEM 基线独立完成，约束相应方法和外部对照。 |
-| P1 | `P1-01`–`P1-11`。CPU Kokkos、typed 字段与算子、参考参与者窗口、SPH/FVM 代表性切片、CLI、测试和旧层切换。CUDA 作为可选 Kokkos GPU 验收，MPI 为可选诊断。 |
+| P1 | `P1-01`–`P1-11`。CPU Kokkos、typed 字段与算子、Reference 同步单步、SPH/FVM 代表性切片、CLI、测试和旧层切换。CUDA 作为可选 Kokkos GPU 验收，MPI 为可选诊断。 |
 | P2 | 首个真实 SPH–DEM 窗口。基于 Kokkos 实现邻域、密度阶段、接触历史和力算子，逐步验收显式耦合、守恒 ledger、回滚与重启；按真实用例增设可选 MPI halo、反向规约和历史迁移。机械增量 M0–M3 按[机械任务前置](follow-on-task-plan.md#mbd-task-ids)另行设计和批准。 |
 | P3 | FVM 扩散、输运、不可压流及 FVM–DEM。复用 P1 face-flux 结构切片与 P2 耦合契约，按收敛阶、连续性和体平均源项/冲量验收。代数库如被选中，按独立外部边界认证。 |
 | P4 | FEM 热、弹性及混合流，CHT/FSI 强耦合，连接 M4/M6。依赖字段契约、P2 窗口/恢复接口及对应方法；验收 patch/MMS、热流或功预算、重算与唯一惯性。 |
@@ -106,7 +106,7 @@ P3、P4、P5 的单方法可以在 P1 字段契约确定后分别准备设计，
 | `CPL-001` **保留**。端口物理兼容须在读写前确定。 | `src/coupling/ports/`、`tests/coupling/ports/`；`nexora_coupling`。 | 以 `PortDescriptor`、`FieldDescriptor` 和快照 stamp 检查方向、单位、frame、association、measure 与有效时间。前置 `P1-03`、`P1-04`、`P1-06`。 | 兼容端口可签发所需交换；错误语义在提交或修改目标状态之前明确拒绝。 |
 | `CPL-002` **保留并迁移**。映射关系与计算基础无关，实现改用 typed Kokkos 数据。 | `src/coupling/mapping/`、`tests/coupling/mapping/`；`nexora_coupling`。 | 按下述[现行映射定义](#p2-mapping-contract)绑定 `H` 与共轭 `Hᵀ` 的源/目标稳定 ID、权重和版本键；空间映射与载荷方向保持已批准物理约定。前置 `CPL-001`、`P1-05`。 | 常量、线性、合力/矩及离散功检查分别与独立 oracle 对照；陈旧映射或失配拒绝。 |
 | `CPL-003` **保留**。载荷来源、方向和时间积分需要独立审计。 | `src/coupling/{loads,temporal}/`、`tests/coupling/loads/`；`nexora_coupling`。 | `LoadLedger`/`ImpulseAccumulator` 以来源、端口、window/attempt 与区间记账，保持力/力矩/冲量语义。前置 `CPL-002`。 | 非等长子步冲量与反力预算吻合，重复载荷、错误区间和旧 attempt 在提交前被拒绝。 |
-| `TIME-001` **迁移**。复用同步单参与者契约，新增多参与者一致窗口。 | `src/simulation/`、`src/coupling/`、`tests/simulation/`；`nexora::simulation`、`nexora_coupling`。 | 由窗口协调者统一 `begin → trial → prepare → publish/restore`，所有参与者准备成功后才发布时钟及 accepted 状态。前置 `P1-06`、`CPL-003`。 | 任一参与者试算/准备失败均恢复一致时刻、历史与账本，重试使用新 attempt；部分发布故障进入不可继续状态。分布式失败决策另验 `MPI-001`。 |
+| `TIME-001` **迁移**。单参与者使用同步 `run`，多参与者一致推进另行设计。 | `src/simulation/`、`src/coupling/`、`tests/simulation/`；`nexora::simulation`、`nexora_coupling`。 | 由窗口协调者统一 `begin → trial → prepare → publish/restore`，所有参与者准备成功后才发布时钟及 accepted 状态。前置 `P1-06`、`CPL-003`。 | 任一参与者试算/准备失败均恢复一致时刻、历史与账本，重试使用新 attempt；部分发布故障进入不可继续状态。分布式失败决策另验 `MPI-001`。 |
 | `CKPT-001` **保留并迁移**。重放依赖参与者拥有的完整状态。 | `src/participants/{sph,dem}/`、`tests/simulation/`、`tests/methods/{sph,dem}/`；`nexora_participants_sph`、`nexora_participants_dem`、`nexora::simulation`。 | 内存快照捕获 accepted 主状态、历史、控制、随机/ID 生成状态及版本；缓存按明确键重建。前置 `TIME-001`、`SPH-001`、`DEM-001`。 | 同输入连续运行与恢复重放满足已批准等价准则；恢复前终止相关访问，拒绝不完整快照或无法证明恢复的参与者，并准备 [CP-01 完整捕获清单](checkpoint-restart.md#restart-acceptance)。 |
 | `MPI-001` **迁移**。真实通信需要领域传输完成契约，旧诊断只证明 MPI C API 接通。 | `src/parallel/`、`src/parallel/mpi/`、`cmake/NexoraMPI.cmake`、`tests/parallel/`；`nexora_parallel_api`、可选 `nexora_parallel_mpi`。 | typed 快照打包、host staging、请求保活与明确送达/应用完成；MPI 类型私有，单进程路径直接运行。前置 `P1-02`、`P1-04`、`P1-05`。 | MPI off/on 均构建，实际两 rank 验证零负载、请求状态、发送缓冲寿命及一致失败决策。探针和设备直传各自单列。 |
 | `MPI-002` **保留**。halo/reverse sum 是可选分区路径的物理边界。 | `src/parallel/halo/`、`src/methods/sph/neighbors/`、`tests/parallel/halo/`；`nexora_parallel_api`、`nexora_parallel_mpi`、`nexora_methods_sph`。 | 按稳定 ID 定义 ghost owner、halo 路线、版本和反向累积，按实例完成 pack/unpack。前置 `MPI-001`、`SPH-002`。 | 实际 2/4 rank 覆盖空分区、ghost、重复/丢失 ID，反向累积与单进程参考一致，失败交换不污染 trial。GPU-aware 设备直传需另验。 |
@@ -119,13 +119,13 @@ P3、P4、P5 的单方法可以在 P1 字段契约确定后分别准备设计，
 
 **静态几何与算子。** `CellGrid` 按稳定 ID 检查更新后的粒子状态，格归属、成员与 ownership 相同就复用 `cellBegin`，任一变化即重建。`prepare_geometry_3d` 管理几何版本和预算。三维 M₄ 密度直接按当前格表上的坐标判距与累加。压力算子接收 `WcsphParameters{reference_density, sound_speed, gamma}` 和当前几何的 owned 密度，计算 Tait 表压及对称压力加速度。参与受力的普通 ghost 从完整本地支撑域重算同阶段密度。静态验证按 owned ID 对照独立显式 CSR。[格索引与验证](../../validation/sph/cell-begin-serial.md) · [压力公式与 ghost 输入约定](../../validation/sph/wcsph-pressure-serial.md)
 
-**Serial 积分窗口。** `sph::Participant3D` 使用全 owned 的初始流体字段、初始速度、初始密度和 CFL 安全系数推进。算例平滑长度 `h` 固定，默认 1 m。格宽和核支持半径均为 `2h`，核值和核梯度分别按 `h⁻³`、`h⁻⁴` 缩放，声学 CFL 随 `h` 缩放。每个窗口从 accepted 加速度出发，半步更新速度并移动粒子，在更新后的格表用预测速度再求一次密度变化率。两端变化率校正流体密度后重算压力加速度，再完成速度更新和下一步 CFL 估计。提交发布整份候选快照，恢复保留原 accepted 状态、时钟和 CFL 上限。[Velocity Verlet 与 CFL 验证](../../validation/sph/wcsph-verlet-serial.md)
+**Serial 同步积分。** `sph::WcsphParticipant3D` 使用各 owned 粒子的初始字段、速度、密度和 CFL 安全系数。算例平滑长度 `h` 固定，默认 1 m。格宽和核支持半径均为 `2h`，核值和核梯度分别按 `h⁻³`、`h⁻⁴` 缩放，声学 CFL 随 `h` 缩放。每步从已接受加速度出发，半步更新速度并移动粒子，在更新后的格表用预测速度再求一次密度变化率。两端变化率校正流体密度后重算压力加速度，再完成速度更新和下一步 CFL 估计。成功时发布完整几何、字段和下一步步长上限，再推进时钟。失败时释放步内工作并结束运行，保留已接受的数值和时钟。[WCSPH 当前生命周期](sph-3d-refactor-plan.md)
 
 积分模式还可接收恒定重力与单独的固定壁粒子集。壁源随流体进入同一邻域索引，每次力评估从当前流体外推壁压，再反解 Tait 壁密度。积分和字段发布只遍历流体行。静水箱壁层统一取 ceil(2h/壁粒距)，完整包覆实体壁与底角，顶部对大气开放。现行推进需要显式物理密度，几何初态的核求和另作诊断。三档算例均保持物理质量，用推进后的压力、速度和穿墙检验静水平衡。[修复与实测](../../validation/sph/hydrostatic-continuity-repair.md) 原来的两种质量分布与轨迹对照属于历史实验。[现行初态验收](../../validation/sph/hydrostatic-initial-resolution.md) · [历史 Adami 固定壁实验](../../validation/sph/adami-hydrostatic-serial.md)
 
 1. **按格组织数据。** 用 Kokkos 按 `(cell, 稳定粒子 ID)` 排序，将位置各分量和质量等热字段按同一置换写成 SoA，并保留 owned 目标到粒子槽位的映射。同域字段、归属标记及积分历史须按稳定 ID 对齐。`cellBegin` 含格数加一项，末尾哨兵等于源粒子数。格 `c` 的连续槽位为 `[cellBegin[c], cellBegin[c+1])`，空格两端相等，下一格的起点兼作本格的 `cellEnd`。
 2. **在密度核内直接遍历。** 固定支持半径 `R`、格宽为 `R`、x 为最快变化的格编号时，三维内部目标周围最多 27 格。沿每个合法的 `(y,z)` 合并相邻 x 格，非周期边界先裁剪，每行最多扫描 9 个连续区间。对当前阶段坐标现场检查支持域并累加，只写 owned 目标的试算密度。ghost 可作只读源。以粒子身份识别自身，自身项只加一次，同位置的不同 ID 仍分别参与筛选。
-3. **跨阶段检查有效性。** 压力与相互作用阶段可复用仍有效的格索引，并读取该阶段的坐标和物理字段。积分更新位置后检查格归属，粒子仍在原格时可复用区间并重新判距，越格时更新置换、相关字段和格边界。成员、ghost 集合、布局或网格参数变化时须重新校验绑定。试算重排与索引更新受窗口发布和回滚约束，恢复后按 accepted 版本复用或重建索引。
+3. **跨阶段检查有效性。** 压力与相互作用阶段可复用仍有效的格索引，并读取该阶段的坐标和物理字段。积分更新位置后检查格归属，粒子仍在原格时可复用区间并重新判距，越格时更新置换、相关字段和格边界。成员、ghost 集合、布局或网格参数变化时须重新校验绑定。步内重排与索引更新随几何一起发布，索引按 accepted 版本复用或重建。
 
 显式 CSR 保留作三维回归对照，也是固定几何下高复用压力计算的候选优化。一维验证夹具继续按原行列顺序、闭支持域（含零权重边）、自身单计和原容差核对固定 CSR、逐 ID 密度及 owned 和。[P1-07 一维冻结算例](../../validation/baselines/sph-density-1d-v1.md) · [夹具源码](../../validation/sph/fixed_csr/)
 

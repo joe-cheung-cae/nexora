@@ -4,6 +4,7 @@
 #include <methods/sph/Density3D.hpp>
 #include <methods/sph/Verlet3D.hpp>
 #include <methods/sph/neighbors/CellGrid.hpp>
+#include <participants/ResourceBudget.hpp>
 #include <participants/sph/GeometryVersions3D.hpp>
 #include <methods/sph/Continuity3D.hpp>
 
@@ -294,8 +295,9 @@ indexed_stage(const Kokkos::Serial& exec, const sph::ParticleFields3D& input, st
         result.topology = old->topology;
         result.geometry = old->geometry;
         result.layout = old->layout;
+        const auto reserve = [&](std::size_t bytes) { return budget.reserve(bytes); };
         const auto compared = sph::update_geometry_versions(exec, layout(old->grid), layout(result.grid),
-            budget, result.topology, result.geometry, result.layout);
+            reserve, result.topology, result.geometry, result.layout);
         if (!compared.ok())
             return compared;
     }

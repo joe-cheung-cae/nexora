@@ -45,7 +45,7 @@ Result<real> evaluate_density(const Kokkos::Serial& exec, const DensityInput& in
             total += density;
         }, sum);
     if (!std::isfinite(sum) || sum > std::numeric_limits<real>::max())
-        return Status{StatusCode::numerical_failure, "SPH trial density or owned sum exceeds real range"};
+        return Status{StatusCode::numerical_failure, "SPH density or owned sum exceeds real range"};
     return static_cast<real>(sum);
 }
 } // namespace nexora::sph_fixture

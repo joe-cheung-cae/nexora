@@ -2,9 +2,6 @@
 
 #include <algorithm>
 #include <array>
-#include <data/TransportBuilder.hpp>
-#include <data/TransportReceiver.hpp>
-
 #include <cmath>
 #include <exception>
 #include <limits>
@@ -31,15 +28,6 @@ template <class View>
 auto request_read(const detail::FieldIssuer& issuer, const View& view, FieldDescriptor descriptor) {
     const std::array axes{detail::FieldAxis{view.extent(0)}};
     return issuer.request_read(view, std::move(descriptor), issuer.stamp(), {Association::node, "1", axes});
-}
-
-auto request_ids(const detail::FieldIssuer& issuer, const ConstEntityIds& ids,
-                 FieldDescriptor descriptor) {
-    descriptor.id = FieldId{3};
-    descriptor.name = "stable_ids";
-    descriptor.scalar_type = ScalarType::uint64;
-    descriptor.access = FieldAccess::read;
-    return request_read(issuer, ids, std::move(descriptor));
 }
 
 template <class View>
@@ -74,35 +62,10 @@ void Participant::BankAccess::close() noexcept {
     history.close();
 }
 
-bool Participant::consume_fault(Fault fault) noexcept {
-    const auto bit = static_cast<unsigned>(fault);
-    const bool armed = (faults_ & bit) != 0;
-    faults_ &= ~bit;
-    return armed;
-}
-
-void Participant::close_window() noexcept {
-    if (trial_ids_access_)
-        trial_ids_access_->close();
-    if (trial_access_)
-        trial_access_->close();
-    if (pending_access_)
-        pending_access_->close();
-}
-
-void Participant::discard_window() noexcept {
-    trial_ids_access_.reset();
-    trial_access_.reset();
-    pending_access_.reset();
-}
-
 Participant::Participant(Config config, ParticipantId id, ResourceBudget::Limits limits)
     : id_(id), budget_(limits), state_(std::move(config)) {}
 ParticipantId Participant::id() const noexcept {
     return id_;
-}
-ParticipantCapabilities Participant::capabilities() const {
-    return {true};
 }
 // The reference fixture exposes accepted output through snapshot(); it does not
 // implement a coupling port.
@@ -113,8 +76,8 @@ Status Participant::validate_case_config(const Config& config, double initial_ti
     const auto checked = validate_config(config, initial_time);
     if (!checked.ok())
         return checked.status();
-    // The default case needs IDs plus accepted/trial banks at a window boundary,
-    // and only requests its read snapshot after the final commit.
+    // The default case needs IDs plus accepted and temporary step banks,
+    // and only requests its read snapshot after the final step.
     ResourceBudget budget;
     const auto sizes = checked.value();
     auto ids = budget.reserve(sizes.ids_bytes, 0);
@@ -123,13 +86,13 @@ Status Participant::validate_case_config(const Config& config, double initial_ti
     auto accepted = budget.reserve(sizes.bank_bytes, 0);
     if (!accepted.ok())
         return accepted.status();
-    auto trial = budget.reserve(sizes.bank_bytes, 1);
-    return trial.status();
+    auto next = budget.reserve(sizes.bank_bytes, 1);
+    return next.status();
 }
 Status Participant::validate_case_interval(const TimeInterval& interval, real lambda) {
     return validate_interval(interval, lambda);
 }
-TimeConstraint Participant::time_constraint(double) const {
+TimeConstraint Participant::time_constraint() const {
     return case_time_constraint(state_.lambda());
 }
 TimeConstraint Participant::case_time_constraint(real lambda) {
@@ -170,8 +133,6 @@ Status Participant::initialize(double t) {
         selected.emplace();
         if (auto status = state_.initialize(t, *selected); !status.ok())
             return status;
-        if (consume_fault(Fault::initialize))
-            return Status{StatusCode::execution_failure, "injected reference initialization failure"};
         auto access = claim_bank(state_.accepted_x_, state_.accepted_q_, state_.accepted_history_,
                                  state_.accepted_stamp());
         if (!access.ok())
@@ -189,243 +150,76 @@ Status Participant::initialize(double t) {
     }
     return result;
 }
-Status Participant::prepare() {
+Status Participant::do_step(const TimeInterval& interval) {
     return guarded([&] {
-        if (!accepted_access_)
-            return Status{StatusCode::invalid_state, "reference accepted fields are unavailable"};
-        return state_.prepare();
-    });
-}
-Status Participant::begin_window(const TimeInterval& i) {
-    if (!exec_ || !accepted_access_)
-        return {StatusCode::invalid_state, "begin requires prepared reference state"};
-    ResourceBudget::Ticket bank_ticket;
-    bool opened = false;
-    auto status = guarded([&] {
-        const auto size = state_.preflight_begin(i);
+        if (!exec_ || !accepted_access_)
+            return Status{StatusCode::invalid_state, "step requires initialized reference state"};
+        const auto size = state_.preflight_step(interval);
         if (!size.ok())
             return size.status();
         auto reservation = budget_.reserve(size.value());
         if (!reservation.ok())
             return reservation.status();
-        bank_ticket = std::move(reservation).value();
-        auto history = detail::FieldIssuer::grant(request_read(
-            accepted_access_->history, state_.accepted_history_,
-            State::history_descriptor(true, FieldAccess::read)));
-        if (!history.ok())
-            return history.status();
-        if (auto begun = state_.begin(i, *exec_, std::get<0>(history.value()).view()); !begun.ok())
-            return begun;
-        opened = true;
-        const auto stamp = state_.trial_stamp();
-        auto trial = claim_bank(state_.trial_x_, state_.trial_q_, state_.trial_history_, stamp);
-        if (!trial.ok())
-            return trial.status();
-        auto ids = detail::FieldIssuer::create(state_.ids_, stamp);
-        if (!ids.ok())
-            return ids.status();
-        if (consume_fault(Fault::begin))
-            return Status{StatusCode::execution_failure, "injected reference begin failure"};
-        trial_access_.emplace(std::move(trial).value());
-        trial_ids_access_.emplace(std::move(ids).value());
-        trial_budget_ = std::move(bank_ticket);
-        return Status{};
-    });
-    if (!status.ok() && opened) {
-        // State::begin completed a synchronous private candidate copy.
-        state_.restore();
-        discard_window();
-    }
-    return status;
-}
-Status Participant::advance_trial(const TimeInterval& i) {
-    return guarded([&] {
-        if (!trial_access_ || state_.phase_ != State::Phase::open)
-            return Status{StatusCode::invalid_state, "advance requires an open reference window"};
-        // One grant set spans the relaxation kernel and its finite-value check.
-        auto fields = detail::FieldIssuer::grant(
-            request_read(accepted_access_->x, state_.accepted_x_,
-                         State::field_descriptor(TrialField::x, true, FieldAccess::read)),
-            request_read(accepted_access_->q, state_.accepted_q_,
-                         State::field_descriptor(TrialField::q, true, FieldAccess::read)),
-            request_write(trial_access_->x, state_.trial_x_,
-                          State::field_descriptor(TrialField::x, false, FieldAccess::overwrite)),
-            request_write(trial_access_->q, state_.trial_q_,
-                          State::field_descriptor(TrialField::q, false, FieldAccess::overwrite)),
-            request_write(trial_access_->history, state_.trial_history_,
-                          State::history_descriptor(false, FieldAccess::accumulate)));
-        if (!fields.ok())
-            return fields.status();
-        const auto& [x, q, tx, tq, history] = fields.value();
-        auto advanced = state_.advance(i, *exec_, x.view(), q.view(), tx.view(), tq.view(),
-                                       history.view(), history.stamp());
-        if (advanced.ok() && consume_fault(Fault::advance)) {
-            state_.phase_ = State::Phase::failed_trial;
-            return Status{StatusCode::execution_failure, "injected reference advance failure"};
+        Values x(Kokkos::view_alloc(*exec_, Kokkos::WithoutInitializing, "reference.next.x"),
+                 state_.accepted_x_.extent(0));
+        Values q(Kokkos::view_alloc(*exec_, Kokkos::WithoutInitializing, "reference.next.q"),
+                 state_.accepted_q_.extent(0));
+        History history(Kokkos::view_alloc(*exec_, Kokkos::WithoutInitializing,
+                                           "reference.next.history"), 1);
+        const auto next_stamp = Snapshot::accepted_stamp(StateVersion{state_.version_ + 1}, interval.end);
+        {
+            auto writable_stamp = next_stamp;
+            writable_stamp.accepted = false;
+            auto candidate = claim_bank(x, q, history, writable_stamp);
+            if (!candidate.ok())
+                return candidate.status();
+            auto& access = candidate.value();
+            auto fields = detail::FieldIssuer::grant(
+                request_read(accepted_access_->x, state_.accepted_x_,
+                             State::field_descriptor(Field::x, FieldAccess::read)),
+                request_read(accepted_access_->q, state_.accepted_q_,
+                             State::field_descriptor(Field::q, FieldAccess::read)),
+                request_read(accepted_access_->history, state_.accepted_history_,
+                             State::history_descriptor(FieldAccess::read)),
+                request_write(access.x, x, State::field_descriptor(Field::x, FieldAccess::overwrite)),
+                request_write(access.q, q, State::field_descriptor(Field::q, FieldAccess::overwrite)),
+                request_write(access.history, history, State::history_descriptor(FieldAccess::accumulate)));
+            if (!fields.ok())
+                return fields.status();
+            const auto& [old_x, old_q, old_history, next_x, next_q, next_history] = fields.value();
+            Kokkos::deep_copy(*exec_, next_history.view(), old_history.view());
+            if (auto status = State::evaluate(*exec_, static_cast<real>(interval.duration()),
+                                              state_.lambda(), old_x.view(), old_q.view(),
+                                              next_x.view(), next_q.view(), next_history.view(),
+                                              state_.accepted_control_.sequence + 1); !status.ok())
+                return status;
         }
-        return advanced;
-    });
-}
-
-Result<FieldStamp> Participant::trial_input_stamp() const {
-    if (state_.phase_ != State::Phase::advanced || !trial_access_)
-        return Status{StatusCode::invalid_state, "receive requires an advanced reference trial"};
-    return state_.trial_stamp();
-}
-
-Result<DiagnosticKey> Participant::trial_diagnostic_key() const {
-    return state_.trial_diagnostic_key();
-}
-
-Result<std::uint64_t> Participant::trial_diagnostic(const DiagnosticKey& key) const {
-    return state_.trial_diagnostic(key);
-}
-
-Result<TransportView<real>> Participant::send_trial(TrialField field) const {
-    if (state_.phase_ != State::Phase::advanced || !trial_access_)
-        return Status{StatusCode::invalid_state, "send requires an advanced reference trial"};
-    if (field != TrialField::x && field != TrialField::q)
-        return Status{StatusCode::invalid_argument, "invalid reference trial field"};
-
-    return guarded([&]() -> Result<TransportView<real>> {
-        const auto bytes = detail::TransportBuilder::packed_payload_bytes<real>(state_.ids_.extent(0), 1);
-        if (!bytes.ok())
-            return bytes.status();
-        auto reservation = budget_.reserve(bytes.value(), 1);
-        if (!reservation.ok())
-            return reservation.status();
-        const bool x = field == TrialField::x;
-        auto descriptor = State::field_descriptor(field, false, FieldAccess::read);
-        auto fields = detail::FieldIssuer::grant(
-            request_read(x ? trial_access_->x : trial_access_->q,
-                         x ? state_.trial_x_ : state_.trial_q_, descriptor),
-            request_ids(*trial_ids_access_, state_.ids_, descriptor));
-        if (!fields.ok())
-            return fields.status();
-        auto& [values, ids] = fields.value();
-        // Consumers own the packed copy. They must not prevent precommit
-        // from closing the trial authority and registering accepted storage.
-        return detail::TransportBuilder::prepare(
-            *exec_, TransportPurpose::coupling, std::move(values), std::move(ids),
-            detail::TransportBuilder::SourceLifetime::until_packed, std::move(reservation).value());
-    });
-}
-
-Status Participant::receive_trial(TrialField field, const TransportView<real>& input,
-                                  const FieldStamp& expected_source) {
-    if (state_.phase_ != State::Phase::advanced || !trial_access_)
-        return {StatusCode::invalid_state, "receive requires an advanced reference trial"};
-
-    // A failed receive cannot subsequently publish the original or a partly
-    // replaced trial. Simulation can restore it through its existing path.
-    state_.phase_ = State::Phase::failed_trial;
-    auto status = guarded([&] {
-        if ((field != TrialField::x && field != TrialField::q) ||
-            input.purpose() != TransportPurpose::coupling)
-            return Status{StatusCode::invalid_argument, "invalid reference trial field or purpose"};
-        const bool x = field == TrialField::x;
-        auto fields = detail::FieldIssuer::grant(
-            request_write(x ? trial_access_->x : trial_access_->q,
-                          x ? state_.trial_x_ : state_.trial_q_,
-                          State::field_descriptor(field, false, FieldAccess::overwrite)),
-            request_ids(*trial_ids_access_, state_.ids_,
-                        State::field_descriptor(field, false, FieldAccess::read)));
-        if (!fields.ok())
-            return fields.status();
-        const auto& [target, ids] = fields.value();
-        if (auto received = detail::TransportReceiver::unpack(*exec_, input, target,
-                                                               ids, expected_source);
-            !received.ok())
-            return received;
-        auto finite = State::check_finite(*exec_, target.view());
-        if (finite.ok() && consume_fault(Fault::receive))
-            return Status{StatusCode::execution_failure, "injected reference receive failure"};
-        return finite;
-    });
-    if (status.ok())
-        state_.phase_ = State::Phase::advanced;
-    return status;
-}
-
-Status Participant::prepare_commit(const TimeInterval& i) {
-    if (!trial_access_)
-        return {StatusCode::invalid_state, "prepare_commit requires an advanced reference trial"};
-    if (auto status = guarded([&] { return state_.check_commit(i, trial_access_->history.stamp()); });
-        !status.ok())
-        return status;
-
-    // All trial operations are synchronous, with no escaping write grant.
-    // Finish any fallible read-only registration before the publish step.
-    state_.phase_ = State::Phase::failed_trial;
-    discard_window();
-    auto status = guarded([&] {
-        auto access = claim_bank(ConstValues(state_.trial_x_), ConstValues(state_.trial_q_),
-                                 ConstHistory(state_.trial_history_),
-                                 state_.next_accepted_stamp());
+        // Register read-only authority before the only publication point.
+        auto access = claim_bank(ConstValues(x), ConstValues(q), ConstHistory(history), next_stamp);
         if (!access.ok())
             return access.status();
-        pending_access_.emplace(std::move(access).value());
-        if (consume_fault(Fault::prepare))
-            return Status{StatusCode::execution_failure, "injected reference prepare failure"};
+        state_.accepted_x_ = x;
+        state_.accepted_q_ = q;
+        state_.accepted_history_ = history;
+        ++state_.accepted_control_.sequence;
+        state_.accepted_diagnostic_ = history(0) + state_.accepted_control_.sequence;
+        state_.time_ = interval.end;
+        ++state_.version_;
+        accepted_access_.emplace(std::move(access).value());
+        accepted_budget_ = std::move(reservation).value();
         return Status{};
     });
-    if (status.ok())
-        state_.phase_ = State::Phase::commit_ready;
-    return status;
 }
-Status Participant::commit_window(const TimeInterval& i) {
-    return guarded([&] {
-        if (!pending_access_)
-            return Status{StatusCode::invalid_state, "commit requires prepared reference fields"};
-        auto status = state_.commit(i);
-        if (status.ok()) {
-            accepted_access_.emplace(std::move(*pending_access_));
-            pending_access_.reset();
-            accepted_budget_ = std::move(trial_budget_);
-        }
-        return status;
-    });
-}
-Status Participant::restore_window() {
-    using Phase = State::Phase;
-    const auto phase = state_.phase_;
-    const bool open = phase == Phase::open || phase == Phase::advanced ||
-                      phase == Phase::failed_trial || phase == Phase::commit_ready;
-    auto result = guarded([&] {
-        if (open) {
-            close_window();
-            if (consume_fault(Fault::restore))
-                return Status{StatusCode::execution_failure, "injected reference restore failure"};
-            exec_->fence("reference restore completion");
-        }
-        auto status = state_.restore();
-        if (status.ok()) {
-            discard_window();
-            trial_budget_.reset();
-        }
-        return status;
-    });
-    if (!result.ok() && open)
-        state_.phase_ = Phase::failed;
-    return result;
-}
+
 Status Participant::finalize() {
     return guarded([&] {
-        if (state_.phase_ != State::Phase::finalized) {
-            // Close issuance before the producer completion boundary. Detached
-            // consumer records keep their existing grants and budget tickets.
-            state_.phase_ = State::Phase::failed;
-            close_window();
-            if (accepted_access_)
-                accepted_access_->close();
-            if (exec_)
-                exec_->fence("reference close completion");
-        }
+        if (accepted_access_)
+            accepted_access_->close();
+        if (exec_)
+            exec_->fence("reference close completion");
         auto status = state_.finalize();
         if (status.ok()) {
-            discard_window();
             accepted_access_.reset();
-            trial_budget_.reset();
             accepted_budget_.reset();
             ids_budget_.reset();
             exec_.reset();
@@ -448,7 +242,7 @@ Result<Snapshot> Participant::snapshot() const {
             request_read(accepted_access_->x, state_.accepted_x_, out.x_descriptor()),
             request_read(accepted_access_->q, state_.accepted_q_, out.q_descriptor()),
             request_read(accepted_access_->history, state_.accepted_history_,
-                         State::history_descriptor(true, FieldAccess::read)));
+                         State::history_descriptor(FieldAccess::read)));
         if (!fields.ok())
             return fields.status();
         auto& [x, q, history] = fields.value();

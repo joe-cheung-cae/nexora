@@ -1,5 +1,7 @@
 # Reference 进程内恢复与资源预算
 
+本页记录早期 Serial 基线。现行单求解器生命周期和状态发布契约见 [Kokkos 数据与执行设计](kokkos-design.md#7-单求解器的同步推进与状态发布)。
+
 本记录对应 [底层开发计划任务 5](foundation-development-plan.md#任务-5-完成状态历史-恢复与快照预算)。实现位于私有 Reference State 和 Participant，由现有同步 `Simulation` 推进单参与者窗口。
 
 ## 状态与缓存

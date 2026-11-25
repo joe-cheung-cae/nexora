@@ -5,7 +5,6 @@
 #include <cstdint>
 #include <data/EntityCapacity.hpp>
 #include <methods/sph/ParticleFields3D.hpp>
-#include <participants/ResourceBudget.hpp>
 
 namespace nexora::sph {
 
@@ -15,7 +14,7 @@ struct GeometryLayout3D {
 };
 
 inline Status update_geometry_versions(const Kokkos::Serial& exec, const GeometryLayout3D& before,
-                                       const GeometryLayout3D& after, const detail::ResourceBudget& budget,
+                                       const GeometryLayout3D& after, const auto& reserve,
                                        TopologyVersion& topology,
                                        GeometryVersion& geometry, LayoutVersion& layout) {
     using Policy = Kokkos::RangePolicy<Kokkos::Serial, Kokkos::IndexType<std::size_t>>;
@@ -79,7 +78,7 @@ inline Status update_geometry_versions(const Kokkos::Serial& exec, const Geometr
                 const auto bytes = detail::checked_array_bytes(n, 2 * sizeof(ParticleSlot));
                 if (!bytes.ok())
                     return bytes.status();
-                auto ticket = budget.reserve(bytes.value());
+                auto ticket = reserve(bytes.value());
                 if (!ticket.ok())
                     return ticket.status();
                 using ById = Kokkos::View<ParticleSlot*, Kokkos::HostSpace>;

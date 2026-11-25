@@ -104,24 +104,14 @@ InitialInput capture_input(const Kokkos::Serial& exec, const Budget& budget,
     return {std::move(ticket), {position, mass, ids, ghost}};
 }
 
-// The operation has no published side effects on budget refusal. Retry only after
-// arrays whose access has finished (or has yet to begin this step) are relinquished.
-template <class Try, class Trim> auto with_eviction(const Try& attempt, const Trim& trim) {
-    auto result = attempt();
+// Budget admission can release scratch whose access has finished or has yet to begin.
+template <class Reserve, class Trim>
+auto reserve_with_eviction(const Reserve& reserve, const Trim& trim) {
+    auto result = reserve();
     if (!result.ok() && result.status().code() == StatusCode::resource_exhausted && trim()) {
-        return attempt();
+        return reserve();
     }
     return result;
-}
-
-template <class Trim>
-void bind_group(WcsphState3D& state, FieldGroup3D group, const BindFields3D& bind,
-                const FieldWrite3D& write, const Trim& trim) {
-    auto status = bind(state, state.stamp, state.geometry.owned_row_to_input, group, write);
-    if (status.code() == StatusCode::resource_exhausted && trim()) {
-        status = bind(state, state.stamp, state.geometry.owned_row_to_input, group, write);
-    }
-    require(std::move(status));
 }
 
 } // namespace
@@ -174,10 +164,8 @@ void WcsphStep3D::capture_groups(const std::vector<WallGroupInput3D>& inputs, st
     };
     add_bytes(groups);
     for (const auto& input : inputs) {
-        if (input.trajectory) {
+        if (input.trajectory)
             add_bytes(input.trajectory->motion.retained_bytes());
-            add_bytes(input.trajectory->maximum_sample_step.retained_bytes());
-        }
     }
     wall_storage_ = require(budget_.reserve(bytes));
     walls_.reserve(inputs.size());
@@ -226,7 +214,7 @@ WcsphStep3D::WallSamples WcsphStep3D::sample_groups(const WallPhases3D& phases) 
     for (std::size_t g = 0; g < walls_.size(); ++g) {
         const auto& group = walls_[g];
         const auto* moving = group.moving();
-        if (!moving)
+        if (!moving || moving->particles().extent(0) == 0)
             continue;
         const auto motion = require(moving->motion_at(phases(group.phase_index).time));
         const auto& particles = moving->particles();
@@ -245,13 +233,11 @@ WcsphStep3D::WallSamples WcsphStep3D::sample_groups(const WallPhases3D& phases) 
     return result;
 }
 
-void WcsphStep3D::certify(const WallPhases3D::non_const_type& phases) const {
-    for (const auto& group : walls_) {
-        if (const auto* moving = group.moving()) {
-            auto& phase = phases(group.phase_index);
-            phase.maximum_step = require(moving->maximum_sample_step(phase.time));
-        }
-    }
+void WcsphStep3D::set_next_step(WcsphState3D& candidate) const {
+    candidate.maximum_step = require(cfl_step_3d(exec_, candidate.velocity->view(),
+        parameters_.eos.sound_speed, parameters_.cfl, parameters_.smoothing_length));
+    for (std::size_t g = 0; g < candidate.wall_phases.extent(0); ++g)
+        candidate.maximum_step = std::min(candidate.maximum_step, candidate.wall_phases(g).maximum_step);
 }
 
 WallKinematics3D WcsphStep3D::sample_at(const WallGroup& group, const WallParticle3D& particle,
@@ -302,7 +288,7 @@ void WcsphStep3D::evaluate_pressure(WcsphState3D& state, const CellGrid& grid,
             const auto stride = pressure_workspace_bytes_per_source(n != rows, use_wall) +
                                 (use_wall ? 3 * sizeof(double) : 0);
             const auto bytes = require(detail::checked_array_bytes(n, stride));
-            auto reserved = with_eviction([&] { return budget_.reserve(bytes); }, trim);
+            auto reserved = reserve_with_eviction([&] { return budget_.reserve(bytes); }, trim);
             if (!reserved.ok())
                 return reserved.status();
             scratch = std::move(reserved).value();
@@ -320,10 +306,10 @@ void WcsphStep3D::evaluate_pressure(WcsphState3D& state, const CellGrid& grid,
                                    out.acceleration, wall_a, parameters_.gravity)
             : evaluate_pressure_3d(exec_, q, eos, state.density->view(), out.pressure, out.acceleration);
     };
-    bind_group(state, FieldGroup3D::pressure, bind, write, trim);
+    require(bind(FieldGroup3D::pressure, write, trim));
 }
 
-Status WcsphStep3D::initialize_state(double, const ParticleFields3D& fluid,
+Status WcsphStep3D::initialize_state(const ParticleFields3D& fluid,
                                      const Velocity3D::const_type& velocity,
                                      const Values::const_type& density,
                                      const std::vector<WallGroupInput3D>& initial_walls,
@@ -341,8 +327,11 @@ Status WcsphStep3D::initialize_state(double, const ParticleFields3D& fluid,
         capture_groups(initial_walls, nf);
         const auto phases = phase_storage(candidate);
         for (const auto& group : walls_)
-            if (const auto* moving = group.moving())
-                phases(group.phase_index) = {group.id, moving->initial_time(), 0};
+            if (const auto* moving = group.moving()) {
+                const auto time = moving->initial_time();
+                phases(group.phase_index) = {group.id, time, require(moving->maximum_sample_step(time))};
+            }
+        candidate.wall_phases = phases;
         const auto samples = sample_groups(phases);
         const auto wall_at = [&](std::size_t local) -> WallParticle3D {
             for (const auto& group : walls_) {
@@ -373,19 +362,20 @@ Status WcsphStep3D::initialize_state(double, const ParticleFields3D& fluid,
                 geometry.particle_storage.fill(captured->ticket);
                 geometry.input = captured->fields;
             }
-            require(establish_owned_rows(exec_, geometry, grid.owned_slots(), grid.sorted_to_input(), budget_));
-            candidate_grid_ = std::make_unique<CellGrid>(std::move(grid));
+            require(establish_owned_rows(exec_, geometry, grid.owned_slots(), grid.sorted_to_input(),
+                                         [&](std::size_t bytes) { return budget_.reserve(bytes); }));
+            committed_grid_ = std::make_unique<CellGrid>(std::move(grid));
         }
         stamp_geometry(candidate);
         const auto& map = candidate.geometry.owned_row_to_input;
         const auto rows = Policy(exec_, 0, map.extent(0));
-        require(bind(candidate, candidate.stamp, map, FieldGroup3D::density,
+        require(bind(FieldGroup3D::density,
             [&](const StepOutputs3D& out) -> Status {
                 Kokkos::parallel_for("sph.continuity.initial_density", rows,
                     [&](std::size_t r) { out.density(r) = density(map(r)); });
                 return {};
-            }));
-        require(bind(candidate, candidate.stamp, map, FieldGroup3D::velocity,
+            }, {}));
+        require(bind(FieldGroup3D::velocity,
             [&](const StepOutputs3D& out) -> Status {
                 std::size_t invalid{};
                 Kokkos::parallel_reduce("sph.verlet.initial_velocity", rows,
@@ -399,18 +389,17 @@ Status WcsphStep3D::initialize_state(double, const ParticleFields3D& fluid,
                 if (invalid)
                     return {StatusCode::invalid_argument, "WCSPH initial velocity must be finite"};
                 return {};
-            }));
+            }, {}));
         if (observe_)
-            observe_(observer_context_, StepStage3D::initial, candidate_grid_->neighbors());
-        evaluate_pressure(candidate, *candidate_grid_, bind, nullptr, samples);
-        certify(phases);
-        candidate.wall_phases = phases;
+            observe_(observer_context_, StepStage3D::initial, committed_grid_->neighbors());
+        evaluate_pressure(candidate, *committed_grid_, bind, nullptr, samples);
+        set_next_step(candidate);
     });
 }
 
 Status WcsphStep3D::try_step(const TimeInterval& interval, const WcsphState3D& current,
                              WcsphState3D& candidate, const BindFields3D& bind) {
-    return guarded([&] {
+    const auto status = guarded([&] {
         const auto dt = interval.duration();
         const auto phases = phase_storage(candidate);
         // Validate every group's unwrapped interval before asking any trajectory for an endpoint.
@@ -420,11 +409,11 @@ Status WcsphStep3D::try_step(const TimeInterval& interval, const WcsphState3D& c
                 phases(index) = current.wall_phases(index);
                 auto& phase = phases(index);
                 phase.time = require(moving->advance_time(phase.time, dt, phase.maximum_step));
+                phase.maximum_step = require(moving->maximum_sample_step(phase.time));
             }
         }
         auto start_samples = sample_groups(current.wall_phases);
         auto end_samples = sample_groups(phases);
-        certify(phases);
         candidate.wall_phases = phases;
         auto& work = workspace_;
         // These hot buffers have no live contents until after the drifted grid is ready.
@@ -433,9 +422,13 @@ Status WcsphStep3D::try_step(const TimeInterval& interval, const WcsphState3D& c
             work.corrected.reset();
             return released;
         };
-        const auto admit_grid = [&](CellGrid::StorageGroup, std::size_t bytes) {
-            return with_eviction([&] { return budget_.reserve(bytes); }, trim_drift);
+        const auto reserve_geometry = [&](std::size_t bytes) {
+            return reserve_with_eviction([&] { return budget_.reserve(bytes); }, trim_drift);
         };
+        const auto admit_grid = [&](CellGrid::StorageGroup, std::size_t bytes) {
+            return reserve_geometry(bytes);
+        };
+        std::optional<CellGrid> rebuilt_grid;
         if (!committed_grid_) {
             const auto& input = current.geometry.fields();
             auto rebuilt = require(CellGrid::build(exec_, input, max_cells_, admit_grid,
@@ -459,9 +452,9 @@ Status WcsphStep3D::try_step(const TimeInterval& interval, const WcsphState3D& c
                 }, mismatches);
             if (mismatches)
                 throw Failure{{StatusCode::invalid_state, "rebuilt WCSPH grid changed source or row order"}};
-            committed_grid_ = std::make_unique<CellGrid>(std::move(rebuilt));
+            rebuilt_grid.emplace(std::move(rebuilt));
         }
-        const auto& old = *committed_grid_;
+        const auto& old = committed_grid_ ? *committed_grid_ : *rebuilt_grid;
         const auto& old_fields = old.fields();
         const auto& old_owned = old.owned_slots();
         const auto n = old_fields.ids.extent(0), nf = old_owned.extent(0);
@@ -470,7 +463,7 @@ Status WcsphStep3D::try_step(const TimeInterval& interval, const WcsphState3D& c
             if (!buffer) {
                 using V = std::remove_cvref_t<decltype(buffer->values)>;
                 const auto bytes = require(detail::checked_array_bytes(count, stride));
-                auto ticket = require(with_eviction([&] { return budget_.reserve(bytes); }, trim));
+                auto ticket = require(reserve_with_eviction([&] { return budget_.reserve(bytes); }, trim));
                 buffer.emplace(std::move(ticket), allocate<V>(exec_, label, count));
             }
         };
@@ -483,6 +476,7 @@ Status WcsphStep3D::try_step(const TimeInterval& interval, const WcsphState3D& c
         const auto& v = current.velocity->view();
         const auto& a = current.acceleration->view();
         auto& geometry = candidate.geometry;
+        std::unique_ptr<CellGrid> next_grid;
         {
             const auto& drift = work.stage->values;
             require(kick_drift_3d(exec_, old, v, a, dt, drift, half, parameters_.gravity));
@@ -496,8 +490,8 @@ Status WcsphStep3D::try_step(const TimeInterval& interval, const WcsphState3D& c
             auto updated = old.update(exec_, input, max_cells_, admit_grid);
             if (updated.status().code() == StatusCode::invalid_argument)
                 throw Failure{{StatusCode::numerical_failure, "invalid drifted WCSPH position"}};
-            candidate_grid_ = std::make_unique<CellGrid>(require(std::move(updated)));
-            const auto& next = *candidate_grid_;
+            next_grid = std::make_unique<CellGrid>(require(std::move(updated)));
+            const auto& next = *next_grid;
             if (input_is_sorted(exec_, next)) {
                 geometry.particle_storage = next.field_storage();
                 geometry.input = next.fields();
@@ -509,27 +503,14 @@ Status WcsphStep3D::try_step(const TimeInterval& interval, const WcsphState3D& c
                 work.stage.reset();
             }
         }
-        const auto& next = *candidate_grid_;
-        const auto make_rows = [&] {
-            return establish_owned_rows(exec_, geometry, next.owned_slots(), next.sorted_to_input(), budget_);
-        };
-        auto s = make_rows();
-        if (s.code() == StatusCode::resource_exhausted && trim_drift()) {
-            s = make_rows();
-        }
-        require(s);
+        const auto& next = *next_grid;
+        require(establish_owned_rows(exec_, geometry, next.owned_slots(), next.sorted_to_input(),
+                                     reserve_geometry));
         geometry.topology = current.geometry.topology;
         geometry.geometry = current.geometry.geometry;
         geometry.layout = current.geometry.layout;
-        const auto compare = [&] {
-            return update_geometry_versions(exec_, layout_of(old), layout_of(next), budget_,
-                                            geometry.topology, geometry.geometry, geometry.layout);
-        };
-        s = compare();
-        if (s.code() == StatusCode::resource_exhausted && trim_drift()) {
-            s = compare();
-        }
-        require(s);
+        require(update_geometry_versions(exec_, layout_of(old), layout_of(next), reserve_geometry,
+                                         geometry.topology, geometry.geometry, geometry.layout));
         stamp_geometry(candidate);
         ensure_stage();
         const auto no_trim = [] { return false; };
@@ -588,7 +569,7 @@ Status WcsphStep3D::try_step(const TimeInterval& interval, const WcsphState3D& c
                                dt, work.corrected->values);
             exec_.fence("sph.continuity.correction_ready");
         }
-        bind_group(candidate, FieldGroup3D::density, bind, [&](const StepOutputs3D& out) -> Status {
+        require(bind(FieldGroup3D::density, [&](const StepOutputs3D& out) -> Status {
             Kokkos::deep_copy(exec_, out.density, work.corrected->values);
             exec_.fence("sph.continuity.trial_density_ready");
             return {};
@@ -596,28 +577,24 @@ Status WcsphStep3D::try_step(const TimeInterval& interval, const WcsphState3D& c
             const bool released = work.release_rates() || work.stage;
             work.stage.reset();
             return released;
-        });
+        }));
         evaluate_pressure(candidate, next, bind, &work, end_samples);
         end_samples.values = {};
         end_samples.ticket.reset();
-        bind_group(candidate, FieldGroup3D::velocity, bind, [&](const StepOutputs3D& out) {
+        require(bind(FieldGroup3D::velocity, [&](const StepOutputs3D& out) {
             return finish_kick_3d(exec_, next, half, candidate.acceleration->view(), dt,
                                   out.velocity, parameters_.gravity);
-        }, [&] { return work.release_continuity(); });
+        }, [&] { return work.release_continuity(); }));
+        set_next_step(candidate);
+        committed_grid_ = std::move(next_grid);
     });
+    if (!status.ok())
+        workspace_ = {};
+    return status;
 }
 
-void WcsphStep3D::commit() noexcept {
-    committed_grid_.swap(candidate_grid_);
-    candidate_grid_.reset();
-}
-void WcsphStep3D::restore() noexcept {
-    candidate_grid_.reset();
-    workspace_.release_continuity();
-    workspace_.half.reset();
-}
 void WcsphStep3D::release_workspace() noexcept {
-    restore();
+    workspace_ = {};
     committed_grid_.reset();
 }
 } // namespace nexora::sph

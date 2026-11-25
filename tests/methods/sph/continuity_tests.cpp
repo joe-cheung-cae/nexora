@@ -44,8 +44,8 @@ TEST(SphContinuity, StationaryUniformDensityIsIndependentOfKernelMassSum) {
     Simulation sim(participant);
     ASSERT_TRUE(sim.initialize().ok());
     rho(0) = 5;
-    ASSERT_TRUE(sim.prepare().ok());
-    ASSERT_TRUE(sim.advance(.25).ok());
+
+    ASSERT_TRUE(sim.run(.25, 1).ok());
     const auto rows = committed_rows(participant);
     ASSERT_EQ(rows.size(), 2u);
     for (const auto& row : rows) {
@@ -71,8 +71,8 @@ TEST(SphContinuity, FixedWallCompressionAndExpansionFollowAnalyticRelativeVeloci
                                             initial_density({2}), boundary);
         Simulation sim(participant);
         ASSERT_TRUE(sim.initialize().ok());
-        ASSERT_TRUE(sim.prepare().ok());
-        ASSERT_TRUE(sim.advance(dt).ok());
+
+        ASSERT_TRUE(sim.run(dt, 1).ok());
         const auto rate = [speed](double separation) {
             const double q = separation / h;
             return 3 * speed * (3 * q - 2.25 * q * q) / (std::numbers::pi * h * h * h * h);
@@ -100,10 +100,9 @@ long double density_invariant_error(int steps) {
                                         initial_density({2, 3}));
     Simulation sim(participant);
     EXPECT_TRUE(sim.initialize().ok());
-    EXPECT_TRUE(sim.prepare().ok());
+
     const auto initial = explicit_csr(cloud);
-    for (int n = 0; n < steps; ++n)
-        EXPECT_TRUE(sim.advance(.75 / steps).ok());
+    EXPECT_TRUE(sim.run(.75 / steps, steps).ok());
     const auto rows = committed_rows(participant);
     EXPECT_EQ(rows.size(), cloud.size());
     for (const auto& row : rows) {
@@ -150,9 +149,9 @@ TEST(SphContinuity, CrossingParticlesPreserveUnequalMassAndDensityById) {
     sph::WcsphParticipant3D participant(fields.get(), 16, parameters, velocity, initial_density({2, 8}));
     Simulation sim(participant);
     ASSERT_TRUE(sim.initialize().ok());
-    ASSERT_TRUE(sim.prepare().ok());
+
     const auto before = committed_rows(participant);
-    ASSERT_TRUE(sim.advance(.5).ok());
+    ASSERT_TRUE(sim.run(.5, 1).ok());
     const auto after = committed_rows(participant);
     ASSERT_EQ(before.size(), 2u);
     ASSERT_EQ(after.size(), 2u);
@@ -188,7 +187,9 @@ TEST(SphContinuity, InvalidExplicitDensityAndExtentPublishNoRows) {
     }
 }
 
-void check_density_failure(real initial, real mass, real speed, double failed_dt, double retry_dt) {
+TEST(SphContinuity, NonpositiveCandidateDensityPreservesAcceptedRows) {
+    constexpr real initial = .125, mass = 1, speed = 1;
+    constexpr double failed_dt = .5;
     Fields fields({{{.5, 0, 0}, mass, 21, 0}, {{0, 0, 0}, mass, 42, 0}});
     sph::Velocity3D velocity("continuity_test.velocity", 2);
     velocity(0, 0) = speed;
@@ -196,23 +197,21 @@ void check_density_failure(real initial, real mass, real speed, double failed_dt
     const sph::WcsphVerletParameters parameters{{initial, real{.125}, 1}, 1};
     const auto rho = initial_density({initial, initial});
     sph::WcsphParticipant3D participant(fields.get(), 32, parameters, velocity, rho);
-    sph::WcsphParticipant3D clean(fields.get(), 32, parameters, velocity, rho);
-    Simulation sim(participant), clean_sim(clean);
+    Simulation sim(participant);
     ASSERT_TRUE(sim.initialize().ok());
-    ASSERT_TRUE(sim.prepare().ok());
-    ASSERT_TRUE(clean_sim.initialize().ok());
-    ASSERT_TRUE(clean_sim.prepare().ok());
+
+
     const auto before = committed_rows(participant);
     ASSERT_EQ(before.size(), 2u);
-    const auto bound = participant.time_constraint(0).maximum_step;
+    const auto bound = participant.time_constraint().maximum_step;
     ASSERT_LE(failed_dt, bound);
-    const auto failure = sim.advance(failed_dt);
+    const auto failure = sim.run(failed_dt, 1);
     EXPECT_EQ(failure.code(), StatusCode::numerical_failure);
     EXPECT_NE(failure.message().find("owned WCSPH density"), std::string::npos)
         << failure.message();
     EXPECT_EQ(sim.time().accepted_steps, 0u);
     EXPECT_EQ(sim.time().accepted_time, 0);
-    EXPECT_EQ(participant.time_constraint(0).maximum_step, bound);
+    EXPECT_EQ(participant.time_constraint().maximum_step, bound);
     const auto restored = committed_rows(participant);
     ASSERT_EQ(restored.size(), before.size());
     for (std::size_t row = 0; row < restored.size(); ++row) {
@@ -224,28 +223,8 @@ void check_density_failure(real initial, real mass, real speed, double failed_dt
         EXPECT_EQ(restored[row].pressure, before[row].pressure);
         EXPECT_EQ(restored[row].pressure_acceleration, before[row].pressure_acceleration);
     }
-    ASSERT_TRUE(sim.advance(retry_dt).ok());
-    ASSERT_TRUE(clean_sim.advance(retry_dt).ok());
-    const auto retried = committed_rows(participant), reference = committed_rows(clean);
-    ASSERT_EQ(retried.size(), 2u);
-    ASSERT_EQ(reference.size(), retried.size());
-    for (std::size_t row = 0; row < retried.size(); ++row) {
-        EXPECT_EQ(retried[row].id, reference[row].id);
-        EXPECT_EQ(retried[row].mass, reference[row].mass);
-        EXPECT_EQ(retried[row].density, reference[row].density);
-        EXPECT_EQ(retried[row].position, reference[row].position);
-        EXPECT_EQ(retried[row].velocity, reference[row].velocity);
-        EXPECT_EQ(retried[row].pressure, reference[row].pressure);
-        EXPECT_EQ(retried[row].pressure_acceleration, reference[row].pressure_acceleration);
-    }
-    EXPECT_EQ(participant.time_constraint(retry_dt).maximum_step,
-              clean.time_constraint(retry_dt).maximum_step);
     EXPECT_TRUE(sim.finalize().ok());
-    EXPECT_TRUE(clean_sim.finalize().ok());
-}
-
-TEST(SphContinuity, NonpositiveTrialDensityRestoresAndRetries) {
-    check_density_failure(real{.125}, 1, 1, .5, .03125);
+    EXPECT_EQ(participant.resource_usage().controlled_bytes, 0u);
 }
 
 } // namespace

@@ -18,7 +18,7 @@ struct DensityInput {
 };
 
 // The caller binds validated non-self CSR and row-to-column indices to finite particle
-// fields, with positive masses and neighbors within support, and owns a disjoint trial
+// fields, with positive masses and neighbors within support, and owns a disjoint
 // output with one value per row. The host scalar reduction completes the gather on
 // the supplied instance before publication or discard. The owned diagnostic uses
 // ordinary double accumulation, then checks its rounded finite value against real range.

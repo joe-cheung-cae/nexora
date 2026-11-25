@@ -15,7 +15,7 @@ struct RigidWallMotion3D {
     double angle{}, angular_speed{}, angular_acceleration{};
 };
 
-// A trajectory owns a measurable copy of each callback. Capture parameters directly
+// A trajectory owns a measurable copy of its motion callback. Capture parameters directly
 // in the callable, or borrow externally owned parameters that outlive the trajectory.
 // Plain value storage makes the size of the retained allocation known before admission.
 template <class R, class... Args> class WallTrajectoryFunction {
@@ -62,10 +62,10 @@ struct PrescribedWallTrajectory3D {
     double first_phase = -std::numeric_limits<double>::infinity();
     double last_phase = std::numeric_limits<double>::infinity();
     double time_resolution{};
-    // For each time, both callbacks must return deterministic results throughout retries.
-    // Only motion_phase is reduced modulo period. Both callbacks receive the original clock.
+    // Only the motion phase is reduced modulo period. Motion also receives the original clock.
     WallTrajectoryFunction<Result<RigidWallMotion3D>, WallTrajectoryTime3D, double> motion;
-    WallTrajectoryFunction<Result<double>, WallTrajectoryTime3D> maximum_sample_step;
+    // Required finite positive physical bound valid throughout the supplied trajectory.
+    double sample_step_limit{};
 };
 struct WallGroupInput3D {
     std::uint64_t id;

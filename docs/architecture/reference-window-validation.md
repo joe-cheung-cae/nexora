@@ -1,5 +1,7 @@
 # Reference 窗口的 lease 与本地收发
 
+本页记录早期 Serial 基线。现行单求解器生命周期和状态发布契约见 [Kokkos 数据与执行设计](kokkos-design.md#7-单求解器的同步推进与状态发布)。
+
 当前内部 reference 参与者复用 `ParticipantIF` 与 `Simulation` 的同步事务。reference 算子保留既有显式 Euler 公式、时间步和容差。真实耦合端口、CLI、MPI、设备异步和持久 checkpoint 属于后续范围。
 
 ## 窗口契约

@@ -180,11 +180,6 @@ void check_same_accepted(const Snapshot& before, const Snapshot& after) {
         ASSERT_EQ(before.index(edge), after.index(edge));
 }
 
-void prepare(Simulation& simulation) {
-    ASSERT_TRUE(simulation.initialize().ok());
-    ASSERT_TRUE(simulation.prepare().ok());
-}
-
 TEST(Sph, FrozenLayoutAndReorder) {
     const auto config = fixture::frozen_config<Config>();
     const auto rows = fixture::strong_ids<GlobalEntityId>(fixture::reordered_rows);
@@ -196,9 +191,7 @@ TEST(Sph, FrozenLayoutAndReorder) {
     ASSERT_TRUE(initial.stamp.accepted);
     ASSERT_FALSE(initial.density_valid);
     ASSERT_NO_FATAL_FAILURE(check_frozen(initial, false));
-    ASSERT_EQ(participant.reorder(rows, columns, initial.stamp).code(), StatusCode::invalid_state);
-    ASSERT_TRUE(simulation.prepare().ok());
-    ASSERT_TRUE(simulation.advance(0.125).ok());
+    ASSERT_TRUE(simulation.run(0.125).ok());
     const auto original = require(participant.snapshot());
     ASSERT_NO_FATAL_FAILURE(check_frozen(original, false));
     ASSERT_NO_FATAL_FAILURE(check_oracle(original, config, scalar_oracle(config)));
@@ -231,7 +224,7 @@ TEST(Sph, FrozenLayoutAndReorder) {
     }
     ASSERT_NO_FATAL_FAILURE(check_frozen(reordered, true));
     ASSERT_EQ(participant.reorder(rows, columns, original.stamp).code(), StatusCode::invalid_state);
-    ASSERT_TRUE(simulation.advance(0.125).ok());
+    ASSERT_TRUE(simulation.run(0.125).ok());
     const auto advanced = require(participant.snapshot());
     ASSERT_EQ(advanced.stamp.accepted_version, StateVersion{2});
     ASSERT_EQ(advanced.stamp.time.physical_time, 0.25);
@@ -243,100 +236,25 @@ TEST(Sph, FrozenLayoutAndReorder) {
     ASSERT_NO_FATAL_FAILURE(check_frozen(reordered, true));
 }
 
-TEST(Sph, RestoreRetryAndReplay) {
+TEST(Sph, MultiStepRunPublishesEachStepOnce) {
     constexpr double step = 0.125;
+    constexpr std::size_t steps = 3;
     const auto config = fixture::frozen_config<Config>();
     Participant participant(config);
     Simulation simulation(participant);
-    ASSERT_NO_FATAL_FAILURE(prepare(simulation));
-    ASSERT_TRUE(simulation.advance(step).ok());
+    ASSERT_TRUE(simulation.initialize().ok());
+    ASSERT_TRUE(simulation.run(step, steps).ok());
     const auto accepted = require(participant.snapshot());
     ASSERT_TRUE(accepted.stamp.accepted);
     ASSERT_TRUE(accepted.density_valid);
-    ASSERT_TRUE(simulation.begin_window(step).ok());
-    ASSERT_EQ(participant.reorder(config.row_ids, config.column_ids, accepted.stamp).code(),
-              StatusCode::invalid_state);
-    ASSERT_TRUE(simulation.advance_trial().ok());
-    const auto abandoned_stamp = require(participant.trial_stamp());
-    const auto abandoned = require(participant.trial_snapshot(abandoned_stamp));
-    ASSERT_FALSE(abandoned.stamp.accepted);
-    ASSERT_EQ(abandoned.stamp, abandoned_stamp);
-    ASSERT_NE(abandoned.stamp.storage_incarnation, accepted.stamp.storage_incarnation);
-    ASSERT_NO_FATAL_FAILURE(check_frozen(abandoned, false));
-    ASSERT_NO_FATAL_FAILURE(check_same_accepted(accepted, require(participant.snapshot())));
-    ASSERT_TRUE(simulation.restore_window().ok());
-    ASSERT_EQ(simulation.state(), SimulationState::prepared);
-    ASSERT_EQ(simulation.time().accepted_time, step);
-    ASSERT_EQ(simulation.time().accepted_steps, 1);
-    ASSERT_EQ(simulation.time().trial_attempts, 2);
-    ASSERT_EQ(participant.trial_snapshot(abandoned_stamp).status().code(),
-              StatusCode::invalid_state);
-    ASSERT_NO_FATAL_FAILURE(check_same_accepted(accepted, require(participant.snapshot())));
-
-    ASSERT_TRUE(simulation.begin_window(step).ok());
-    ASSERT_TRUE(simulation.advance_trial().ok());
-    const auto stamp = require(participant.trial_stamp());
-    ASSERT_NE(stamp.trial.attempt, abandoned_stamp.trial.attempt);
-    ASSERT_EQ(participant.trial_snapshot(abandoned_stamp).status().code(),
-              StatusCode::invalid_state);
-    auto stale = stamp;
-    ++stale.trial.attempt;
-    ASSERT_EQ(participant.trial_snapshot(stale).status().code(), StatusCode::invalid_state);
-    stale = stamp;
-    stale.layout = LayoutVersion{stamp.layout.value() + 1};
-    ASSERT_EQ(participant.trial_snapshot(stale).status().code(), StatusCode::invalid_state);
-    stale = stamp;
-    stale.geometry = GeometryVersion{stamp.geometry.value() + 1};
-    ASSERT_EQ(participant.trial_snapshot(stale).status().code(), StatusCode::invalid_state);
-    stale = stamp;
-    stale.topology = TopologyVersion{stamp.topology.value() + 1};
-    ASSERT_EQ(participant.trial_snapshot(stale).status().code(), StatusCode::invalid_state);
-
-    auto retained_trial = require(participant.trial_snapshot(stamp));
-    ASSERT_NO_FATAL_FAILURE(check_frozen(retained_trial, false));
-    auto trial_copy = retained_trial;
-    const auto trial_bytes = retained_trial.row_count() * sizeof(real);
-    const auto bytes_before_commit = participant.resource_usage().controlled_bytes;
-    ASSERT_TRUE(simulation.commit_window().ok());
-    ASSERT_EQ(participant.resource_usage().controlled_bytes, bytes_before_commit + trial_bytes);
-    const auto replayed = require(participant.snapshot());
-    ASSERT_TRUE(replayed.stamp.accepted);
-    ASSERT_TRUE(replayed.density_valid);
-    ASSERT_EQ(retained_trial.stamp, stamp);
-    ASSERT_FALSE(retained_trial.stamp.accepted);
-    ASSERT_NE(retained_trial.stamp.storage_incarnation, replayed.stamp.storage_incarnation);
-    ASSERT_EQ(retained_trial.owned_density_sum, replayed.owned_density_sum);
-    for (std::size_t row = 0; row < replayed.row_count(); ++row)
-        ASSERT_EQ(retained_trial.density(row), replayed.density(row));
-    ASSERT_EQ(participant.trial_snapshot(stamp).status().code(), StatusCode::invalid_state);
-    ASSERT_EQ(simulation.time().accepted_steps, 2);
-    ASSERT_EQ(simulation.time().trial_attempts, 3);
+    EXPECT_EQ(accepted.stamp.accepted_version, StateVersion{steps});
+    EXPECT_EQ(accepted.stamp.time.physical_time, steps * step);
+    EXPECT_EQ(simulation.time().accepted_time, steps * step);
+    EXPECT_EQ(simulation.time().accepted_steps, steps);
+    ASSERT_NO_FATAL_FAILURE(check_frozen(accepted, false));
+    ASSERT_NO_FATAL_FAILURE(check_oracle(accepted, config, scalar_oracle(config)));
     ASSERT_TRUE(simulation.finalize().ok());
-
-    Participant continuous(config);
-    Simulation baseline(continuous);
-    ASSERT_NO_FATAL_FAILURE(prepare(baseline));
-    ASSERT_TRUE(baseline.advance(step).ok());
-    ASSERT_TRUE(baseline.advance(step).ok());
-    const auto direct = require(continuous.snapshot());
-    ASSERT_EQ(direct.stamp.accepted_version, replayed.stamp.accepted_version);
-    ASSERT_EQ(direct.stamp.time, replayed.stamp.time);
-    ASSERT_EQ(direct.owned_density_sum, replayed.owned_density_sum);
-    ASSERT_EQ(baseline.time().trial_attempts, 2);
-    for (std::size_t row = 0; row < direct.row_count(); ++row)
-        ASSERT_EQ(direct.density(row), replayed.density(row));
-    ASSERT_NO_FATAL_FAILURE(check_frozen(direct, false));
-    ASSERT_NO_FATAL_FAILURE(check_frozen(replayed, false));
-    ASSERT_NO_FATAL_FAILURE(check_frozen(abandoned, false));
-    ASSERT_NO_FATAL_FAILURE(check_frozen(retained_trial, false));
-    const auto bytes_before_trial_release = participant.resource_usage().controlled_bytes;
-    retained_trial = {};
-    ASSERT_EQ(participant.resource_usage().controlled_bytes, bytes_before_trial_release);
-    ASSERT_EQ(trial_copy.density(0), replayed.density(0));
-    trial_copy = {};
-    ASSERT_EQ(participant.resource_usage().controlled_bytes,
-              bytes_before_trial_release - trial_bytes);
-    ASSERT_TRUE(baseline.finalize().ok());
+    ASSERT_NO_FATAL_FAILURE(check_frozen(accepted, false));
 }
 
 TEST(Sph, DensitylessLayoutIncarnations) {
@@ -345,7 +263,7 @@ TEST(Sph, DensitylessLayoutIncarnations) {
     const auto columns = fixture::strong_ids<GlobalEntityId>(fixture::reordered_columns);
     Participant first(config);
     Simulation first_simulation(first);
-    ASSERT_NO_FATAL_FAILURE(prepare(first_simulation));
+    ASSERT_TRUE(first_simulation.initialize().ok());
     auto first_initial = require(first.snapshot());
     ASSERT_TRUE(first.reorder(rows, columns, first_initial.stamp).ok());
     auto first_reordered = require(first.snapshot());
@@ -365,7 +283,7 @@ TEST(Sph, DensitylessLayoutIncarnations) {
 
     Participant second(config);
     Simulation second_simulation(second);
-    ASSERT_NO_FATAL_FAILURE(prepare(second_simulation));
+    ASSERT_TRUE(second_simulation.initialize().ok());
     const auto second_initial = require(second.snapshot());
     ASSERT_NE(second_initial.stamp.storage_incarnation, first_initial_stamp.storage_incarnation);
     ASSERT_EQ(second.reorder(rows, columns, first_initial_stamp).code(), StatusCode::invalid_state);
@@ -375,7 +293,7 @@ TEST(Sph, DensitylessLayoutIncarnations) {
               first_reordered_stamp.storage_incarnation);
     ASSERT_EQ(second.reorder(config.row_ids, config.column_ids, first_reordered_stamp).code(),
               StatusCode::invalid_state);
-    ASSERT_TRUE(second_simulation.advance(0.125).ok());
+    ASSERT_TRUE(second_simulation.run(0.125).ok());
     const auto accepted = require(second.snapshot());
     ASSERT_NE(accepted.stamp.storage_incarnation, second_reordered.stamp.storage_incarnation);
     ASSERT_EQ(second.reorder(config.row_ids, config.column_ids, second_reordered.stamp).code(),
@@ -402,49 +320,31 @@ TEST(Sph, RetainedDensityBudget) {
     constexpr auto limit = geometry_bytes + 2 * density_bytes;
     Participant participant(fixture::frozen_config<Config>(), ParticipantId{1}, {3, limit});
     Simulation simulation(participant);
-    ASSERT_NO_FATAL_FAILURE(prepare(simulation));
+    ASSERT_TRUE(simulation.initialize().ok());
     ASSERT_EQ(participant.resource_usage().controlled_bytes, geometry_bytes);
-    ASSERT_TRUE(simulation.advance(step).ok());
+    ASSERT_TRUE(simulation.run(step).ok());
     auto old = require(participant.snapshot());
     auto old_copy = old;
     ASSERT_EQ(participant.resource_usage().snapshot_records, 1);
-    ASSERT_TRUE(simulation.advance(step).ok());
+    ASSERT_TRUE(simulation.run(step).ok());
     const auto accepted = require(participant.snapshot());
     ASSERT_EQ(participant.resource_usage().controlled_bytes, limit);
-    ASSERT_EQ(simulation.begin_window(step).code(), StatusCode::resource_exhausted);
+    auto another = require(participant.snapshot());
+    ASSERT_EQ(participant.resource_usage().snapshot_records, 3u);
+    EXPECT_EQ(participant.snapshot().status().code(), StatusCode::resource_exhausted);
+    another = {};
     old = {};
-    ASSERT_EQ(simulation.begin_window(step).code(), StatusCode::resource_exhausted);
-    ASSERT_EQ(simulation.time().accepted_steps, 2);
+    ASSERT_EQ(participant.resource_usage().controlled_bytes, limit);
+    EXPECT_EQ(simulation.run(step, 2).code(), StatusCode::resource_exhausted);
+    EXPECT_EQ(simulation.time().accepted_steps, 2u);
+    EXPECT_EQ(simulation.time().accepted_time, 2 * step);
     ASSERT_NO_FATAL_FAILURE(check_frozen(old_copy, false));
     ASSERT_NO_FATAL_FAILURE(check_same_accepted(accepted, require(participant.snapshot())));
     old_copy = {};
-
-    ASSERT_TRUE(simulation.begin_window(step).ok());
-    ASSERT_EQ(participant.resource_usage().controlled_bytes, limit);
-    ASSERT_TRUE(simulation.advance_trial().ok());
-    const auto stamp = require(participant.trial_stamp());
-    auto trial = require(participant.trial_snapshot(stamp));
-    auto trial_copy = trial;
-    auto another = require(participant.trial_snapshot(stamp));
-    ASSERT_EQ(participant.resource_usage().snapshot_records, 3);
-    ASSERT_EQ(participant.trial_snapshot(stamp).status().code(), StatusCode::resource_exhausted);
-    ASSERT_EQ(participant.snapshot().status().code(), StatusCode::resource_exhausted);
-    another = {};
-    // Publishing a separately retained trial would require a third density bank.
-    ASSERT_EQ(simulation.commit_window().code(), StatusCode::resource_exhausted);
-    ASSERT_EQ(simulation.state(), SimulationState::prepared);
-    ASSERT_EQ(simulation.time().accepted_steps, 2);
-    ASSERT_NO_FATAL_FAILURE(check_same_accepted(accepted, require(participant.snapshot())));
-    ASSERT_NO_FATAL_FAILURE(check_frozen(trial, false));
-    trial = {};
-    ASSERT_EQ(simulation.begin_window(step).code(), StatusCode::resource_exhausted);
-    ASSERT_NO_FATAL_FAILURE(check_frozen(trial_copy, false));
-    trial_copy = {};
-    ASSERT_EQ(participant.resource_usage().controlled_bytes, geometry_bytes + density_bytes);
-    ASSERT_TRUE(simulation.advance(step).ok());
-    ASSERT_EQ(simulation.time().accepted_steps, 3);
+    EXPECT_EQ(participant.resource_usage().controlled_bytes, geometry_bytes + density_bytes);
+    EXPECT_EQ(participant.resource_usage().snapshot_records, 1u);
     ASSERT_TRUE(simulation.finalize().ok());
-    ASSERT_EQ(participant.resource_usage().controlled_bytes, geometry_bytes + density_bytes);
+    EXPECT_EQ(participant.resource_usage().controlled_bytes, geometry_bytes + density_bytes);
     ASSERT_NO_FATAL_FAILURE(check_frozen(accepted, false));
 }
 
@@ -455,8 +355,8 @@ TEST(Sph, RetainedLayoutBudget) {
     const auto columns = fixture::strong_ids<GlobalEntityId>(fixture::reordered_columns);
     Participant participant(config, ParticipantId{1}, {4, limit});
     Simulation simulation(participant);
-    ASSERT_NO_FATAL_FAILURE(prepare(simulation));
-    ASSERT_TRUE(simulation.advance(0.125).ok());
+    ASSERT_TRUE(simulation.initialize().ok());
+    ASSERT_TRUE(simulation.run(0.125).ok());
     auto old = require(participant.snapshot());
     auto old_copy = old;
     ASSERT_TRUE(participant.reorder(rows, columns, old.stamp).ok());
@@ -504,8 +404,8 @@ TEST(Sph, LongAndEmptyRows) {
     const auto oracle = scalar_oracle(config);
     Participant participant(config);
     Simulation simulation(participant);
-    ASSERT_NO_FATAL_FAILURE(prepare(simulation));
-    ASSERT_TRUE(simulation.advance(0.125).ok());
+    ASSERT_TRUE(simulation.initialize().ok());
+    ASSERT_TRUE(simulation.run(0.125).ok());
     const auto original = require(participant.snapshot());
     ASSERT_EQ(original.offset(1) - original.offset(0), degree);
     ASSERT_EQ(original.offset(2), original.offset(1));
@@ -517,7 +417,7 @@ TEST(Sph, LongAndEmptyRows) {
     std::ranges::reverse(columns);
     ASSERT_TRUE(participant.reorder(rows, columns, original.stamp).ok());
     ASSERT_NO_FATAL_FAILURE(check_oracle(require(participant.snapshot()), config, oracle));
-    ASSERT_TRUE(simulation.advance(0.125).ok());
+    ASSERT_TRUE(simulation.run(0.125).ok());
     const auto reordered = require(participant.snapshot());
     ASSERT_EQ(reordered.row_id(0), rows[0].value());
     ASSERT_EQ(reordered.offset(1), reordered.offset(0));

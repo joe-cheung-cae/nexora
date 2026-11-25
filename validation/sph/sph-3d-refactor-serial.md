@@ -1,5 +1,7 @@
 # 三维 WCSPH 重构 Serial 验收
 
+以下 M0–M5 与后续复审记录对应当时使用窗口接口的版本。现行单求解器的步长准入、有限轨迹终点和状态发布约定见[WCSPH 现行契约](../../docs/architecture/sph-3d-refactor-plan.md#现行单求解器契约)。
+
 ## M0 固定对照
 
 实施起点为 `bbc301cad481ce6e85706f139398027dbf823e10`。集成分支从 `de1f36cade3a2b6208ef2c78449ffbe52041e92a` 创建。这两次提交的差异仅为重构计划。按计划所列路径复算原实施补丁，SHA-256 为 `12838aaebeac7c2200ee1e28ee16eeea7232125ba950c9734233371a0270424f`。[迁移计划](../../docs/architecture/sph-3d-refactor-plan.md#m0-固定对照)

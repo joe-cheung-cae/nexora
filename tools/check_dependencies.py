@@ -70,7 +70,6 @@ SPECIAL_TEST_LINKS = {
     "nexora_field_binding_tests": {KOKKOS_TEST_MAIN, "nexora_data"},
     "nexora_kokkos_tests": {KOKKOS_TEST_MAIN, "nexora_data"},
     "nexora_reference_tests": {KOKKOS_TEST_MAIN, *REFERENCE_TEST_LINKS},
-    "nexora_reference_transport_tests": {KOKKOS_TEST_MAIN, *REFERENCE_TEST_LINKS},
     "nexora_reference_resource_tests": {KOKKOS_TEST_MAIN, *REFERENCE_TEST_LINKS},
     "nexora_sph_tests": {KOKKOS_TEST_MAIN, *SPH_LEAF_LINKS},
     "nexora_sph_fixed_csr_tests": {KOKKOS_TEST_MAIN, *FIXED_CSR_LINKS},
@@ -106,7 +105,7 @@ FIELD_GROUP_TEST = Path("tests/data/field_group_tests.cpp")
 BINDING_TEST = Path("tests/data/field_binding_tests.cpp")
 TRANSPORT_TEST = Path("tests/data/transport_tests.cpp")
 RECEIVE_TEST = Path("tests/data/transport_receive_tests.cpp")
-REFERENCE_TRANSPORT_TEST = Path("tests/reference/reference_transport_tests.cpp")
+REFERENCE_TEST = Path("tests/reference/reference_tests.cpp")
 REFERENCE_CASE_HEADER = Path("apps/nexora/ReferenceCase.hpp")
 REFERENCE_COMMAND_SOURCE = Path("apps/nexora/ReferenceCommand.cpp")
 REFERENCE_ASSEMBLY_SOURCES = {REFERENCE_CASE_HEADER, REFERENCE_CASE_HEADER.with_suffix(".cpp"),
@@ -115,18 +114,18 @@ SPH_METHOD_DIR = ("src", "methods", "sph")
 SPH_PARTICIPANT_DIR = ("src", "participants", "sph")
 FIXED_CSR_DIR = Path("validation/sph/fixed_csr")
 FIXED_CSR_PARTICIPANT = FIXED_CSR_DIR / "Participant.hpp"
+SPH_CELL_GRID_TEST = Path("tests/methods/sph/cell_grid_tests.cpp")
 RESOURCE_BUDGET_HEADER = "participants/ResourceBudget.hpp"
 RESOURCE_BUDGET_CONSUMERS = {
     Path("src/participants/reference/Participant.hpp"),
     FIXED_CSR_PARTICIPANT,
-    Path(*SPH_PARTICIPANT_DIR) / "GeometryVersions3D.hpp",
     Path(*SPH_PARTICIPANT_DIR) / "Geometry3D.hpp",
+    SPH_CELL_GRID_TEST,
 }
 FIXED_CSR_CONSUMERS = {
     "nexora_sph_fixed_csr_tests": Path("tests/methods/sph/sph_tests.cpp"),
     "nexora_sph_benchmark": Path("benchmarks/sph/sph_benchmark.cpp"),
 }
-SPH_CELL_GRID_TEST = Path("tests/methods/sph/cell_grid_tests.cpp")
 SPH_ADAMI_TEST = SPH_CELL_GRID_TEST.with_name("adami_wall_tests.cpp")
 SPH_ADAMI_HEADER = "methods/sph/AdamiWallPressure3D.hpp"
 SPH_ADAMI_CONSUMERS = {
@@ -177,11 +176,11 @@ STANDALONE_TEST_SOURCES = {
     Path("tests/reference/cli_oracle.cpp"),
 }
 PRIVATE_DATA_HEADERS = {
-    "FieldIssuer.hpp": {FIXED_CSR_PARTICIPANT, DATA_PREINIT_TEST, STRUCTURE_FIXTURE, BINDING_TEST, FIELD_GROUP_TEST,
-                        TRANSPORT_TEST, RECEIVE_TEST, REFERENCE_TRANSPORT_TEST},
+    "FieldIssuer.hpp": {FIXED_CSR_PARTICIPANT.with_suffix(".cpp"), DATA_PREINIT_TEST,
+                        STRUCTURE_FIXTURE, BINDING_TEST, FIELD_GROUP_TEST,
+                        TRANSPORT_TEST, RECEIVE_TEST},
     "ExternalField.hpp": {DATA_PREINIT_TEST, TRANSPORT_TEST},
-    "TransportBuilder.hpp": {STRUCTURE_FIXTURE, TRANSPORT_TEST, RECEIVE_TEST,
-                             REFERENCE_TRANSPORT_TEST},
+    "TransportBuilder.hpp": {STRUCTURE_FIXTURE, TRANSPORT_TEST, RECEIVE_TEST},
     "TransportReceiver.hpp": {STRUCTURE_FIXTURE, RECEIVE_TEST},
 }
 PRIVATE_ENTITY_HEADERS = {"EntityCapacity.hpp", "EntityOrder.hpp", "Permutation.hpp", "CsrAdjacency.hpp"}
@@ -508,7 +507,7 @@ def policy_self_test() -> list[str]:
                  Path("tests/package/consumer/kokkos.cpp"), FIXED_CSR_CONSUMERS["nexora_sph_benchmark"]):
         if not check_internal_include(path, path.parts[0], "gtest/gtest.h"):
             failures.append(f"checker self-test failed to keep GoogleTest out of {path}")
-    for path in (Path("tests/kokkos/gtest_main.cpp"), DATA_PREINIT_TEST, REFERENCE_TRANSPORT_TEST):
+    for path in (Path("tests/kokkos/gtest_main.cpp"), DATA_PREINIT_TEST, REFERENCE_TEST):
         if check_internal_include(path, "tests", "gtest/gtest.h"):
             failures.append(f"checker self-test failed to allow GoogleTest in {path}")
     for path in KOKKOS_VIEW_PROBE_CONSUMERS:
@@ -543,13 +542,9 @@ def policy_self_test() -> list[str]:
             failures.append(f"checker self-test failed to allow Kokkos in {test_path}")
     if not check_internal_include(TRANSPORT_TEST, "tests", "data/TransportReceiver.hpp"):
         failures.append("checker self-test failed to reject receiver outside dedicated receive tests")
-    for header in ("ExternalField.hpp", "TransportReceiver.hpp"):
-        if not check_internal_include(REFERENCE_TRANSPORT_TEST, "tests", f"data/{header}"):
-            failures.append(f"checker self-test failed to reject {header} in reference transport tests")
-    for header in ("FieldIssuer.hpp", "TransportBuilder.hpp"):
-        if not check_internal_include(Path("tests/reference/reference_tests.cpp"),
-                                      "tests", f"data/{header}"):
-            failures.append(f"checker self-test failed to reject {header} in other reference tests")
+    for header in PRIVATE_DATA_HEADERS:
+        if not check_internal_include(REFERENCE_TEST, "tests", f"data/{header}"):
+            failures.append(f"checker self-test failed to reject {header} in Reference tests")
     for header, test_paths in PRIVATE_DATA_HEADERS.items():
         for test_path in test_paths:
             if check_internal_include(test_path, test_path.parts[0], f"data/{header}"):
@@ -622,14 +617,13 @@ def policy_self_test() -> list[str]:
     if not check_internal_include(Path("src/core/Time.hpp"),
                                   "src", "methods/reference/State.hpp"):
         failures.append("checker self-test failed to reject core use of method internals")
-    if check_internal_include(Path("tests/reference/reference_tests.cpp"),
-                              "tests", "methods/reference/State.hpp"):
+    if check_internal_include(REFERENCE_TEST, "tests", "methods/reference/State.hpp"):
         failures.append("checker self-test failed to allow reference tests to include internals")
     sph_method = Path("src/methods/sph/Density3D.hpp")
     sph_participant = Path("src") / SPH_PARTICIPANT_HEADER
     for path in SPH_PARTICIPANT_CONSUMERS:
         if check_internal_include(path, "tests", SPH_PARTICIPANT_HEADER):
-            failures.append(f"checker self-test failed to allow the 3D SPH window test in {path}")
+            failures.append(f"checker self-test failed to allow the 3D SPH participant test in {path}")
     for path in (sph_participant, SPH_GRID_ORACLE, REFERENCE_COMMAND_SOURCE):
         if not check_internal_include(path, path.parts[0], SPH_GRID_ORACLE.name):
             failures.append(f"checker self-test failed to keep the 3D test oracle out of {path}")

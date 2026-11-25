@@ -1,5 +1,7 @@
 # Serial CPU 基础设施验收
 
+本页记录早期 Serial 基线。现行单求解器生命周期和状态发布契约见 [Kokkos 数据与执行设计](kokkos-design.md#7-单求解器的同步推进与状态发布)。
+
 本记录对应[底层开发计划任务 7](foundation-development-plan.md#任务-7-汇总验收并固定交付边界)，涵盖 `P1-10/11` 的 Serial 子项。验收对象为 C++20、Ninja、exact Kokkos 5.2.2 Serial-only 的 Nexora 源码及搬迁安装。同步 Reference 窗口验证数值、时间和事务，独立的四实体 `StructureState` 验证数据布局、CSR 和原子重排。两套夹具均使用实际的 Kokkos Views、字段授权和本地传输。 [架构总览](overview.md#2-当前实现源码事实) · [底层开发计划](foundation-development-plan.md#本阶段交付边界)
 
 ## 任务 1–6 验收对应

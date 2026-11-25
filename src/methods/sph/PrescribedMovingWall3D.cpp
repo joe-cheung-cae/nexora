@@ -34,18 +34,26 @@ double periodic_phase(WallTrajectoryTime3D time, double period) {
     return folded < period ? folded : 0.;
 }
 
+double difference_residual(double high, double low, double difference) {
+    // FastTwoSum needs the larger-magnitude addend first. With a finite
+    // rounded sum, this also keeps the intermediate subtraction finite.
+    double a = high;
+    double b = -low;
+    if (std::abs(a) < std::abs(b))
+        std::swap(a, b);
+    return b - (difference - a);
+}
+
 double inward_difference(double high, double low) {
     const double difference = high - low;
     if (!std::isfinite(difference))
         return difference;
-    // TwoDiff recovers the residual sign. An upper bound rounded outwards by
-    // one fraction of an ulp must not certify an out-of-domain endpoint.
-    const double virtual_low = high - difference;
-    const double residual = (high - (difference + virtual_low)) + (virtual_low - low);
+    // Round inward when the nearest representable difference exceeds the exact width.
+    const double residual = difference_residual(high, low, difference);
     return residual < 0 ? std::nextafter(difference, 0.) : difference;
 }
 // Application-provided trajectories are called outside Kokkos kernels. Convert
-// exceptions here so direct method calls and participant windows share one result contract.
+// exceptions here so direct method calls and participant steps share one result contract.
 template <class F, class... Args> auto call_trajectory(const F& f, Args... args)
     -> decltype(f(args...)) {
     try {
@@ -72,12 +80,12 @@ bool PrescribedMovingWall3D::in_domain(WallTrajectoryTime3D time) const {
 }
 
 Status PrescribedMovingWall3D::validate() const {
-    if (!trajectory_.motion || !trajectory_.maximum_sample_step ||
+    if (!trajectory_.motion ||
         !(trajectory_.period >= 0 && std::isfinite(trajectory_.period)) ||
-        !(trajectory_.time_resolution >= 0 && std::isfinite(trajectory_.time_resolution)) ||
-        !in_domain(initial_time()))
+        !(trajectory_.time_resolution >= 0 && std::isfinite(trajectory_.time_resolution)))
         return {StatusCode::invalid_argument, "invalid WCSPH moving wall trajectory"};
-    return {};
+    const auto limit = maximum_sample_step(initial_time());
+    return limit.status();
 }
 
 Result<WallTrajectoryTime3D> PrescribedMovingWall3D::advance_time(
@@ -91,14 +99,17 @@ Result<WallTrajectoryTime3D> PrescribedMovingWall3D::advance_time(
 }
 
 Result<double> PrescribedMovingWall3D::maximum_sample_step(WallTrajectoryTime3D time) const {
-    if (!in_domain(time) || !trajectory_.maximum_sample_step)
+    if (!in_domain(time))
         return Status{StatusCode::invalid_argument, "WCSPH wall cannot certify this trajectory time"};
-    auto certified = call_trajectory(trajectory_.maximum_sample_step, time);
-    if (!certified.ok())
-        return certified.status();
-    const auto span = certified.value();
+    const auto span = trajectory_.sample_step_limit;
     if (!(span > 0 && std::isfinite(span)))
-        return Status{StatusCode::numerical_failure, "WCSPH wall requires a finite positive next step"};
+        return Status{StatusCode::invalid_argument,
+                      "WCSPH wall requires a finite positive sampling limit valid throughout its trajectory"};
+    // An inward-rounded last elapsed value can still be strictly inside the domain.
+    const double width = trajectory_.last_phase - time.initial_phase;
+    if (time.elapsed == width &&
+        difference_residual(trajectory_.last_phase, time.initial_phase, width) == 0)
+        return 0.;
     const double end_elapsed = inward_difference(trajectory_.last_phase, time.initial_phase);
     const double remaining = inward_difference(end_elapsed, time.elapsed);
     const double safe = std::min(span, remaining);

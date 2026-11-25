@@ -353,56 +353,15 @@ MPI 可选，初期明确 host staging；GPU-aware 需逐 MPI 实现/版本/devi
 
 持久 checkpoint 写逻辑 schema、稳定 ID、拓扑、主状态/历史、时间、owner/partition 元数据及模型/工具链版本；不写 View 对象内存、指针、引用计数、lease、stream 或 MPI request。读取时重新分配 Kokkos Views，重建索引/缓存。首期仅采纳 [R0 同配置重启](checkpoint-restart.md#restart-levels)：相同 binary、rank/分区、execution/device 与数值配置；兼容检查、拒绝条件、发布协议和 CP-01–08 验收以该现行规范为准。R1/R2/R3 均延期、需另行设计和批准；字段可打包不授权跨 rank、设备或版本恢复。
 
-## 7. accepted/trial、缓存和恢复
+## 7. 单求解器的同步推进与状态发布
 
-当前 reference 的同步窗口由参与者持有整分配 lease authority。算法读取 accepted 并写入独立 trial，接收仅在算法完成且尚未预提交时开放。预提交将 trial 的写授权切换为待发布的只读授权，提交后新快照才可见。旧快照共享其原有读 lease。见 [reference 窗口集成验证](reference-window-validation.md)。
+调用方在 Kokkos 运行时内调用 `Simulation::initialize()`、`run(steps)` 或 `run(dt, count)`，最后调用 `finalize()`。初始化产生初态，`run` 依序推进请求时长。绝对时间采用 double 舍入端点，积分、步长约束和固定量子使用权威的 `TimeInterval::duration()`。运行中遇到无效约束、超限、不可前进或数值／发布失败，即返回其 `Status`。调用方可以读取最后一次成功结果并关闭。合法运行完成后，诊断驱动可在两次运行之间读取结果或更新夹具布局。
 
-Reference 同时维护会影响重放诊断的 history 和控制序列。候选 history 在 begin 显式复制，试算诊断按实际 history binding stamp 校验。accepted bank、旧快照和 packed 记录按共享票据限制在用记录和载荷字节。 [状态与计量清单](reference-resource-validation.md)
+`ParticipantIF::step` 用当前已接受约束作一次准入，最大值等于零表示有限时间域已用完。约束查询、计算、检查和报错均由显式数值数据完成。WCSPH 的声学 CFL 和壁组上限在初态或上一成功步建立。合法到达闭轨迹端点所需的运动学取样和数值工作均完成后，该端点仍可发布。新的上限用于之后的请求。
 
-```cpp
-namespace nexora {
-template<class State, class History, class Control> struct StateBank {
-    State fields;
-    History history;
-    Control control;  // integrator/adaptivity/RNG/contact state affecting replay
-    FieldStamp stamp;
-};
-template<class Bank> class WindowState {
-public:
-    const Bank& accepted() const;
-    Status begin(const TimeInterval&);  // reserves independent candidate storage
-    Status prepare_commit();           // all fallible checks; no output
-    Status commit();                   // publish prepared candidate
-    Status restore();                  // complete accesses, discard trial
-private:
-    std::shared_ptr<const Bank> accepted_;
-    std::shared_ptr<Bank> trial_;
-    TrialEpoch next_epoch_;
-};
-} // namespace nexora
-```
+参与者通过 scoped Kokkos Views 及授权读取 accepted 数据并写入需要的独立工作缓冲。算子完整覆盖的字段可省预复制，延续的历史若有输入依赖则显式复制。成功发布前完成必要 fence、诊断、版本检查和下一版本只读授权。公开访问只获得已发布的输出。参与者发布成功后，`Simulation` 推进绝对时钟和步数各一次。失败时完成相关访问并释放未发布数据和相关授权。需缓存的派生数据按归属、布局、版本与有效期管理。
 
-StateBank 不是全局存储容器：各方法自己定义 State/History/Control、拷贝和恢复策略。bank 句柄只用于保活；权限仍由字段 authority 控制。不能浅拷贝 managed View 后宣称 trial 与 accepted 独立。试算写集合必须独立分配；不可变拓扑可共享 const View，trial 改拓扑时另建副本。若算子完整 overwrite 某字段可省预复制，其余历史必须显式 deep_copy。外部 engine 若无法保存全部必要状态，拒绝 rollback capability。
-
-```mermaid
-flowchart LR
-  A["accepted 只读快照"] --> B["begin · 独立 trial / 新 epoch"]
-  B --> T["Kokkos 多阶段执行"]
-  T --> V["主机决策边界 · 完成/校验"]
-  V -->|成功| C["prepare_commit"]
-  C --> P["发布新 accepted / 时钟"]
-  V -->|数值试算失败| R["终止相关访问 / 丢弃 trial"]
-  C -->|准备失败| R
-  R --> A
-  V -->|致命设备错误| F["终止运行 / 不承诺恢复"]
-```
-
-- begin 失败不打开窗口、不改变 accepted。复制必要历史的工作先于依赖它的 kernel；同一实例保持排序即可。
-- prepare_commit 完成数值诊断、必要通信、lease 检查、版本溢出和输出记录准备。commit 的正常路径是无失败的所有权发布；现有接口仍返回 Status，异常 commit 失败必须保留可恢复点，不能发布不可逆输出。
-- restore 先禁止新 trial 使用、完成相关 kernel/传输访问，再撤销 trial 授权和缓存。恢复 accepted 数值、时间、积分历史、控制状态、随机状态及必要拓扑；诊断尝试次数允许增加。retry 使用新 attempt。
-- 旧 accepted 的只读快照可以在新 accepted 发布后继续读取。双 bank 不等于可无条件轮换：旧 bank 仍有任何读者时不得成为下次 writable trial；显式 backpressure、等待相关消费者或在内存预算内另分配，不能靠 `View::use_count()` 猜权限。
-- 缓存可重建但必须列清单与版本键；DEM 接触历史、FEM 材料历史、LBM parity、MBD 控制/约束 warm-start 若影响轨迹，都不是可随意丢弃的缓存。
-- P1 保持现有同步 `ParticipantIF` 高层边界：`advance_trial` 在报告主机可用结果前 fence 相关工作。内部各 stage 不逐一同步。P2 多参与者一致提交在各参与者全部 prepare 成功后发布；跨 rank 失败决策需要通信协议，P1 单参与者测试不证明分布式恢复。
+旧 accepted 快照可保活自身的只读授权和受控预算，保留期间其分配保持只读。独立的本地打包、传输与稳定 ID 解包继续遵循数据层的授权和完成契约。未来多参与者一致发布和跨 rank 失败决策需要单独设计与验证。
 
 ## 8. 类型化算子、执行实例、同步和错误
 
@@ -463,14 +422,14 @@ P1 唯一预定原生需求是**非默认外部 CUDA stream 的生命周期/排�
 | 类别 | 报告与动作 | 不作的承诺 |
 |---|---|---|
 | 提交前校验/可捕获分配失败 | host Status/Result；尚未入队则无副作用；预留 flight 记录失败即不提交 | 不把所有 Kokkos 失败都说成可捕获异常 |
-| 可恢复数值试算失败 | kernel 写诊断值，主机决策边界读取；完成安全清理后丢 trial、保留 accepted，允许合法重试 | device lambda 内抛异常；无检查继续计算 |
+| 单步数值失败 | kernel 写诊断值，主机决策边界读取；完成安全清理后丢弃候选，保留 accepted 并结束本次运行 | device lambda 内抛异常；无检查继续计算 |
 | 致命设备/runtime 错误、abort | 停止新工作，禁止提交；进程或受隔离 worker 终止；只有 IO-001 已实现且新进程满足 R0 兼容条件，才可读取最后完整发布的持久 checkpoint | Kokkos 提供跨 backend 可恢复 event 状态、设备 reset 后原状态仍可信 |
 
-`ParticipantIF` 保留 no-throw 操作约定：能捕获的 host 异常在边界转 Status；Kokkos abort、设备丢失或 runtime fail-stop 可能无法返回，由应用的终止策略处理，不能伪装成 `restore_window()` 成功。无需建立新的通用 error runtime。
+`ParticipantIF` 保留 no-throw 操作约定：能捕获的 host 异常在边界转 Status；Kokkos abort、设备丢失或 runtime fail-stop 可能无法返回，由应用的终止策略处理。
 
 ## 9. MBD 与外部引擎边界
 
-MBD participant 实现相同窗口接口，但其 engine contract 描述模型、formulation、运动/载荷端口和完整恢复能力，不选择 Nexora 通用硬件 provider。
+MBD 的单参与者接入沿用同步单步接口。未来耦合的 engine contract 描述模型、formulation、运动与载荷端口，以及该耦合所需的状态一致性。
 
 ```cpp
 namespace nexora {

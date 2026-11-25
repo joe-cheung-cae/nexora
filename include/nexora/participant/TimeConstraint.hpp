@@ -10,9 +10,8 @@
 
 namespace nexora {
 
-// This first synchronous path accepts a single legal requested step, without
-// subcycling. Floating-point interval endpoints are rounded by normal addition;
-// the quantum constraint applies to the requested step, not endpoint subtraction.
+// Bounds and the optional quantum apply to the requested duration. A zero
+// maximum denotes an exhausted finite time domain.
 struct TimeConstraint {
     double maximum_step = 1.0;
     double minimum_step = 0.0;
@@ -20,7 +19,7 @@ struct TimeConstraint {
 };
 
 inline Status validate_time_constraint(const TimeConstraint& constraint) {
-    if (!std::isfinite(constraint.maximum_step) || constraint.maximum_step <= 0.0 ||
+    if (!std::isfinite(constraint.maximum_step) || constraint.maximum_step < 0.0 ||
         !std::isfinite(constraint.minimum_step) || constraint.minimum_step < 0.0 ||
         constraint.minimum_step > constraint.maximum_step) {
         return {StatusCode::invalid_argument, "invalid participant step bounds"};
@@ -37,15 +36,11 @@ inline Status validate_time_step(const TimeConstraint& constraint, double step) 
     if (!status.ok()) {
         return status;
     }
-    // Allow representational roundoff at bounds, without using a unit-sized
-    // absolute tolerance that would overwhelm very small physical time steps.
-    const double lower_tolerance = 8.0 * std::numeric_limits<double>::epsilon() *
-                                   std::max(std::abs(step), constraint.minimum_step);
-    const double upper_tolerance = 8.0 * std::numeric_limits<double>::epsilon() *
-                                   std::max(std::abs(step), constraint.maximum_step);
-    if (!std::isfinite(step) || step <= 0.0 ||
-        (step < constraint.minimum_step && constraint.minimum_step - step > lower_tolerance) ||
-        (step > constraint.maximum_step && step - constraint.maximum_step > upper_tolerance)) {
+    const bool finite_positive_step = std::isfinite(step) && step > 0.0;
+    if (finite_positive_step && constraint.maximum_step == 0.0) {
+        return {StatusCode::invalid_argument, "participant finite time domain is exhausted"};
+    }
+    if (!finite_positive_step || step < constraint.minimum_step || step > constraint.maximum_step) {
         return {StatusCode::invalid_argument, "requested step violates participant bounds"};
     }
     if (constraint.fixed_quantum) {

@@ -36,158 +36,70 @@ Simulation::Simulation(ParticipantIF& participant, double initial_time) noexcept
 Status Simulation::initialize() {
     if (operation_active_)
         return reject_reentry();
-    if (state_ != SimulationState::created) {
+    if (phase_ != Phase::created)
         return invalid_state("simulation can only initialize once");
-    }
-    if (!std::isfinite(time_.accepted_time)) {
-        return {StatusCode::invalid_argument, "initial time must be finite"};
-    }
+
     const ActiveOperation operation(operation_active_);
-    if (!participant_.capabilities().rollback) {
-        return {StatusCode::unsupported, "transactional simulation requires participant rollback"};
-    }
+    phase_ = Phase::failed;
+    if (!std::isfinite(time_.accepted_time))
+        return {StatusCode::invalid_argument, "initial time must be finite"};
     const auto ports = participant_.ports();
     for (std::size_t index = 0; index < ports.size(); ++index) {
         const auto status = ports[index].validate();
-        if (!status.ok()) {
+        if (!status.ok())
             return status;
-        }
         for (std::size_t previous = 0; previous < index; ++previous) {
-            if (ports[previous].id == ports[index].id) {
+            if (ports[previous].id == ports[index].id)
                 return {StatusCode::invalid_argument, "participant port IDs must be unique"};
-            }
         }
     }
     const auto status = participant_.initialize(time_.accepted_time);
-    state_ = status.ok() ? SimulationState::initialized : SimulationState::failed;
+    if (status.ok())
+        phase_ = Phase::ready;
     return status;
 }
 
-Status Simulation::prepare() {
-    if (operation_active_)
-        return reject_reentry();
-    if (state_ != SimulationState::initialized) {
-        return invalid_state("prepare requires an initialized simulation");
-    }
-    const ActiveOperation operation(operation_active_);
-    const auto status = participant_.prepare();
-    state_ = status.ok() ? SimulationState::prepared : SimulationState::failed;
-    return status;
+Status Simulation::run(std::span<const double> steps) {
+    return run_schedule(steps, 1);
 }
 
-Status Simulation::begin_window(double step) {
-    if (operation_active_)
-        return reject_reentry();
-    if (state_ != SimulationState::prepared) {
-        return invalid_state("begin_window requires a prepared simulation");
-    }
-    const ActiveOperation operation(operation_active_);
-    const auto constraint = participant_.time_constraint(time_.accepted_time);
-    const auto valid = validate_time_step(constraint, step);
-    if (!valid.ok()) {
-        return valid;
-    }
-    const double endpoint = time_.accepted_time + step;
-    if (!std::isfinite(endpoint) || endpoint <= time_.accepted_time) {
-        return {StatusCode::invalid_argument, "step does not produce a finite advancing endpoint"};
-    }
-    if (time_.accepted_steps == std::numeric_limits<std::uint64_t>::max() ||
-        time_.trial_attempts == std::numeric_limits<std::uint64_t>::max()) {
-        return {StatusCode::resource_exhausted, "simulation step counter exhausted"};
-    }
-    const TimeInterval next_interval{time_.accepted_time, endpoint, step};
-    const auto status = participant_.begin_window(next_interval);
-    if (status.ok()) {
-        interval_ = next_interval;
-        state_ = SimulationState::window_open;
-    }
-    return status;
+Status Simulation::run(double step, std::size_t count) {
+    return run_schedule(std::span<const double>{&step, 1}, count);
 }
 
-Status Simulation::reject_trial(const Status& cause) {
-    const auto restored = restore_checkpoint();
-    if (!restored.ok()) {
-        return {restored.code(), cause.message() + "; rollback failed: " + restored.message()};
-    }
-    return cause;
-}
-
-Status Simulation::advance_trial() {
+Status Simulation::run_schedule(std::span<const double> steps, std::size_t repetitions) {
     if (operation_active_)
         return reject_reentry();
-    if (state_ != SimulationState::window_open) {
-        return invalid_state("advance_trial requires an open window");
-    }
+    if (phase_ != Phase::ready)
+        return invalid_state("run requires an initialized simulation without a prior failure");
+
     const ActiveOperation operation(operation_active_);
-    ++time_.trial_attempts;
-    const auto status = participant_.advance_trial(interval_);
-    if (!status.ok())
-        return reject_trial(status);
-    state_ = SimulationState::trial_advanced;
+    phase_ = Phase::failed;
+    for (std::size_t repetition = 0; repetition < repetitions; ++repetition) {
+        for (double step : steps) {
+            if (time_.accepted_steps == std::numeric_limits<std::uint64_t>::max())
+                return {StatusCode::resource_exhausted, "simulation step counter exhausted"};
+            const TimeInterval interval{time_.accepted_time, time_.accepted_time + step, step};
+            const auto status = participant_.step(interval);
+            if (!status.ok())
+                return status;
+            time_.accepted_time = interval.end;
+            ++time_.accepted_steps;
+        }
+    }
+    phase_ = Phase::ready;
     return {};
-}
-
-Status Simulation::commit_window() {
-    if (operation_active_)
-        return reject_reentry();
-    if (state_ != SimulationState::trial_advanced) {
-        return invalid_state("commit_window requires a successful trial");
-    }
-    const ActiveOperation operation(operation_active_);
-    auto status = participant_.prepare_commit(interval_);
-    if (!status.ok()) {
-        return reject_trial(status);
-    }
-    status = participant_.commit_window(interval_);
-    if (!status.ok()) {
-        return reject_trial(status);
-    }
-    time_.accepted_time = interval_.end;
-    ++time_.accepted_steps;
-    state_ = SimulationState::prepared;
-    return {};
-}
-
-Status Simulation::restore_window() {
-    if (operation_active_)
-        return reject_reentry();
-    if (state_ != SimulationState::window_open && state_ != SimulationState::trial_advanced) {
-        return invalid_state("restore_window requires an open window");
-    }
-    const ActiveOperation operation(operation_active_);
-    return restore_checkpoint();
-}
-
-Status Simulation::restore_checkpoint() {
-    const auto status = participant_.restore_window();
-    state_ = status.ok() ? SimulationState::prepared : SimulationState::failed;
-    return status;
-}
-
-Status Simulation::advance(double step) {
-    auto status = begin_window(step);
-    if (!status.ok()) {
-        return status;
-    }
-    status = advance_trial();
-    return status.ok() ? commit_window() : status;
 }
 
 Status Simulation::finalize() {
     if (operation_active_)
         return reject_reentry();
-    if (state_ == SimulationState::finalized) {
+    if (phase_ == Phase::finalized)
         return invalid_state("simulation is already finalized");
-    }
+
     const ActiveOperation operation(operation_active_);
-    if (state_ == SimulationState::window_open || state_ == SimulationState::trial_advanced) {
-        const auto status = restore_checkpoint();
-        if (!status.ok()) {
-            return status;
-        }
-    }
     const auto status = participant_.finalize();
-    state_ = status.ok() ? SimulationState::finalized : SimulationState::failed;
+    phase_ = status.ok() ? Phase::finalized : Phase::failed;
     return status;
 }
 

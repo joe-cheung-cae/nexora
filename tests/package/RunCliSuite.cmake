@@ -50,8 +50,8 @@ foreach(field IN ITEMS "built=true" "available=true" "participant=reference"
                       "field.q.layout=LayoutRight" "layout_conversion=none"
                       "permissions.accepted=read-only leases"
                       "copy.initialize=host input to stable_ids and x and q plus history seed"
-                      "copy.begin=accepted history to independent trial history"
-                      "synchronize.advance=Serial fence before host diagnostics and commit")
+                      "copy.step=accepted history to independent next history"
+                      "synchronize.step=Serial fence before host diagnostics and publication")
     string(FIND "${plan_stdout}" "${field}" field_position)
     if(field_position EQUAL -1)
         message(FATAL_ERROR "CLI plan omits '${field}'.\n${plan_stdout}")
@@ -123,10 +123,10 @@ expect_shared_rejection(cli-inf.case)
 expect_shared_rejection(cli-rounded-stall.case)
 expect_shared_rejection(cli-over-window-boundary.case)
 run_cli(validate "${case_dir}/cli-too-many-steps.case" limit_result limit_stdout limit_stderr)
-string(FIND "${limit_stderr}" "case step count exceeds version 1 limit of 1000000 windows"
+string(FIND "${limit_stderr}" "case step count exceeds version 1 limit of 1000000 steps"
     step_limit_position)
 if(step_limit_position EQUAL -1)
-    message(FATAL_ERROR "Version 1 window limit diagnostic is missing: ${limit_stderr}")
+    message(FATAL_ERROR "Version 1 step limit diagnostic is missing: ${limit_stderr}")
 endif()
 
 run_cli(plan "${case_dir}/cli-max-window-boundary.case" boundary_result boundary_stdout boundary_stderr)
@@ -137,9 +137,11 @@ endif()
 if(expected_precision STREQUAL "float")
     set(opposite_precision double)
     set(max_real 3.40282347e38)
+    set(overflow_seed 1.02e38)
 else()
     set(opposite_precision float)
     set(max_real 1.7976931348623157e308)
+    set(overflow_seed 5.39e307)
 endif()
 set(precision_case "${case_dir}/cli-wrong-precision.case")
 file(WRITE "${precision_case}"
@@ -180,6 +182,26 @@ string(TOLOWER "${max_run_stdout}" max_run_lower)
 if(max_run_lower MATCHES "nan|inf" OR NOT max_run_stdout MATCHES "accepted_steps=1"
    OR NOT max_run_stdout MATCHES "entity.0.x=" OR NOT max_run_stdout MATCHES "entity.0.q=")
     message(FATAL_ERROR "Maximum finite build-real case emitted invalid output.\n${max_run_stdout}")
+endif()
+
+# With dt=0.5, the first increment is half of x. The second is one quarter
+# of the initial x, which overflows q once added to its already accepted value.
+set(late_failure_case "${case_dir}/cli-late-numerical-failure.case")
+file(WRITE "${late_failure_case}"
+    "version=1\nfixture=reference\nexecution=serial\nstart=0\nend=1.5\nstep=0.5\nlambda=1\nids=17\nx=${max_real}\nq=${overflow_seed}\n")
+run_cli(validate "${late_failure_case}" failure_validate_result failure_validate_stdout failure_validate_stderr)
+if(NOT failure_validate_result STREQUAL "0")
+    message(FATAL_ERROR "Late numerical failure case did not pass preflight.\n${failure_validate_stderr}")
+endif()
+if(profile_validated)
+    run_cli(run "${late_failure_case}" failure_result failure_stdout failure_stderr)
+else()
+    execute_process(COMMAND "${cli}" run --fixture "${late_failure_case}"
+        RESULT_VARIABLE failure_result OUTPUT_VARIABLE failure_stdout ERROR_VARIABLE failure_stderr)
+endif()
+if(NOT failure_result STREQUAL "1" OR NOT failure_stdout STREQUAL "" OR
+   NOT failure_stderr MATCHES "step 2:.*nonfinite" OR failure_stderr MATCHES "finalize failed")
+    message(FATAL_ERROR "CLI failed to stop at the late numerical error.\nexit=${failure_result}\n${failure_stdout}\n${failure_stderr}")
 endif()
 
 set(rounded_case "${case_dir}/cli-rounded-clock.case")

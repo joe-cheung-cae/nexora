@@ -54,6 +54,34 @@ review 发现 job 级 `env` 无法引用 `runner.temp`。工作流改为在首�
 
 本地另用 Open MPI 5.0.10 对可选 smoke 作诊断，使用同一个 Debug Kokkos 安装及 `verify --precisions float --mpi`。在 `2026-11-11T11:32:31+08:00` 至 `2026-11-11T11:32:44+08:00` 完成配置、编译和依赖图检查。15 个运行测试通过 14 个，`nexora_mpi_smoke` 的启动器在启动 ranks 前绑定 socket 返回 `EPERM`，CTest 退出码为 8。此轮停在运行测试，日志位于 `logs-mpi-diagnostic/debug-float/ctest.log`。
 
+## 单求解器生命周期复验
+
+本轮在 macOS 27.2.1 arm64（26B131）、AppleClang 21.0.0.21000401、CMake 4.4.3、Ninja 1.13.2 和 Python 3.14.7 上执行。复用并重新校验本地 Kokkos 5.2.2 Serial-only 与 GoogleTest 1.17.0，使用匹配构建类型的依赖。Debug、Release 的验证进程均从 `2026-11-25T09:42:58+08:00` 开始，前后各十个网络探针均返回 `EPERM`。
+
+| 配置 | 常规 CTest | 搬迁包测试 | 独立消费者 | 完成时间 |
+| --- | ---: | ---: | ---: | --- |
+| Debug float | 155/155 | 1/1 | 3/3 | `2026-11-25T09:43:46+08:00` |
+| Debug double | 154/154 | 1/1 | 3/3 | `2026-11-25T09:44:33+08:00` |
+| Release float | 155/155 | 1/1 | 3/3 | `2026-11-25T09:43:37+08:00` |
+| Release double | 154/154 | 1/1 | 3/3 | `2026-11-25T09:44:12+08:00` |
+
+四组依赖图检查和 80 位 Reference Decimal oracle 均通过。源树和搬迁 CLI 验证了预排非等长步、严谨的舍入时钟与第二步数值溢出时退出 1。运行失败后未输出成功摘要。WCSPH 用例检查每次成功发布的字段与时钟、下步声学限制、运动组实际跨度、有限右端发布以及晚期数值与授权分配失败。固定 CSR 用例检查连续发布、重排、旧只读快照与预算。
+
+独立 Release double 水箱轨迹以 `n=6` 执行 601 步到 `t=2.34765625`。216 粒子均在箱内，固壁穿越数为零。四份 CSV 与上一轮本地 `final/tank-6` 记录逐字节一致。固定 CSR benchmark 在 Debug float 的 4,096 组和 Release double 的 262,144 组运行完成，包含冻结输入、重排与内置数值对照。另以 `BUILD_TESTING=OFF` 构建 Release double，正常 CLI 算例发布 3 步，晚期溢出算例退出 1。详细日志见本地 `build/single-run-acceptance/` 与 `build/single-run-validation/`。
+
+## 运动壁域宽与终点诊断复验
+
+本轮沿用上节的 macOS arm64 工具链和匹配的本地依赖，使用新的 `build/wall-review-acceptance/` 构建目录。两轮 `tools/validate_serial.py verify --require-network-blocked` 于 `2026-11-25T10:15:57+08:00` 开始。各组依赖图、Reference Decimal oracle、源树和搬迁 CLI 及独立包消费者均通过，CTest 零失败、零跳过。
+
+| 配置 | 常规 CTest | 搬迁包测试 | 独立消费者 | 完成时间 |
+| --- | ---: | ---: | ---: | --- |
+| Debug float | 158/158 | 1/1 | 3/3 | `2026-11-25T10:16:50+08:00` |
+| Debug double | 157/157 | 1/1 | 3/3 | `2026-11-25T10:17:39+08:00` |
+| Release float | 158/158 | 1/1 | 3/3 | `2026-11-25T10:16:39+08:00` |
+| Release double | 157/157 | 1/1 | 3/3 | `2026-11-25T10:17:20+08:00` |
+
+新增极值回归先在旧域宽实现上复现了向外舍入、越界推进成功及越界运动回调。修复后 Debug float 的相关定向 CTest 为 9/9。独立精确分数检查核对了极值域宽和 65,466 组有限差值的 binary64 残差。真实 WCSPH 的 `run` 在 `t=1` 发布终点后，以 `2^-54` 继续请求会返回 `invalid_argument` 和 `participant finite time domain is exhausted`，保留时钟、步数和壁样本。未耗尽时仍检查绝对端点能否推进。命令、日志及本轮变动的 SHA-256 清单见本地 `build/wall-review-evidence/`。
+
 ## 重跑
 
 准备官方归档。需要网络获取时在 `provision` 中显式加 `--download`。在网络隔离环境内执行 `verify`，保留 `--require-network-blocked` 以使探针失败时停止验证。以下按当前的两个归档和本机工具链演示，按 profile 使用新目录。只执行一组精度时传 `--precisions float` 或 `--precisions double`。

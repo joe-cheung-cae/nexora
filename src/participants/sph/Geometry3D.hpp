@@ -3,6 +3,7 @@
 #include <participants/ResourceBudget.hpp>
 
 #include <array>
+#include <functional>
 
 namespace nexora::sph {
 
@@ -23,6 +24,7 @@ struct Geometry3D {
 };
 
 Status establish_owned_rows(const Kokkos::Serial&, Geometry3D&, const Geometry3D::Indices& owned_slots,
-                            const Geometry3D::Indices& sorted_to_input, const detail::ResourceBudget&);
+                            const Geometry3D::Indices& sorted_to_input,
+                            const std::function<Result<Geometry3D::Ticket>(std::size_t)>& reserve);
 
 } // namespace nexora::sph
