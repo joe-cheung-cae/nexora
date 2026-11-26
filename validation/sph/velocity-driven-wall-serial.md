@@ -41,6 +41,8 @@ flowchart LR
 
 ## Lepton 表达式与独立手写活塞的 Serial 复验
 
+32 步解析轨迹的逐步对照显示，流体速度在第 8 步首次偏离 RK4，第 9 步首次越过 2e−6。两个原验收点的误差分解见[中心差分速度回放](central-difference-serial.md#解析活塞-32-步速度误差的来源)。
+
 在 Windows x64、Intel Core i5-13600KF、MSVC 19.38.33133、CMake 3.27.2、Ninja 1.11.0 上，用本地 Kokkos 5.2.2 Serial 和 GoogleTest 1.17.0 构建 float 与 double Release。位移表达式与手写位姿用同一条连续轨迹，速度表达式与手写速率用同一条欧拉离散壁轨迹。流体参考采用独立手写的 16,384 步 RK4。下表取每周期 32 个均匀步，在半周期和周期末记录流体误差的最大绝对值，壁位置误差取全周期逐步最大值。
 
 | 输入 | 结果（两精度） | 壁位置误差 float / double | 流体速度误差 float / double | 流体密度误差 float / double |

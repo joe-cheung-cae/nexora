@@ -1959,7 +1959,7 @@ std::array<double, 3> piston_signal(double phase) {
 }
 
 struct PistonReference {
-    double separation, density, velocity;
+    double separation, density, velocity, position, acceleration;
 };
 
 std::vector<PistonReference> integrate_piston_reference(int steps) {
@@ -1968,22 +1968,22 @@ std::vector<PistonReference> integrate_piston_reference(int steps) {
     const auto reference = [&](double time, double x, double velocity) {
         const double u = time - std::floor(time);
         const double wall_x = piston_reference_position + 2 * std::pow(u * (1 - u), 4);
-        const double separation = x - wall_x;
-        const double gap = std::max(2 - separation, 0.);
-        return PistonReference{separation, 2 + piston_mass * std::pow(gap, 3) * inverse_four_pi,
-                               velocity};
+        const double r = x - wall_x;
+        const double gap = std::max(2 - r, 0.);
+        const double rho = 2 + piston_mass * std::pow(gap, 3) * inverse_four_pi;
+        double fluid_acceleration{};
+        if (r < 2) {
+            const double wall_acceleration = 8 * u*u * (1-u)*(1-u) * (3 - 14*u*(1-u));
+            const double p = c2 * (rho - 1);
+            const double pw = p + rho * wall_acceleration * r;
+            const double rhow = 1 + pw / c2;
+            fluid_acceleration = piston_mass * 3 * std::pow(gap, 2) * inverse_four_pi *
+                                 (p / (rho * rho) + pw / (rhow * rhow));
+        }
+        return PistonReference{r, rho, velocity, x, fluid_acceleration};
     };
     const auto acceleration = [&](double time, double x) {
-        const auto [r, rho, v] = reference(time, x, 0);
-        if (r >= 2)
-            return 0.;
-        const double u = time - std::floor(time);
-        const double a = 8 * u*u * (1-u)*(1-u) * (3 - 14*u*(1-u));
-        const double p = c2 * (rho - 1);
-        const double pw = p + rho * a * r;
-        const double rhow = 1 + pw / c2;
-        return piston_mass * 3 * std::pow(2 - r, 2) * inverse_four_pi *
-               (p / (rho * rho) + pw / (rhow * rhow));
+        return reference(time, x, 0.).acceleration;
     };
 
     const double dt = 1. / steps;
@@ -2079,6 +2079,23 @@ void check_round_trip_piston(bool expression) {
             EXPECT_DOUBLE_EQ(participant.time_constraint().maximum_step, piston_limit);
             EXPECT_LT(1., 1 / piston_sound_speed);
             EXPECT_TRUE(committed_grid_sample(participant).neighbors.at(11).empty());
+            const bool record_trace = !expression && !unequal && steps == 32;
+            std::ostringstream endpoint_trace;
+            const auto trace_endpoint = [&](int step, double time, const auto& row, real wall_x,
+                                            const PistonReference& target) {
+                endpoint_trace << step << ',' << time << ',' << row.velocity[0] << ','
+                               << row.pressure_acceleration[0] << ',' << row.position[0] << ','
+                               << row.density << ',' << wall_x << ',' << target.velocity << ',' << target.acceleration
+                               << ',' << target.position << ',' << target.density << '\n';
+            };
+            if (record_trace) {
+                endpoint_trace << "step,time,actual_v,actual_a,actual_x,actual_rho,wall_x,ref_v,ref_a,ref_x,ref_rho\n"
+                               << std::scientific << std::setprecision(16);
+                const auto initial = committed(participant);
+                ASSERT_EQ(initial.rows.size(), 1u);
+                const auto initial_wall = checked(participant.read_committed_wall(29));
+                trace_endpoint(0, 0., initial.rows.front(), initial_wall.position[0], reference.front());
+            }
             double time{};
             for (int step = 1; step <= steps; ++step) {
                 const double dt = (unequal ? (step % 2 ? 1.5 : .5) : 1.) / steps;
@@ -2099,6 +2116,8 @@ void check_round_trip_piston(bool expression) {
                 const double exact_wall_position = piston_reference_position + piston_signal(time)[0];
                 maximum_wall_error = std::max(maximum_wall_error, std::abs(wall_value.position[0] - exact_wall_position));
                 const auto& target = reference[static_cast<std::size_t>(time * reference_steps)];
+                if (record_trace)
+                    trace_endpoint(step, time, row, wall_value.position[0], target);
                 const auto parity = step % 2;
                 density_error[parity] = std::max(density_error[parity], std::abs(row.density - target.density));
                 speed_error[parity] = std::max(speed_error[parity], std::abs(row.velocity[0] - target.velocity));
@@ -2146,6 +2165,8 @@ void check_round_trip_piston(bool expression) {
                 }
             }
             ASSERT_TRUE(simulation.finalize().ok());
+            if (record_trace)
+                ::testing::Test::RecordProperty("endpoint_trace_uniform_32", endpoint_trace.str());
             const auto schedule = std::string(unequal ? "variable_" : "uniform_") + std::to_string(steps);
             const auto record = [&](const std::string& field, double error) {
                 std::ostringstream text;
