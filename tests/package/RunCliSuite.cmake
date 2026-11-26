@@ -231,7 +231,8 @@ endforeach()
 
 execute_process(COMMAND "${cli}" --version RESULT_VARIABLE version_result
     OUTPUT_VARIABLE version_stdout ERROR_VARIABLE version_stderr)
-if(NOT version_result STREQUAL "0" OR NOT version_stdout MATCHES "^Nexora ")
+string(STRIP "${version_stdout}" version_stdout)
+if(NOT version_result STREQUAL "0" OR NOT version_stdout STREQUAL "Nexora 0.2.0")
     message(FATAL_ERROR "Existing --version diagnostic failed.\n${version_stdout}\n${version_stderr}")
 endif()
 execute_process(COMMAND "${cli}" inspect-build RESULT_VARIABLE build_result

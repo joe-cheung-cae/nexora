@@ -23,6 +23,7 @@ Status evaluate_pressure_3d(const Kokkos::Serial&, const NeighborView3D&, const 
 
 // Every ghost is an Adami wall. Its acceleration uses the same stage's sorted slot order.
 // Wall acceleration and gravity enter the reconstruction only for contributing walls.
+// Wall acceleration must be disjoint from owned pressure and may overlap owned acceleration.
 Status evaluate_pressure_3d(const Kokkos::Serial&, const NeighborView3D&, const TaitEos&,
                             const Values::const_type& owned_density, const Values& owned_pressure,
                             const Acceleration3D& owned_acceleration,

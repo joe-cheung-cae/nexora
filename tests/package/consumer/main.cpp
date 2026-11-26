@@ -6,8 +6,10 @@
 
 #include <array>
 #include <limits>
+#include <string_view>
 #include <type_traits>
 
+static_assert(std::string_view{nexora::version} == "0.2.0");
 static_assert(std::is_same_v<nexora::real,
     std::conditional_t<NEXORA_TEST_EXPECT_DOUBLE_PRECISION, double, float>>);
 
@@ -60,7 +62,7 @@ int main() {
     unavailable.available = false;
     const auto unavailable_step = nexora::validate_time_step(unavailable, 0.5);
     const auto index = nexora::checked_integer_cast<nexora::LocalIndex>(42);
-    const bool valid = nexora::version[0] != '\0' && step_status.ok() &&
+    const bool valid = step_status.ok() &&
                        rejected_step.code() == nexora::StatusCode::invalid_argument &&
                        unavailable_step.code() == nexora::StatusCode::invalid_state &&
                        index.ok() && index.value() == 42 && interval.duration() == 0.5 &&

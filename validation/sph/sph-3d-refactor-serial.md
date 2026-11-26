@@ -237,3 +237,17 @@ build/current-review-double-release/tests/methods/sph/nexora_sph_tests --gtest_b
 | 完整步 | 7.729 → 7.737 | −3.76% | −15.84% 至 +24.79% |
 
 本次测量波动跨零，不据此声称稳定提速。复现命令为 `python3 results/fixed-wall-check-cleanup/build.py` 和 `python3 results/fixed-wall-check-cleanup/pairs.py`。源码、二进制和共用库摘要、编译命令、原始测量及 JUnit 记录均位于本机 `results/fixed-wall-check-cleanup/`。
+
+## 独立 Adami 压力与安装包 0.2.0
+
+- **Adami 存储重叠。** 在 `9e8db57` 上，双精度单壁单流体回归复现了压力写入将壁加速度从 0.25 覆盖为 0。修复后，调用在写入前返回 `invalid_argument`，壁加速度仍为 0.25。独立缓冲的流体 x 加速度与解析值 `1/(6π)` 的绝对误差不超过当前精度的一个机器 epsilon。双精度下，壁输入与流体加速度输出共享时，三个分量与独立缓冲逐项相等。
+- **搬迁安装。** 四组配置中的 `find_package(Nexora 0.2 CONFIG REQUIRED)` 均选中搬迁后的包。Simulation、schema 和 Kokkos 三个消费者均编译并执行成功。仅搜索该安装的 `0.1` 与 `0.1.0 EXACT` 请求均在配置时报告候选 `NexoraConfig.cmake` 的版本 0.2.0 不兼容。
+
+基于 `9e8db57` 加本次修复，使用 macOS 27.2.1 arm64、AppleClang 21.0.0、CMake 4.4.3、Ninja 1.13.2、Kokkos 5.2.2 Serial 和 GoogleTest 1.17.0。于 `2026-11-26T09:14:23+08:00` 核对四份 JUnit 及搬迁日志。下表计入搬迁安装，跳过数均为 0。
+
+| 精度 | Debug CTest | Release CTest |
+|---|---:|---:|
+| float | 179/179 | 179/179 |
+| double | 178/178 | 178/178 |
+
+对每个 `build/current-review-<精度>-<构建类型>` 执行 `cmake --build <build> --parallel 3` 和 `ctest --test-dir <build> --parallel 2 --no-tests=error --output-on-failure --output-junit p2-ctest.xml --quiet`，均退出 0。四组的目标依赖检查及 Reference 80 位 Decimal 对照均通过。

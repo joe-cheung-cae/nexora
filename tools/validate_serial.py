@@ -593,6 +593,7 @@ def verify_precision(args, profile, precision):
         "nexora_sph_tests.SphAdamiWall.FixedSourcesMatchIndependentWallForcesAcrossSteps",
         "nexora_sph_tests.SphAdamiWall.WallPressureAndForcesMatchIndependentReference",
         "nexora_sph_tests.SphAdamiWall.AcceleratedWallPressureAndForcesMatchIndependentHead",
+        "nexora_sph_tests.SphAdamiWall.StandaloneWallAccelerationMayOverlapAccelerationButNotPressure",
         "nexora_sph_tests.SphHydrostaticInitial.ConventionalMassFourCases",
         "nexora_sph_tests.SphHydrostaticInitial.FixedWallShellCoversNonzeroSupport",
         "nexora_sph_tests.SphHydrostaticInitial.AirSideStaysOpen",

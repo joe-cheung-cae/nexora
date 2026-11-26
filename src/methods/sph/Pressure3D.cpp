@@ -13,9 +13,9 @@ namespace {
 using Policy = Kokkos::RangePolicy<Kokkos::Serial, Kokkos::IndexType<std::size_t>>;
 
 template <class A, class B> bool overlaps(const A& a, const B& b) {
-    if (!a.span() || !b.span())
+    if (!a.data() || !b.data() || !a.span() || !b.span())
         return false;
-    const auto before = std::less<const real*>{};
+    const auto before = std::less<const void*>{};
     return before(a.data(), b.data() + b.span()) && before(b.data(), a.data() + a.span());
 }
 
@@ -247,6 +247,8 @@ Status evaluate_pressure_3d(const Kokkos::Serial& exec, const NeighborView3D& gr
     const auto rows = grid.owned_slots().extent(0), n = grid.fields().ids.extent(0);
     if (rows && n != rows && (wall_acceleration.extent(0) != n || !wall_acceleration.data()))
         return {StatusCode::invalid_argument, "Adami wall acceleration must follow source slots"};
+    if (overlaps(pressure, wall_acceleration))
+        return {StatusCode::invalid_argument, "Adami wall acceleration overlaps owned pressure"};
     const auto at_slot = [&](LocalIndex j) {
         return std::array{wall_acceleration(j, 0), wall_acceleration(j, 1), wall_acceleration(j, 2)};
     };

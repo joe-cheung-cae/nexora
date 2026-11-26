@@ -315,6 +315,41 @@ TEST(SphAdamiWall, AcceleratedWallPressureAndForcesMatchIndependentHead) {
     ASSERT_NO_FATAL_FAILURE(expect_wall_reference(observed, expected, parameters));
 }
 
+TEST(SphAdamiWall, StandaloneWallAccelerationMayOverlapAccelerationButNotPressure) {
+    const Kokkos::Serial exec;
+    const Fields fields({{{0, 0, 0}, 1, 20, 1}, {{1, 0, 0}, 1, 10, 0}});
+    const auto grid = checked(sph::CellGrid::build(exec, fields.get(), 8));
+    const auto wall = grid.input_to_sorted()(0);
+    sph::WallAcceleration3D wall_a("test.wall_acceleration", 2);
+    wall_a(wall, 0) = .25;
+    sph::Values rho("test.density", 1), pressure("test.pressure", 1);
+    rho(0) = 1;
+    sph::Acceleration3D acceleration("test.acceleration", 1);
+    const auto evaluate = [&](const sph::Values& p, const sph::Acceleration3D& a) {
+        return sph::evaluate_pressure_3d(exec, grid.neighbors(), sph::TaitEos({1, 2, 2}),
+                                         rho, p, a, wall_a, {});
+    };
+    ASSERT_TRUE(evaluate(pressure, acceleration).ok());
+    EXPECT_EQ(pressure(0), 0);
+    // Wall pressure is 1/4, squared wall density is 9/8, and |grad W| is 3/(4 pi).
+    EXPECT_NEAR(acceleration(0, 0), 1 / (6 * std::numbers::pi),
+                std::numeric_limits<real>::epsilon());
+    EXPECT_EQ(acceleration(0, 1), 0);
+    EXPECT_EQ(acceleration(0, 2), 0);
+#if NEXORA_ENABLE_DOUBLE_PRECISION
+    const real expected_ax = acceleration(0, 0);
+    const sph::Values shared_pressure(&wall_a(wall, 0), 1);
+    EXPECT_EQ(evaluate(shared_pressure, acceleration).code(), StatusCode::invalid_argument);
+    EXPECT_EQ(wall_a(wall, 0), .25);
+    EXPECT_EQ(acceleration(0, 0), expected_ax);
+
+    const sph::Acceleration3D shared_acceleration(&wall_a(wall, 0), 1);
+    ASSERT_TRUE(evaluate(pressure, shared_acceleration).ok());
+    for (int axis = 0; axis < 3; ++axis)
+        EXPECT_EQ(shared_acceleration(0, axis), acceleration(0, axis));
+#endif
+}
+
 TEST(SphAdamiWall, FixedSourcesMatchIndependentWallForcesAcrossSteps) {
     std::vector<Particle> fluid{{{1.875, .25, .5}, 2, 33, 0}, {{1, .5, .5}, 3, 11, 0}};
     const std::vector<Particle> walls{

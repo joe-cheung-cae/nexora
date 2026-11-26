@@ -125,6 +125,17 @@ function(expect_source_and_consumer_rejection case expected_diagnostic)
         "${nexora_arg}" ${ARGN})
 endfunction()
 
+foreach(version_request IN ITEMS "0.1" "0.1.0 EXACT")
+    string(REPLACE " " "-" case "consumer-version-${version_request}")
+    set(version_probe "${scratch}/negative/${case}-source")
+    file(WRITE "${version_probe}/CMakeLists.txt"
+        "cmake_minimum_required(VERSION 3.25.2)\n"
+        "project(NexoraVersionProbe LANGUAGES CXX)\n"
+        "find_package(Nexora ${version_request} CONFIG REQUIRED NO_DEFAULT_PATH)\n")
+    expect_configure_rejection("${case}" "${version_probe}" "NexoraConfig.cmake, version: 0.2.0"
+        "${nexora_arg}" "-DKokkos_DIR=${kokkos_dir}")
+endforeach()
+
 expect_configure_rejection(consumer-precision-mismatch "${consumer_copy}" "Nexora precision mismatch"
     "${nexora_arg}" "-DKokkos_DIR=${kokkos_dir}" "${precision_expectation_arg}"
     "-DNEXORA_ENABLE_DOUBLE_PRECISION=${conflicting_double_precision}")
