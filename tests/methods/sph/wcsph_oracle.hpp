@@ -95,7 +95,7 @@ inline void check_force_snapshot(const Observation& snapshot,
         const long double epsilon = std::numeric_limits<real>::epsilon();
         EXPECT_LE(
             std::abs(static_cast<long double>(snapshot.density(row)) - oracle.csr.density.at(id)),
-            (epsilon + 64 * (expected.size() + 1) * std::numeric_limits<double>::epsilon()) *
+            32 * (expected.size() + 1) * epsilon *
                 oracle.csr.density.at(id));
         const auto pressure = checked(snapshot.pressure(row));
         EXPECT_LE(std::abs(static_cast<long double>(pressure) - oracle.pressure.at(id)),

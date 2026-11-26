@@ -1,6 +1,6 @@
 # WCSPH 三维压力算子的 Serial 验证
 
-单进程 Kokkos Serial 上，对给定的 `CellGrid` 调用 `evaluate_density_3d` 求 owned 行密度，再把密度与 `WcsphParameters{rho0, c0, gamma}` 传给 `evaluate_pressure_3d` 求同一构型的表压和压力加速度。三个参数须有限且为正。三维时间积分用同一压力算子处理连续性方程更新的密度。[压力接口](../../src/methods/sph/Pressure3D.hpp) · [格索引](cell-begin-serial.md) · [Velocity Verlet](wcsph-verlet-serial.md)
+单进程 Kokkos Serial 上，静态构型测试按格网的 owned 行数分配输出，将只读邻域和密度输出传给 `evaluate_density_3d`。纯流体压力测试调用生产步进使用的 `evaluate_step_pressure_3d`，普通 ghost 构型调用支持本地支撑域重构的 `evaluate_pressure_3d`。两者均用有限正的参考密度、声速和指数建立 Tait 状态方程。实际 WCSPH 推进使用显式初态密度和随后由连续性方程校正的密度。[压力接口](../../src/methods/sph/Pressure3D.hpp) · [格索引](cell-begin-serial.md) · [Velocity Verlet](wcsph-verlet-serial.md)
 
 ## 由密度到压力加速度
 
@@ -17,7 +17,7 @@
    \mathbf{a}^{p}_i = -\sum_{j\ne i} m_j\left(\frac{p_i}{\rho_i^2}+\frac{p_j}{\rho_j^2}\right)\nabla_i W_{ij}.
    $$
 
-密度、表压和加速度分别以配置的 `real` 存储，压力系数和力按上述公式直接用 double 求值和累加。接近参考密度时用 `log1p` 和 `expm1` 保留微小压差。密度非正、压力或最终加速度超出输出范围都会使本次试算失败。
+密度、表压和加速度以配置的 `real` 存储。压力系数直接计算 `p / (ρ * ρ)`，中间平方也按 `real` 舍入。压力力和连续性方程仅累加归一化距离 `0 < sqrt(d²)/h < 2` 的粒子对。接近参考密度时用 `log1p` 和 `expm1` 保留微小压差。密度非正、压力或最终加速度超出输出范围都会使本次试算失败。
 
 **Ghost 输入必须覆盖参与受力的 ghost 自身的完整支撑域。** 每个对 owned 目标有非零梯度贡献的 ghost，会用当前格表中的全部本地源重算自身密度和表压。例如，距目标 `2.5` 的粒子可影响距目标 `1.25` 的 ghost，进而改变目标的加速度。按距离从 owned 集合选源时，覆盖至 `2R` 是充分条件。本阶段只发布 owned 行，MPI halo 交换待另行验证。
 
@@ -35,7 +35,7 @@
 | 远端源、重合、支撑边界、孤立及空目标 | 改变间接源质量只经 ghost 改变目标压力加速度；重合、边界和孤立情形的加速度为零；空输入和纯 ghost 均产生零个 owned 行。 |
 | 参考密度 | 检查零表压及参考密度两侧相邻 double 值的压差。 |
 
-积分路径另核对试算与提交、非初始步恢复重试、快照保活与预算。[积分窗口回归](../../tests/methods/sph/verlet_window_tests.cpp)
+积分路径另核对成功发布、数值及预算拒绝后已提交字段和时间的保留。[积分窗口回归](../../tests/methods/sph/verlet_window_tests.cpp)
 
 ## 历史外供窗口实测
 

@@ -3,7 +3,6 @@
 #include <nexora/core/Real.hpp>
 #include <array>
 #include <data/FieldIssuer.hpp>
-#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <type_traits>
@@ -67,7 +66,7 @@ TEST(FieldBinding, AccessAndSerialWork) {
     const FieldBindingSpec spec{Association::particle, "m", axes};
     const auto field = descriptor();
     const auto accumulation = descriptor(1, FieldAccess::accumulate);
-    auto created = FieldIssuer::create(values, trial_stamp());
+    auto created = FieldIssuer::create_at_validated_time(values, trial_stamp());
     ASSERT_TRUE(created.ok()) << created.status().message();
     auto& issuer = created.value();
     const auto stamp = issuer.stamp();
@@ -126,8 +125,8 @@ TEST(FieldBinding, LayoutsAndAllocationAliases) {
     const auto matrix_field = descriptor(2);
     Kokkos::View<real**, Kokkos::LayoutRight, Kokkos::Serial> right("layout right", 3, 2);
     Kokkos::View<real**, Kokkos::LayoutLeft, Kokkos::Serial> left("layout left", 3, 2);
-    auto right_issuer = FieldIssuer::create(right, trial_stamp());
-    auto left_issuer = FieldIssuer::create(left, trial_stamp());
+    auto right_issuer = FieldIssuer::create_at_validated_time(right, trial_stamp());
+    auto left_issuer = FieldIssuer::create_at_validated_time(left, trial_stamp());
     ASSERT_TRUE(right_issuer.ok()) << right_issuer.status().message();
     ASSERT_TRUE(left_issuer.ok()) << left_issuer.status().message();
     const auto right_stamp = right_issuer.value().stamp();
@@ -154,7 +153,7 @@ TEST(FieldBinding, LayoutsAndAllocationAliases) {
         auto reader = right_issuer.value().read(first, first_field, right_stamp, column_spec);
         ASSERT_TRUE(reader.ok()) << reader.status().message();
         ASSERT_EQ(reader.value().view().stride(0), 2);
-        ASSERT_FALSE(FieldIssuer::create(second, trial_stamp()).ok());
+        ASSERT_FALSE(FieldIssuer::create_at_validated_time(second, trial_stamp()).ok());
         ASSERT_TRUE(!right_issuer.value()
                     .write(second, second_field, right_stamp, column_spec, FieldAccess::overwrite)
                     .ok());
@@ -175,7 +174,7 @@ TEST(FieldBinding, LayoutsAndAllocationAliases) {
     const std::array tensor_axes{FieldAxis{2, true}, FieldAxis{2, true}, FieldAxis{3, false}};
     const FieldBindingSpec tensor_spec{Association::particle, "m", tensor_axes};
     Kokkos::View<real***, Kokkos::LayoutLeft, Kokkos::Serial> tensor("tensor", 2, 2, 3);
-    auto tensor_issuer = FieldIssuer::create(tensor, trial_stamp());
+    auto tensor_issuer = FieldIssuer::create_at_validated_time(tensor, trial_stamp());
     ASSERT_TRUE(tensor_issuer.ok()) << tensor_issuer.status().message();
     const auto tensor_stamp = tensor_issuer.value().stamp();
     auto tensor_read = tensor_issuer.value().read(tensor, descriptor(4), tensor_stamp, tensor_spec);
@@ -194,7 +193,7 @@ TEST(FieldBinding, LayoutsAndAllocationAliases) {
                 .ok());
 
     SerialView empty_allocation("empty field", 0);
-    auto empty_issuer = FieldIssuer::create(empty_allocation, trial_stamp());
+    auto empty_issuer = FieldIssuer::create_at_validated_time(empty_allocation, trial_stamp());
     ASSERT_TRUE(empty_issuer.ok()) << empty_issuer.status().message();
     auto empty_binding = empty_issuer.value().read(empty_allocation, first_field,
                                                   empty_issuer.value().stamp(), empty_spec);
@@ -204,10 +203,7 @@ TEST(FieldBinding, LayoutsAndAllocationAliases) {
 
 TEST(FieldBinding, Rejection) {
     SerialView values("field to validate", 4);
-    auto invalid_stamp = trial_stamp();
-    invalid_stamp.time.physical_time = std::numeric_limits<double>::infinity();
-    ASSERT_FALSE(FieldIssuer::create(values, invalid_stamp).ok());
-    auto created = FieldIssuer::create(values, trial_stamp());
+    auto created = FieldIssuer::create_at_validated_time(values, trial_stamp());
     ASSERT_TRUE(created.ok()) << created.status().message();
     auto& issuer = created.value();
     const auto stamp = issuer.stamp();
@@ -257,14 +253,14 @@ TEST(FieldBinding, Rejection) {
 
     using Borrowed = Kokkos::View<real*, Kokkos::Serial, Kokkos::MemoryUnmanaged>;
     const Borrowed borrowed(values.data(), 4);
-    ASSERT_EQ(FieldIssuer::create(borrowed, trial_stamp()).status().code(), StatusCode::unsupported);
+    ASSERT_EQ(FieldIssuer::create_at_validated_time(borrowed, trial_stamp()).status().code(), StatusCode::unsupported);
     ASSERT_EQ(issuer.read(borrowed, field, stamp, spec).status().code(), StatusCode::unsupported);
 
     auto accepted_stamp = trial_stamp();
     accepted_stamp.accepted = true;
     accepted_stamp.trial = {};
     SerialView accepted("accepted field", 4);
-    auto accepted_issuer = FieldIssuer::create(accepted, accepted_stamp);
+    auto accepted_issuer = FieldIssuer::create_at_validated_time(accepted, accepted_stamp);
     ASSERT_TRUE(accepted_issuer.ok()) << accepted_issuer.status().message();
     accepted_stamp = accepted_issuer.value().stamp();
     ASSERT_TRUE(accepted_issuer.value().read(accepted, field, accepted_stamp, spec).ok());
@@ -278,7 +274,7 @@ TEST(FieldBinding, Rejection) {
 
     SerialView storage("const registration", 4);
     const SerialView::const_type const_storage = storage;
-    auto const_issuer = FieldIssuer::create(const_storage, trial_stamp());
+    auto const_issuer = FieldIssuer::create_at_validated_time(const_storage, trial_stamp());
     ASSERT_TRUE(const_issuer.ok()) << const_issuer.status().message();
     const auto& const_stamp = const_issuer.value().stamp();
     ASSERT_TRUE(const_issuer.value().read(const_storage, field, const_stamp, spec).ok());
@@ -293,8 +289,8 @@ TEST(FieldBinding, MoveAssignment) {
     const FieldBindingSpec spec{Association::particle, "m", axes};
     SerialView first("first movable field", 1);
     SerialView second("second movable field", 1);
-    auto first_issuer = FieldIssuer::create(first, trial_stamp());
-    auto second_issuer = FieldIssuer::create(second, trial_stamp());
+    auto first_issuer = FieldIssuer::create_at_validated_time(first, trial_stamp());
+    auto second_issuer = FieldIssuer::create_at_validated_time(second, trial_stamp());
     ASSERT_TRUE(first_issuer.ok()) << first_issuer.status().message();
     ASSERT_TRUE(second_issuer.ok()) << second_issuer.status().message();
     const auto& first_stamp = first_issuer.value().stamp();
@@ -331,7 +327,7 @@ TEST(FieldBinding, CloseAndLeaseLifetime) {
     std::optional<ReadField<SerialView>> retained;
     FieldStamp old_stamp;
     {
-        auto created = FieldIssuer::create(values, trial_stamp());
+        auto created = FieldIssuer::create_at_validated_time(values, trial_stamp());
         ASSERT_TRUE(created.ok()) << created.status().message();
         auto& issuer = created.value();
         old_stamp = issuer.stamp();
@@ -342,12 +338,12 @@ TEST(FieldBinding, CloseAndLeaseLifetime) {
         ASSERT_FALSE(issuer.read(values, field, old_stamp, spec).ok());
         ASSERT_FALSE(issuer.write(values, field, old_stamp, spec, FieldAccess::overwrite).ok());
     }
-    auto duplicate = FieldIssuer::create(values, trial_stamp());
+    auto duplicate = FieldIssuer::create_at_validated_time(values, trial_stamp());
     ASSERT_EQ(duplicate.status().code(), StatusCode::already_exists);
     ASSERT_EQ(retained->view()(0), real{42});
     retained.reset();
     {
-        auto created = FieldIssuer::create(values, trial_stamp());
+        auto created = FieldIssuer::create_at_validated_time(values, trial_stamp());
         ASSERT_TRUE(created.ok()) << created.status().message();
         auto& issuer = created.value();
         ASSERT_GT(issuer.stamp().storage_incarnation, old_stamp.storage_incarnation);

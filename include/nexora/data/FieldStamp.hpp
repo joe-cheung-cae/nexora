@@ -24,7 +24,7 @@ struct FieldStamp {
     // the issuer's immutable stamp, including its storage incarnation.
     Status validate() const {
         if (!std::isfinite(time.physical_time) || !std::isfinite(valid_from) ||
-            !std::isfinite(valid_until) || valid_until < valid_from) {
+            !std::isfinite(valid_until)) {
             return {StatusCode::invalid_argument, "invalid field time or validity interval"};
         }
         if (time.physical_time < valid_from || time.physical_time > valid_until) {

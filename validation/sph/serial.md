@@ -1,6 +1,6 @@
 # P1-07 一维固定 CSR 验证夹具
 
-`nexora_sph_fixed_csr_fixture` 由一维回归和显式构建的 benchmark 共用。夹具每步读取既有几何，使用指定的 Kokkos Serial 实例计算 [P1-01b](../baselines/sph-density-1d-v1.md) 的固定 CSR 一维 M₄ 密度。每个 owned 行写入该步独立分配的密度，ghost 只供读取。支持边界和核权重直接由粒子距离求得。同一次 Kokkos 归约把逐行写入 `real` 密度，并用普通 `double` 累加 owned 和。归约值有限且未超过 `real` 上限才转换和发布。 [密度算子](fixed_csr/Density.cpp) · [SPH participant](fixed_csr/Participant.cpp)
+`nexora_sph_fixed_csr_fixture` 由一维回归和显式构建的 benchmark 共用。夹具每步读取既有几何，使用指定的 Kokkos Serial 实例计算 [P1-01b](../baselines/sph-density-1d-v1.md) 的固定 CSR 一维 M₄ 密度。每个 owned 行写入该步独立分配的密度，ghost 只供读取。支持边界和核权重直接由粒子距离求得。同一次 Kokkos 归约写入每行的 `real` 密度，并用 `real` 累加 owned 和。发布前检查归约结果有限。 [密度算子](fixed_csr/Density.cpp) · [SPH participant](fixed_csr/Participant.cpp)
 
 ## 状态与验证范围
 

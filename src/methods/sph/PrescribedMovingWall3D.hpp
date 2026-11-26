@@ -11,8 +11,8 @@ namespace nexora::sph::SphBoundary {
 
 // Rigid translation and fixed-axis rotation about center, with physical time derivatives.
 struct RigidWallMotion3D {
-    std::array<double, 3> translation{}, velocity{}, acceleration{}, center{}, axis{1, 0, 0};
-    double angle{}, angular_speed{}, angular_acceleration{};
+    std::array<real, 3> translation{}, velocity{}, acceleration{}, center{}, axis{1, 0, 0};
+    real angle{}, angular_speed{}, angular_acceleration{};
 };
 
 // A trajectory callback is sampled once per group. Geometry and time derivatives
@@ -23,19 +23,17 @@ class SampledWallMotion3D {
   public:
     SampledWallMotion3D() = default;
     SampledWallMotion3D(RigidWallMotion3D, WallMotionUse3D);
-    // The next grid validates these coordinates before binning a double position.
-    std::array<double, 3> position(const std::array<real, 3>& reference) const;
-    std::optional<std::array<real, 3>> checked_position(const std::array<real, 3>& reference) const;
+    std::array<real, 3> position(const std::array<real, 3>& reference) const;
     std::optional<std::array<real, 3>> velocity(const std::array<real, 3>& reference);
-    std::array<double, 3> acceleration(const std::array<real, 3>& reference) const;
+    std::array<real, 3> acceleration(const std::array<real, 3>& reference) const;
 
   private:
     RigidWallMotion3D motion;
-    double sine{}, one_minus_cosine{};
+    real sine{}, one_minus_cosine{};
     bool checked_translation_velocity_{};
     std::optional<std::array<real, 3>> translation_velocity_;
-    std::array<double, 3> displacement(const std::array<double, 3>& arm) const;
-    std::array<double, 3> direction(const std::array<real, 3>& reference) const;
+    std::array<real, 3> displacement(const std::array<real, 3>& arm) const;
+    std::array<real, 3> direction(const std::array<real, 3>& reference) const;
 };
 
 // A trajectory owns a measurable copy of its motion callback. Capture parameters directly
@@ -99,29 +97,19 @@ struct WallGroupInput3D {
 class PrescribedMovingWall3D final : public SolidWallBoundary3D {
   public:
     PrescribedMovingWall3D(ParticleView particles, PrescribedWallTrajectory3D trajectory);
-    Status validate() const;
     WallTrajectoryTime3D initial_time() const { return {trajectory_.initial_phase, 0}; }
     Result<double> initial_step_limit() const;
-    Result<WallTrajectoryTime3D> advance_time(WallTrajectoryTime3D start, double dt,
-                                              double certified_limit) const;
-    Result<double> maximum_sample_step(WallTrajectoryTime3D time) const;
-
     // The time and limit must come from this trajectory's initialized or
     // previously certified state. The stepper retains them as a pair.
     Result<std::pair<WallTrajectoryTime3D, double>> advance_certified_time(
         WallTrajectoryTime3D start, double dt, double limit) const;
     Result<SampledWallMotion3D> motion_at_certified_time(WallTrajectoryTime3D time,
-                                                          WallMotionUse3D use = WallMotionUse3D::full) const;
+                                                          WallMotionUse3D use) const;
 
   private:
     PrescribedWallTrajectory3D trajectory_;
     double last_elapsed_;
-    bool in_domain(WallTrajectoryTime3D time) const;
-    Result<WallTrajectoryTime3D> advance_endpoint(WallTrajectoryTime3D start, double dt,
-                                                   double limit) const;
-    Result<double> step_limit_in_domain(WallTrajectoryTime3D time) const;
-    Result<WallKinematics3D> sample_reference(const std::array<real, 3>& reference,
-                                              WallTrajectoryTime3D time) const override;
+    double step_limit_in_domain(WallTrajectoryTime3D time) const;
 };
 
 } // namespace nexora::sph::SphBoundary

@@ -5,7 +5,6 @@
 #include <charconv>
 #include <cmath>
 #include <fstream>
-#include <limits>
 #include <map>
 #include <new>
 #include <participants/reference/Participant.hpp>
@@ -198,10 +197,6 @@ Result<ReferenceCase> load(const std::filesystem::path& path, std::size_t& curre
          static_cast<long double>(result.start) * 0.5L) / step;
     if (minimum_count > static_cast<long double>(maximum_steps))
         return schedule_limit();
-    if (minimum_count > static_cast<long double>(result.steps.max_size()) ||
-        minimum_count > static_cast<long double>(std::numeric_limits<std::uint64_t>::max()))
-        return fail("step", "case step count exceeds schedule or counter capacity",
-                    StatusCode::resource_exhausted);
     double time = result.start;
     while (time < result.end) {
         if (result.steps.size() == maximum_steps)
@@ -218,10 +213,6 @@ Result<ReferenceCase> load(const std::filesystem::path& path, std::size_t& curre
             if (auto status = validate_time_step(constraint, requested); !status.ok())
                 return fail("step", status.message(), status.code());
         }
-        if (result.steps.size() == result.steps.max_size() ||
-            result.steps.size() == std::numeric_limits<std::uint64_t>::max())
-            return fail("step", "case step count exceeds schedule or counter capacity",
-                        StatusCode::resource_exhausted);
         result.steps.push_back(requested);
         time = endpoint;
     }

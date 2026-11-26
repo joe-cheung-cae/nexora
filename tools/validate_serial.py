@@ -366,10 +366,11 @@ def measure_irregular(build, logs, precision, jobs):
     if os.name == "nt":
         executable_path = executable_path.with_suffix(".exe")
     source_paths = [
+        ROOT / "tests/data/CMakeLists.txt",
         ROOT / "tests/data/serial_irregular_measurement.cpp",
         ROOT / "tests/data/structure_fixture.hpp",
-        ROOT / "src/participants/reference/StructureState.cpp",
-        ROOT / "src/participants/reference/StructureState.hpp",
+        ROOT / "tests/validation/structure/StructureState.cpp",
+        ROOT / "tests/validation/structure/StructureState.hpp",
         ROOT / "src/data/EntityOrder.cpp",
         ROOT / "src/data/EntityOrder.hpp",
         ROOT / "src/data/Permutation.hpp",
@@ -522,6 +523,8 @@ def verify_precision(args, profile, precision):
             logs / "ctest.log")
     mpi_test = "nexora_mpi_smoke" if args.mpi else "nexora_cli_mpi_disabled"
     check_ctest(logs / "ctest.xml", [
+        "nexora_embedded_reference_profile",
+        "nexora_sph_tank_trajectory_outputs",
         "nexora_reference_tests.Reference.EulerConvergence",
         "nexora_reference_tests.Reference.NonDyadicStepMatchesEulerOracle",
         "nexora_sph_fixed_csr_tests.Sph.FrozenLayoutAndReorder",
@@ -534,19 +537,20 @@ def verify_precision(args, profile, precision):
         "nexora_simulation_tests.SimulationTest.RejectedFixedQuantumStepDoesNotPublish",
         "nexora_sph_tests.SphCellGrid.ThreeDimensionalShuffledStableIdsAndGhosts",
         "nexora_sph_tests.SphCellGrid.NeighborViewPreservesCallbackOrder",
-        "nexora_sph_tests.SphCellGrid.TranslatedCellRangesKeepIntegerPrecision",
-        "nexora_sph_tests.SphCellGrid.SignedCellRangeIncludesOnlyItsLowerEndpoint",
+        "nexora_sph_tests.SphCellGrid.NonbinaryCellWidthUsesExactFloorOnRoundedQuotient",
+        "nexora_sph_tests.SphCellGrid.RejectsBinsOutsideTheConsecutiveIntegerRangeOfReal",
+        "nexora_sph_tests.SphCellGrid.RoundedCutoffInBothDirectionsAndInputOrders",
+        "nexora_sph_tests.SphCellGrid.SquaredDistanceContractAtDiagonal",
         "nexora_sph_tests.SphCellGrid.IsolatedMassAndSmoothingLengthSetSelfDensity",
         "nexora_sph_tests.SphCellGrid.PairMirrorsAndRelativeVelocityReversalMatchAnalyticRatesAndForces",
         "nexora_sph_tests.SphCellGrid.AdmissionPrecedesRemapAndFollowsSharedQueryLifetime",
-        "nexora_sph_tests.SphCellGrid.RebuildFallbackAndComparisonRespectScratchLifetimes",
+        "nexora_sph_tests.SphCellGrid.RebuildFallbackRespectsScratchLifetimes",
         "nexora_sph_tests.SphCellGrid.AssignmentKeepsReplacedArraysChargedUntilDeallocation",
         "nexora_sph_tests.SphCellGrid.CrossStepReuseAndRebuildMatchesExplicitCsr",
         "nexora_sph_tests.SphCellGrid.PositionUpdatesReuseSortedColumnsAndResetNonidentityPermutations",
         "nexora_sph_tests.SphCellGrid.PositionUpdatesResolveExternalRemapsWithoutExtraPermutationStorage",
         "nexora_sph_tests.SphCellGrid.PositionUpdateBudgetRejectsIdentityAndPositionBeforePublishing",
-        "nexora_sph_tests.SphGeometry3D.VersionsDescribeGeometryLayoutAndTopologySeparately",
-        "nexora_sph_tests.SphGeometry3D.ThreeAxisCrossingAndInputReorderCompareGeometryById",
+        "nexora_sph_tests.SphGeometry3D.ThreeAxisCrossingAndInputReorderPreserveNeighbors",
         "nexora_sph_tests.SphWcsphOperators.ChangingOwnedSetPublishesPressureRowsByStableId",
         "nexora_sph_tests.SphWcsphOperators.SourceOutsideOwnedSupportChangesGhostPressureForceOnly",
         "nexora_sph_tests.SphWcsphOperators.PressureValidatesOnlyContributingWallData",
@@ -556,15 +560,21 @@ def verify_precision(args, profile, precision):
         "nexora_sph_tests.SphVerlet.AcceptedAcousticLimitAppliesToTheNextStep",
         "nexora_sph_tests.SphVerlet.MovingWallActualSpanMustFitItsExplicitLimit",
         "nexora_sph_tests.SphVerlet.DriftOverflowPreservesRowsAndTime",
-        "nexora_sph_tests.SphVerletOperators.CflReductionIncludesNonfiniteVelocityAmongFiniteRows",
+        "nexora_sph_tests.SphVerlet.NonfiniteVelocityAmongFiniteRowsRejectsInitialization",
         "nexora_sph_tests.SphVerletOperators.StandaloneKickDriftRejectsOverflowWithoutGridAdmission",
+        "nexora_sph_tests.SphVerletOperators.StepRejectsKickOrDriftOverflowAtGridBoundary",
+        "nexora_sph_tests.SphVerlet.UniformAccelerationMatchesBallisticTrajectory",
+        "nexora_sph_tests.SphVerlet.HalfKickOverflowPreservesRowsAndAllowsRetry",
+        "nexora_sph_tests.SphVerlet.LateCflFailurePreservesPublishedFieldsAndReleasesCandidate",
+        "nexora_sph_tests.SphWcsphOperators.IsolatedCoincidentAndCutoffHaveZeroPressureGradient",
         "nexora_sph_tests.SphVerlet.UnequalMassTrajectoryMatchesIndependentCsrAndMomentum",
         "nexora_sph_tests.SphVerlet.ReusedWorkspaceIsReleasedWithoutChangingCommittedRows",
         "nexora_sph_tests.SphVerlet.WorkspaceBudgetPressurePreservesHistoricalStepCapacity",
         "nexora_sph_tests.SphVerlet.CommittedMetadataWithNoWallOrRows",
-        "nexora_sph_tests.SphVerlet.ObservesStageNeighborsAfterEviction",
+        "nexora_sph_tests.SphVerlet.CommittedNeighborsAndRatesSurviveGridEviction",
         "nexora_sph_tests.SphVerlet.InitializationMapsExplicitValuesAcrossInputPermutations",
         "nexora_sph_tests.SphVerlet.DirectStepRequiresTheAcceptedBeginAndMatchingEnd",
+        "nexora_sph_tests.SphVerlet.TimeConstraintRequiresAnAcceptedState",
         "nexora_simulation_tests.SimulationTest.FinalizesAfterInitializationOrFinalizationFailure",
         "nexora_simulation_tests.SimulationTest.ExhaustedTimeDomainStopsRunWithoutAnotherPublication",
         "nexora_simulation_tests.SimulationTest.ExhaustedTimeDomainPreservesInvalidInputDiagnostics",
@@ -574,7 +584,7 @@ def verify_precision(args, profile, precision):
         "nexora_sph_tests.SphVerlet.SimulationFinalizeFailsDuringCommittedRowVisit",
         "nexora_sph_tests.SphVerlet.VelocityPublicationAllocationFailurePreservesLastStep",
         "nexora_sph_tests.SphVerlet.FixedWallBudgetRejectionPreservesRowsAndWall",
-        "nexora_sph_tests.SphVerlet.WallReceptionKeepsStandaloneAndAssemblyValidationBoundaries",
+        "nexora_sph_tests.SphVerlet.WallAssemblyRejectsInvalidParticles",
         "nexora_sph_tests.SphVerlet.MovingWallRejectsUnrepresentableGroupDurationBeforeSampling",
         "nexora_sph_tests.SphVerlet.MovingWallFiniteEndpointPublishesAndRejectsAnotherStep",
         "nexora_sph_tests.SphVerlet.RoundTripPistonResolvesTransientContact",
@@ -586,8 +596,8 @@ def verify_precision(args, profile, precision):
         "nexora_sph_tests.SphVerlet.MovingWallRejectsInvalidGroupsAndSamples",
         "nexora_sph_tests.SphVerlet.UnusedMovingWallKinematicsDoNotRejectTheStep",
         "nexora_sph_tests.SphVerlet.MovingWallPositionFailurePreservesTheLastGridAndClock",
-        "nexora_sph_tests.SphVerlet.MovingWallFiniteDomainRejectsRoundedUpRelativeWidth",
-        "nexora_sph_tests.SphVerlet.MovingWallFiniteDomainRoundsExtremeWidthInward",
+        "nexora_sph_tests.SphVerlet.MovingWallFiniteDomainRejectsOversizedStepBeforeCallback",
+        "nexora_sph_tests.SphVerlet.MovingWallPeriodicPhaseNormalizesOrdinaryTimes",
         "nexora_sph_tests.SphVerlet.MovingWallPeriodicFoldAndThrowingCallbackPreserveLastStep",
         "nexora_sph_tests.SphVerlet.MovingWallRejectsReentrantSimulationMutation",
         "nexora_sph_tests.SphVerlet.MovingWallTrajectoryStorageIsAdmittedBeforeCapture",
@@ -607,13 +617,8 @@ def verify_precision(args, profile, precision):
         "nexora_data_uninitialized_tests.DataPreinitialization.ExternalFieldRequiresInitializedRuntime",
         "nexora_reference_uninitialized_tests.ReferenceUninitialized.RejectUninitializedRuntime",
         mpi_test,
-    ] + (["nexora_sph_tests.SphVerlet.DriftJustAboveFloatRangeCannotRoundBackToLargestPosition",
-          "nexora_sph_tests.SphVerlet.PredictorRangeAppliesOnlyToConsumedVelocity"]
-         if precision == "float" else
-         ["nexora_sph_tests.SphVerlet.LateCflFailurePreservesPublishedFieldsAndReleasesCandidate",
-          "nexora_sph_tests.SphWcsphOperators.PressureForceSurvivesSquaredDistanceUnderflow",
-          "nexora_sph_tests.SphContinuity.RoundedSubnormalSupportTieStillConsumesVelocity",
-          "nexora_sph_tests.SphVerletOperators.DoubleStepRejectsKickOrDriftOverflowAtGridBoundary"]))
+    ] + (["nexora_sph_tests.SphVerlet.DurationOutsideSolverRangePreservesRowsAndTime"]
+         if precision == "float" else []))
     test_log = build / "Testing/Temporary/LastTest.log"
     shutil.copyfile(test_log, logs / "reference-ctest.log")
     command([sys.executable, ROOT / "tools/check_reference_precision.py", "--log", test_log,
@@ -701,7 +706,7 @@ def main():
         else:
             phase.add_argument("--work-dir", type=Path, required=True)
             phase.add_argument("--precisions", nargs="+", choices=("float", "double"),
-                               default=["float", "double"])
+                               default=["float"])
             phase.add_argument("--require-network-blocked", action="store_true")
             phase.add_argument("--mpi", action="store_true")
             phase.add_argument("--measure-irregular", action="store_true",

@@ -6,7 +6,7 @@ import math
 from pathlib import Path
 
 from summarize_hydrostatic_trajectory import (
-    DEPTH, GRAVITY, RHO0, compare, read_rows, require, summarize, write_csv,
+    DEPTH, GRAVITY, compare, read_rows, require, summarize, target_flags, write_csv,
 )
 
 
@@ -72,12 +72,7 @@ def main():
             acceleration_source = cases[1][1] if variant == "original" else directory
             acceleration_layers, acceleration = acceleration_metrics(acceleration_source)
             summary.update(acceleration)
-            union = next(c for c in crossing if c["face"] == "any")
-            flags = dict(
-                pressure_pass=summary["final_in_tank_pressure_rms_error_pa"] <= .05*RHO0*GRAVITY*DEPTH,
-                speed_pass=summary["peak_speed_rms_m_s"] <= .01*math.sqrt(GRAVITY*DEPTH),
-                crossing_pass=union["event_count"] == 0,
-            )
+            flags = target_flags(summary, crossing)
             if variant == "continuity":
                 all_passed &= all(flags.values())
             summaries.append(dict(variant=variant, **summary, **flags))

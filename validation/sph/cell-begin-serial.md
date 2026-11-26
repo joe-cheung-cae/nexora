@@ -37,15 +37,15 @@
 
 ## 方法与对照
 
-- 调用者提供指定的 `Kokkos::Serial` 实例、HostSpace 粒子字段和稠密格数预算。网格按 `floor(x/R)` 等三个轴向格号确定包围盒，检查容量，再按格号及完整 64 位稳定 ID 排序。重复 ID、非有限坐标、非正或非有限质量、非法 ghost 标记及不够的格数预算均返回错误。[建格](../../src/methods/sph/neighbors/CellGrid.cpp)
+- 调用者提供指定的 `Kokkos::Serial` 实例、HostSpace 粒子字段和稠密格数预算。网格按 `floor(x/R)` 等三个轴向格号确定包围盒，检查容量，再按格号及完整 64 位稳定 ID 排序。设 `p = numeric_limits<real>::digits`，支持的坐标范围为 `−2^p R ≤ x < 2^p R`，超出时返回 `unsupported`。重复 ID、非有限坐标、非正或非有限质量、非法 ghost 标记及不够的格数预算均返回错误。[建格](../../src/methods/sph/neighbors/CellGrid.cpp)
 - 每个快照独立持有重排后的位置 SoA 和质量，并持有只读的格表、ID、ghost 标记、双向槽位置换及 owned 行映射。格表以源粒子数收尾，空格两端相等。每个 owned 目标最多扫描 9 个连续 x 区间，覆盖裁剪后的 27 格。按该步坐标与闭支撑域筛选非自身粒子，ghost 只读。[遍历](../../src/methods/sph/neighbors/CellGrid.hpp)
-- 支撑判定要求各轴的实际分量差绝对值均不超过 `R = 2h`，并以 binary64 按 x、y、z 顺序累加平方距离，与 `R²` 作闭区间比较。平方距离等于 `R²` 时检查轴向边界的减法余项。正好相距 `R` 的边进入邻居列表，密度权重为零。
-- 输出行按 `owned_slots()` 映射回稳定 ID。密度包含一次自身贡献及各邻居的质量加权 M₄ 核贡献。无量纲核值用 double 累加，最后除以 `h³` 并写入选定的 `real`。非有限或超过输出精度上限的结果使本次求值失败。[密度核](../../src/methods/sph/Density3D.cpp)
-- 测试在原始输入上逐 owned 行扫描全部源，独立判断分量边界，以稳定 ID 建立显式 CSR。逐行精确比较完整邻居集合并检查重复边，再沿 CSR 逐行用等价的截断幂形式计算参考密度。密度相对误差限为 `ε(real) + 32 × (邻居数 + 1) × ε(double)`，涵盖输出舍入及不同累加顺序。该主机的 `long double` 有 53 位有效精度。[逐粒子测试](../../tests/methods/sph/cell_grid_tests.cpp)
+- 对上述相邻格内的候选，两个精度均采用同一规则。以 `real` 计算分量差，沿 x、y、z 依次累加平方（y、z 使用 FMA），保留 `d² ≤ R²` 的非自身邻居。相隔两格的粒子不会进入候选集合。
+- 输出行按 `owned_slots()` 映射回稳定 ID。密度包含一次自身贡献及各邻居的质量加权 M₄ 核贡献。无量纲核值按配置的 `real` 求值和累加，最后除以 `h³`。非有限或超过输出精度上限的结果使本次求值失败。[密度核](../../src/methods/sph/Density3D.cpp)
+- 测试在原始输入上逐 owned 行扫描全部源，按舍入平方距离独立判断邻居，以稳定 ID 建立显式 CSR。逐行精确比较完整邻居集合并检查重复边，再沿 CSR 逐行用等价的截断幂形式计算参考密度。密度相对误差限为 `32 × (邻居数 + 1) × ε(real)`，涵盖输出舍入及不同累加顺序。该主机的 `long double` 有 53 位有效精度。[逐粒子测试](../../tests/methods/sph/cell_grid_tests.cpp)
 
 ## 跨步使用
 
-首步调用 `CellGrid::build(exec, fields, max_cells)`。后续把本步全部粒子字段传给 `previous.update(exec, fields, max_cells)`，成功后在返回的新快照上调用 `evaluate_density_3d(exec, next)`。相邻两步可同时保留，各自用本步的位置、质量重算密度。
+首步调用 `CellGrid::build(exec, fields, max_cells)`。后续把本步全部粒子字段传给 `previous.update(exec, fields, max_cells)`，成功后按新格网的 owned 行数分配密度输出，并调用 `evaluate_density_3d(exec, next.neighbors(), output)`。相邻两步可同时保留，各自用本步的位置、质量重算密度。
 
 | 本步变化 | 格表与槽位的处理 |
 |---|---|

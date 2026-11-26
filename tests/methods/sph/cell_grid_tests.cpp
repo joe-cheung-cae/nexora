@@ -5,7 +5,6 @@
 #include <methods/sph/Verlet3D.hpp>
 #include <methods/sph/neighbors/CellGrid.hpp>
 #include <participants/ResourceBudget.hpp>
-#include <participants/sph/GeometryVersions3D.hpp>
 #include <methods/sph/Continuity3D.hpp>
 
 #include <algorithm>
@@ -52,7 +51,7 @@ void compare(const sph::CellGrid& grid, const std::vector<Particle>& input,
         for (int k = 0; k < 3; ++k)
             EXPECT_EQ(packed.position(slot, k), source.position[k]);
     }
-    const auto density = checked(sph::evaluate_density_3d(exec, grid.neighbors()));
+    const auto density = density_values(exec, grid.neighbors());
     ASSERT_EQ(density.extent(0), owned.extent(0));
     std::vector<std::uint64_t> seen_owned;
     for (std::size_t row = 0; row < owned.extent(0); ++row) {
@@ -62,7 +61,7 @@ void compare(const sph::CellGrid& grid, const std::vector<Particle>& input,
         const auto id = packed.ids(slot);
         seen_owned.push_back(id);
         std::vector<std::uint64_t> neighbors;
-        grid.neighbors().for_each_neighbor(row, [&](LocalIndex other, double r2) {
+        grid.neighbors().for_each_neighbor(row, [&](LocalIndex other, real r2) {
             ASSERT_LT(static_cast<std::size_t>(other), input.size());
             EXPECT_NE(packed.ids(other), id);
             EXPECT_GE(r2, 0);
@@ -79,12 +78,9 @@ void compare(const sph::CellGrid& grid, const std::vector<Particle>& input,
         EXPECT_EQ(neighbors, expected_neighbors);
         const auto expected = oracle.density.at(id);
         ASSERT_TRUE(std::isfinite(density(row)));
-        // Kernel and accumulation are double; only the final conversion uses real.
-        // The real epsilon covers final rounding, while the degree-scaled double
-        // term bounds positive summation and independent kernel evaluation error.
-        const long double relative_bound = std::numeric_limits<real>::epsilon() +
-                                           32 * static_cast<long double>(neighbors.size() + 1) *
-                                               std::numeric_limits<double>::epsilon();
+        // Each positive term and the running sum round in the field precision.
+        const long double relative_bound = 32 * static_cast<long double>(neighbors.size() + 1) *
+                                           std::numeric_limits<real>::epsilon();
         EXPECT_LE(std::abs(static_cast<long double>(density(row)) - expected),
                   relative_bound * expected)
             << "owned ID " << id;
@@ -239,7 +235,7 @@ TEST(SphCellGrid, AdmissionPrecedesRemapAndFollowsSharedQueryLifetime) {
     }
     // Stencils retain values and cells. Neither input permutation is needed after grid destruction.
     EXPECT_EQ(budget.usage().controlled_bytes, cells + values);
-    const auto rho = checked(sph::evaluate_density_3d(exec, *held_query));
+    const auto rho = density_values(exec, *held_query);
     const auto oracle = explicit_csr(input);
     for (std::size_t r = 0; r < n; ++r) {
         const auto id = held_query->fields().ids(held_query->owned_slots()(r));
@@ -271,43 +267,20 @@ TEST(SphCellGrid, AssignmentKeepsReplacedArraysChargedUntilDeallocation) {
     EXPECT_EQ(budget.usage().controlled_bytes, 0u);
 }
 
-// Drive the method and the version comparator directly with the grid's actual stage layout.
-struct IndexedStage {
-    sph::CellGrid grid;
-    TopologyVersion topology{1};
-    GeometryVersion geometry{1};
-    LayoutVersion layout{1};
-};
-
-Result<std::shared_ptr<const IndexedStage>>
-indexed_stage(const Kokkos::Serial& exec, const sph::ParticleFields3D& input, std::size_t max_cells,
-              const detail::ResourceBudget& budget, double h, const IndexedStage* old = nullptr) {
+Result<std::shared_ptr<const sph::CellGrid>>
+budgeted_grid(const Kokkos::Serial& exec, const sph::ParticleFields3D& input, std::size_t max_cells,
+              const detail::ResourceBudget& budget, real h, const sph::CellGrid* old = nullptr) {
     const auto admit = [&](sph::CellGrid::StorageGroup, std::size_t bytes) { return budget.reserve(bytes); };
-    auto grid = old ? old->grid.update(exec, input, max_cells, admit)
+    auto grid = old ? old->update(exec, input, max_cells, admit)
                     : sph::CellGrid::build(exec, input, max_cells, admit, h);
     if (!grid.ok())
         return grid.status();
-    IndexedStage result{std::move(grid).value()};
-    if (old) {
-        const auto layout = [](const sph::CellGrid& grid) -> sph::GeometryLayout3D {
-            return {grid.fields(), grid.owned_slots(), grid.sorted_to_input(), grid.input_to_sorted()};
-        };
-        result.topology = old->topology;
-        result.geometry = old->geometry;
-        result.layout = old->layout;
-        const auto reserve = [&](std::size_t bytes) { return budget.reserve(bytes); };
-        const auto compared = sph::update_geometry_versions(exec, layout(old->grid), layout(result.grid),
-            reserve, result.topology, result.geometry, result.layout);
-        if (!compared.ok())
-            return compared;
-    }
-    return std::make_shared<const IndexedStage>(std::move(result));
+    return std::make_shared<const sph::CellGrid>(std::move(grid).value());
 }
 
-TEST(SphCellGrid, RebuildFallbackAndComparisonRespectScratchLifetimes) {
+TEST(SphCellGrid, RebuildFallbackRespectsScratchLifetimes) {
     constexpr std::size_t limit = 8192, n = 8;
     struct Key { std::size_t cell; std::uint64_t id; LocalIndex input; };
-    struct ById { std::uint64_t id; LocalIndex slot; };
     Kokkos::Serial exec;
     detail::ResourceBudget budget({0, limit});
     GridAllocations trace(budget);
@@ -316,9 +289,9 @@ TEST(SphCellGrid, RebuildFallbackAndComparisonRespectScratchLifetimes) {
     std::swap(crossing.front().position, crossing.back().position);
     std::reverse(crossing.begin(), crossing.end());
     const Fields before(original), after(crossing);
-    auto initial = checked(indexed_stage(exec, before.get(), 3, budget, 1));
+    auto initial = checked(budgeted_grid(exec, before.get(), 3, budget, 1));
     const auto retained = budget.usage().controlled_bytes;
-    const auto update = [&] { return indexed_stage(exec, after.get(), 3, budget, 1, initial.get()); };
+    const auto update = [&] { return budgeted_grid(exec, after.get(), 3, budget, 1, initial.get()); };
     // Rebuild outputs fit, but adding its keys would exceed the available bytes by one.
     auto occupied = checked(budget.reserve(limit - 2 * retained - n * sizeof(Key) + 1));
     auto mark = trace.events.size();
@@ -330,46 +303,28 @@ TEST(SphCellGrid, RebuildFallbackAndComparisonRespectScratchLifetimes) {
     occupied.reset();
     EXPECT_EQ(budget.usage().controlled_bytes, retained);
 
-    // Rebuild (including keys) now fits. The genuinely reordered ID comparison does not.
-    occupied = checked(budget.reserve(limit - 2 * retained - 2 * n * sizeof(ById) + 1));
+    ASSERT_NO_FATAL_FAILURE(compare(*initial, original, exec));
     mark = trace.events.size();
-    ASSERT_EQ(update().status().code(), StatusCode::resource_exhausted);
+    auto candidate = checked(update());
     ASSERT_EQ(trace.count(mark, "sph.grid.keys"), 1u);
     EXPECT_EQ(trace.count(mark, "sph.grid.to_input"), 2u);
     EXPECT_EQ(trace.count(mark, "sph.grid.from_input"), 2u);
-    EXPECT_EQ(trace.count(mark, "sph.grid.old_by_id"), 0u);
-    EXPECT_EQ(trace.count(mark, "sph.grid.new_by_id"), 0u);
     const auto keys = trace.first(mark, "sph.grid.keys", true);
     EXPECT_LT(trace.first(mark, "sph.grid.to_input", false), keys);
     EXPECT_LT(trace.first(mark, "sph.grid.from_input", false), keys);
-    occupied.reset();
-    EXPECT_EQ(budget.usage().controlled_bytes, retained);
-    ASSERT_NO_FATAL_FAILURE(compare(initial->grid, original, exec));
-    EXPECT_EQ(initial->topology.value(), 1u);
-    EXPECT_EQ(initial->geometry.value(), 1u);
-    EXPECT_EQ(initial->layout.value(), 1u);
-
-    mark = trace.events.size();
-    auto candidate = checked(update());
-    EXPECT_EQ(trace.count(mark, "sph.grid.old_by_id"), 1u);
-    EXPECT_EQ(trace.count(mark, "sph.grid.new_by_id"), 1u);
-    EXPECT_EQ(trace.peak_bytes(), 2 * retained + 2 * n * sizeof(ById));
     EXPECT_EQ(budget.usage().controlled_bytes, 2 * retained);
-    EXPECT_EQ(candidate->topology, initial->topology);
-    EXPECT_EQ(candidate->geometry.value(), 2u);
-    EXPECT_EQ(candidate->layout.value(), 2u);
-    ASSERT_NO_FATAL_FAILURE(compare(candidate->grid, crossing, exec));
+    ASSERT_NO_FATAL_FAILURE(compare(*candidate, crossing, exec));
     const auto rebuilt = checked(sph::CellGrid::build(exec, after.get(), 3));
     ASSERT_NO_FATAL_FAILURE(compare(rebuilt, crossing, exec));
     for (std::size_t s = 0; s < n; ++s)
-        EXPECT_EQ(candidate->grid.sorted_to_input()(s), rebuilt.sorted_to_input()(s));
+        EXPECT_EQ(candidate->sorted_to_input()(s), rebuilt.sorted_to_input()(s));
     candidate.reset();
     initial.reset();
     EXPECT_EQ(budget.usage().controlled_bytes, 0u);
 }
 
 TEST(SphCellGrid, NeighborViewPreservesCallbackOrder) {
-    using Neighbors = std::vector<std::pair<std::uint64_t, double>>;
+    using Neighbors = std::vector<std::pair<std::uint64_t, real>>;
     const Neighbors expected{{90, 1.0 / 16}, {10, 9.0 / 64}};
     enum class Center { fluid, wall, ghost };
     for (auto center : {Center::fluid, Center::wall, Center::ghost}) {
@@ -383,7 +338,7 @@ TEST(SphCellGrid, NeighborViewPreservesCallbackOrder) {
             const auto index = std::find_if(input.begin(), input.end(), [](auto p) { return p.id == 50; }) - input.begin();
             const auto slot = grid.input_to_sorted()(index);
             Neighbors actual;
-            const auto append = [&](LocalIndex j, double d2) { actual.emplace_back(query.fields().ids(j), d2); };
+            const auto append = [&](LocalIndex j, real d2) { actual.emplace_back(query.fields().ids(j), d2); };
             query.for_each_neighbor_of_slot(slot, append);
             EXPECT_EQ(actual, expected);
             if (center == Center::fluid) {
@@ -405,9 +360,9 @@ TEST(SphCellGrid, IsolatedMassAndSmoothingLengthSetSelfDensity) {
     const auto grid = checked(sph::CellGrid::build(exec, Fields({{{.25, 1, 0}, 5, 6, 0}}).get(), 1, {}, .5));
     const auto& query = grid.neighbors();
     std::size_t callbacks = 0;
-    query.for_each_neighbor(0, [&](LocalIndex, double) { ++callbacks; });
+    query.for_each_neighbor(0, [&](LocalIndex, real) { ++callbacks; });
     EXPECT_EQ(callbacks, 0u);
-    const auto rho = checked(sph::evaluate_density_3d(exec, query));
+    const auto rho = density_values(exec, query);
     EXPECT_NEAR(rho(0), 40 / std::numbers::pi, 40 * std::numeric_limits<real>::epsilon());
 }
 
@@ -424,13 +379,13 @@ TEST(SphCellGrid, PairMirrorsAndRelativeVelocityReversalMatchAnalyticRatesAndFor
         sph::Velocity3D velocity("test.velocity", 2);
         for (LocalIndex s = 0; s < 2; ++s)
             velocity(s, 0) = mirror * (1 + relative * (query.fields().ids(s) == 11 ? 2 : -1));
-        const auto rho = checked(sph::evaluate_density_3d(exec, query));
+        const auto rho = density_values(exec, query);
         sph::DensityRate3D rate("test.rate", 2);
-        ASSERT_TRUE(sph::continuity_rate_3d(exec, query, velocity, rate).ok());
+        sph::stage_continuity_rate_3d(exec, query, velocity, rate);
         sph::Values pressure("test.pressure", 2);
         sph::Acceleration3D acceleration("test.acceleration", 2);
         const sph::WcsphParameters parameters{.25, 2, 1};
-        ASSERT_TRUE(sph::evaluate_pressure_3d(exec, query, sph::TaitEos(parameters), rho, pressure, acceleration).ok());
+        ASSERT_TRUE(sph::evaluate_step_pressure_3d(exec, query, sph::TaitEos(parameters), rho, pressure, acceleration, {}, {}, true).ok());
         const double rho_a = real(1.5 / pi), rho_b = real(2.25 / pi);
         const double p_a = real(4 * (rho_a - .25)), p_b = real(4 * (rho_b - .25));
         const double coefficient = p_a / (rho_a * rho_a) + p_b / (rho_b * rho_b);
@@ -438,8 +393,9 @@ TEST(SphCellGrid, PairMirrorsAndRelativeVelocityReversalMatchAnalyticRatesAndFor
             const bool a = query.fields().ids(query.owned_slots()(row)) == 11;
             const double neighbor_mass = a ? 2 : 1;
             const double expected_rate = relative * 3 * neighbor_mass * gradient;
-            EXPECT_NEAR(rate(row), expected_rate, 4 * std::numeric_limits<double>::epsilon() * std::abs(expected_rate));
-            EXPECT_EQ(rho(row), a ? rho_a : rho_b);
+            EXPECT_NEAR(rate(row), expected_rate, 4 * std::numeric_limits<real>::epsilon() * std::abs(expected_rate));
+            const double expected_density = a ? rho_a : rho_b;
+            EXPECT_NEAR(rho(row), expected_density, 2 * std::numeric_limits<real>::epsilon() * expected_density);
             EXPECT_GT(pressure(row), 0);
             const double force = (a ? -mirror : mirror) * neighbor_mass * gradient * coefficient;
             EXPECT_NEAR(acceleration(row, 0), force, 8 * std::numeric_limits<real>::epsilon() * std::abs(force));
@@ -567,7 +523,7 @@ TEST(SphCellGrid, CaseSupportControlsCellsPhysicalDistanceAndUpdates) {
     EXPECT_EQ(grid.support_radius(), 1.5);
     EXPECT_EQ(grid.cell_begin().extent(0), 3U);
     std::vector<std::uint64_t> ids;
-    grid.neighbors().for_each_neighbor(0, [&](LocalIndex slot, double distance_squared) {
+    grid.neighbors().for_each_neighbor(0, [&](LocalIndex slot, real distance_squared) {
         ids.push_back(grid.fields().ids(slot));
         EXPECT_EQ(distance_squared, 2.25);
     });
@@ -586,53 +542,26 @@ TEST(SphCellGrid, CaseSupportControlsCellsPhysicalDistanceAndUpdates) {
 TEST(SphCellGrid, NonbinaryCellWidthUsesExactFloorOnRoundedQuotient) {
     Kokkos::Serial exec;
     Fields fields({{{0, 0, 0}, 1, 1, 0}, {{1, 0, 0}, 1, 2, 1}});
-    // The double width 0.2 exceeds 1/5, although 1/width rounds to five.
+    // The stored width 0.2 exceeds 1/5, although 1/width rounds to five.
     const auto grid = checked(sph::CellGrid::build(exec, fields.get(), 5, {}, .1));
     EXPECT_EQ(grid.cell_begin().extent(0), 6U);
     fields.position(1, 0) = -1;
-    EXPECT_FALSE(sph::CellGrid::build(exec, fields.get(), 5, {}, .1).ok());
+    EXPECT_EQ(sph::CellGrid::build(exec, fields.get(), 5, {}, .1).status().code(), StatusCode::resource_exhausted);
+    const auto negative = checked(sph::CellGrid::build(exec, fields.get(), 6, {}, .1));
+    EXPECT_EQ(negative.cell_begin().extent(0), 7U);
+    EXPECT_EQ(negative.fields().ids(0), 2U);
+    EXPECT_EQ(negative.fields().ids(1), 1U);
 }
 
-TEST(SphCellGrid, TranslatedCellRangesKeepIntegerPrecision) {
+TEST(SphCellGrid, RejectsBinsOutsideTheConsecutiveIntegerRangeOfReal) {
     Kokkos::Serial exec;
-    const real base = sizeof(real) == sizeof(double) ? real{0x1p54} : real{0x1p24};
-    // At width 3/2, the exact bins of 2^54 + {0,4,8} are
-    // 12009599006321322, 12009599006321325 and 12009599006321328.
-    // Mirroring gives -12009599006321323, -12009599006321326 and -12009599006321328.
-    // 2^24 has the same residues mod 3 and keeps the float coordinates distinct.
-    for (const real sign : {real{1}, real{-1}}) {
-        for (const real shift : {real{0}, real{4}}) {
-            SCOPED_TRACE(::testing::Message() << "sign=" << sign << ", shift=" << shift);
-            const real x = base + shift;
-            Fields fields({{{sign * x, 0, 0}, 1, 10, 0}, {{sign * (x + 4), 0, 0}, 1, 20, 0}});
-            const std::size_t count = sign < 0 && shift == 4 ? 3 : 4;
-            EXPECT_EQ(sph::CellGrid::build(exec, fields.get(), count - 1, {}, .75).status().code(),
-                      StatusCode::resource_exhausted);
-            const auto grid = checked(sph::CellGrid::build(exec, fields.get(), count, {}, .75));
-            ASSERT_EQ(grid.cell_begin().extent(0), count + 1);
-            EXPECT_EQ(grid.cell_begin()(0), 0U);
-            for (std::size_t cell = 1; cell < count; ++cell)
-                EXPECT_EQ(grid.cell_begin()(cell), 1U);
-            EXPECT_EQ(grid.cell_begin()(count), 2U);
-            EXPECT_EQ(grid.fields().ids(0), sign > 0 ? 10U : 20U);
-            EXPECT_EQ(grid.fields().ids(1), sign > 0 ? 20U : 10U);
-            for (LocalIndex slot = 0; slot < 2; ++slot)
-                grid.neighbors().for_each_neighbor_of_slot(slot, [](LocalIndex, double) {
-                    ADD_FAILURE() << "particles four units apart exceed the 1.5 support radius";
-                });
-        }
-    }
-}
-
-TEST(SphCellGrid, SignedCellRangeIncludesOnlyItsLowerEndpoint) {
-    Kokkos::Serial exec;
-    const real limit = real{1.5} * real{0x1p63};
+    const real limit = std::ldexp(real{1.5}, std::numeric_limits<real>::digits);
     Fields fields({{{0, 0, 0}, 1, 10, 0}, {{0, .5, 0}, 1, 20, 1}});
     for (const real x : {-limit, std::nextafter(-limit, real{0}), std::nextafter(limit, real{0})}) {
         fields.position(0, 0) = fields.position(1, 0) = x;
         const auto grid = checked(sph::CellGrid::build(exec, fields.get(), 1, {}, .75));
         std::vector<std::uint64_t> ids;
-        grid.neighbors().for_each_neighbor(0, [&](LocalIndex slot, double d2) {
+        grid.neighbors().for_each_neighbor(0, [&](LocalIndex slot, real d2) {
             ids.push_back(grid.fields().ids(slot));
             EXPECT_EQ(d2, .25);
         });
@@ -648,7 +577,7 @@ TEST(SphCellGrid, SignedCellRangeIncludesOnlyItsLowerEndpoint) {
 TEST(SphCellGrid, ValidatesCaseSupport) {
     Kokkos::Serial exec;
     Fields fields({{{0, 0, 0}, 1, 1, 0}});
-    for (const double h : {0., std::numeric_limits<double>::infinity()})
+    for (const real h : {real{0}, std::numeric_limits<real>::infinity()})
         EXPECT_EQ(sph::CellGrid::build(exec, fields.get(), 1, {}, h).status().code(),
                   StatusCode::invalid_argument)
             << h;
@@ -691,7 +620,7 @@ TEST(SphCellGrid, PositionUpdateRetainsValidatedFieldsAndRejectsInvalidCoordinat
     compare(updated, {{{0, 0, 0}, 2, 10, 0}, {{2.5, 0, 0}, 3, 20, 1}}, exec);
     const auto previous = grid.neighbors();
     std::vector<std::uint64_t> ids;
-    previous.for_each_neighbor(0, [&](LocalIndex slot, double) {
+    previous.for_each_neighbor(0, [&](LocalIndex slot, real) {
         ids.push_back(previous.fields().ids(slot));
     });
     EXPECT_EQ(ids, (std::vector<std::uint64_t>{20}));
@@ -866,31 +795,30 @@ TEST(SphCellGrid, PositionUpdateBudgetRejectsIdentityAndPositionBeforePublishing
     ASSERT_NO_FATAL_FAILURE(compare(original, initial, exec));
 }
 
-TEST(SphCellGrid, ExactComponentSupportBothDirectionsAndInputOrders) {
-    const real inside_two = std::nextafter(real{2}, real{0});
-    const real outside_two = std::nextafter(real{2}, real{4});
+TEST(SphCellGrid, RoundedCutoffInBothDirectionsAndInputOrders) {
+    // IDs 1 and 2 occupy adjacent cells. Their separation rounds to two.
+    // IDs 3 and 4 have the same rounded separation but lie two cells apart.
     std::vector<Particle> particles{
-        {{inside_two, 10, 0}, 1, 83, 0},
-        {{4, 10, 0}, 1, 84, 0},
-        {{0, 20, 0}, 1, 85, 0},
-        {{2, 20, 0}, 1, 86, 0},
-        {{0, 30, 0}, 1, 87, 0},
-        {{outside_two, 30, 0}, 1, 88, 0},
-        {{-2, 40, 0}, 1, 89, 0},
-        {{.25, 40, 0}, 1, 90, 0}};
-    EXPECT_FALSE(exact_component_support(inside_two, real{4}));
-    EXPECT_FALSE(exact_component_support(real{4}, inside_two));
-    EXPECT_TRUE(exact_component_support(real{0}, real{2}));
-    Kokkos::Serial exec;
-    Fields fields(particles);
-    const auto first = checked(sph::CellGrid::build(exec, fields.get(), 1000));
-    ASSERT_NO_FATAL_FAILURE(compare(first, particles, exec));
-    std::reverse(particles.begin(), particles.end());
-    Fields reversed(particles);
-    const auto second = checked(sph::CellGrid::build(exec, reversed.get(), 1000));
-    ASSERT_NO_FATAL_FAILURE(compare(second, particles, exec));
-    for (std::size_t slot = 0; slot < particles.size(); ++slot)
-        EXPECT_EQ(first.fields().ids(slot), second.fields().ids(slot));
+        {{-2, 0, 0}, 1, 1, 0},
+        {{std::numeric_limits<real>::epsilon() / 4, 0, 0}, 1, 2, 0},
+        {{std::nextafter(real{2}, real{0}), 10, 0}, 1, 3, 0},
+        {{4, 10, 0}, 1, 4, 0}};
+    for (int order = 0; order < 2; ++order) {
+        const auto grid = checked(sph::CellGrid::build(Kokkos::Serial{}, Fields(particles).get(), 100));
+        for (std::size_t row = 0; row < particles.size(); ++row) {
+            const auto self = grid.fields().ids(grid.owned_slots()(row));
+            std::vector<std::uint64_t> ids;
+            grid.neighbors().for_each_neighbor(row, [&](LocalIndex slot, real d2) {
+                EXPECT_EQ(d2, 4);
+                ids.push_back(grid.fields().ids(slot));
+            });
+            std::vector<std::uint64_t> expected;
+            if (self <= 2)
+                expected.push_back(3 - self);
+            EXPECT_EQ(ids, expected);
+        }
+        std::reverse(particles.begin(), particles.end());
+    }
 }
 TEST(SphCellGrid, EmptyCellsShareOffsetsBetweenOccupiedRuns) {
     // Three x cells, two y cells. In x-fastest order the occupied cells are 0, 2 and 5.
@@ -927,8 +855,8 @@ TEST(SphCellGrid, CrossStepReuseAndRebuildMatchesExplicitCsr) {
     EXPECT_EQ(first.input_to_sorted().data(), reused.input_to_sorted().data());
     EXPECT_NE(first.fields().position.data(), reused.fields().position.data());
     ASSERT_NO_FATAL_FAILURE(compare(reused, within, exec));
-    const auto before = checked(sph::evaluate_density_3d(exec, first.neighbors()));
-    const auto after = checked(sph::evaluate_density_3d(exec, reused.neighbors()));
+    const auto before = density_values(exec, first.neighbors());
+    const auto after = density_values(exec, reused.neighbors());
     EXPECT_NE(before(0), after(0));
     // Both particles retain their cells, but one support edge enters and another leaves.
     EXPECT_NE(explicit_csr(initial).ids, explicit_csr(within).ids);
@@ -1077,71 +1005,29 @@ TEST(SphGeometry3D, UpdatesOwnGeometryAndRetainPreviousStates) {
     detail::ResourceBudget budget;
     const auto initial = initial_particles();
     Fields input(initial);
-    const auto first = checked(indexed_stage(exec, input.get(), 1000, budget, 1));
+    const auto first = checked(budgeted_grid(exec, input.get(), 1000, budget, 1));
     auto same_cell = initial;
     same_cell[0].position[0] = real{1.75};
     same_cell[1].mass = 5;
     Fields fields(same_cell);
-    const auto next = checked(indexed_stage(exec, fields.get(), 1000, budget, 1,
+    const auto next = checked(budgeted_grid(exec, fields.get(), 1000, budget, 1,
                                                        first.get()));
     // Geometry owns its values; caller reuse cannot change any retained result.
     fields.position(0, 0) = 100;
     fields.mass(1) = 99;
-    ASSERT_NO_FATAL_FAILURE(compare(next->grid, same_cell, exec));
+    ASSERT_NO_FATAL_FAILURE(compare(*next, same_cell, exec));
     auto crossing = same_cell;
     std::swap(crossing[0].position, crossing[1].position);
     std::swap(crossing[2].position, crossing[3].position);
     std::reverse(crossing.begin(), crossing.end());
-    const auto latest = checked(indexed_stage(exec, Fields(crossing).get(), 1000,
+    const auto latest = checked(budgeted_grid(exec, Fields(crossing).get(), 1000,
                                                          budget, 1, next.get()));
-    EXPECT_NE(next->grid.cell_begin().data(), latest->grid.cell_begin().data());
-    ASSERT_NO_FATAL_FAILURE(compare(latest->grid, crossing, exec));
-    ASSERT_NO_FATAL_FAILURE(compare(first->grid, initial, exec));
-    ASSERT_NO_FATAL_FAILURE(compare(next->grid, same_cell, exec));
+    EXPECT_NE(next->cell_begin().data(), latest->cell_begin().data());
+    ASSERT_NO_FATAL_FAILURE(compare(*latest, crossing, exec));
+    ASSERT_NO_FATAL_FAILURE(compare(*first, initial, exec));
+    ASSERT_NO_FATAL_FAILURE(compare(*next, same_cell, exec));
 }
-TEST(SphGeometry3D, VersionsDescribeGeometryLayoutAndTopologySeparately) {
-    Kokkos::Serial exec;
-    detail::ResourceBudget budget;
-    auto state = initial_particles();
-    auto previous = checked(indexed_stage(exec, Fields(state).get(), 1000, budget, 1));
-    const auto update = [&] {
-        auto geometry = checked(indexed_stage(exec, Fields(state).get(), 1000,
-                                                         budget, 1, previous.get()));
-        compare(geometry->grid, state, exec);
-        return geometry;
-    };
-    state[0].position[0] += real{.125};
-    auto current = update();
-    EXPECT_EQ(current->geometry.value(), previous->geometry.value() + 1);
-    EXPECT_EQ(current->layout, previous->layout);
-    EXPECT_EQ(current->topology, previous->topology);
-    previous = current;
-    state[0].mass = 7;
-    current = update();
-    EXPECT_EQ(current->geometry, previous->geometry);
-    EXPECT_EQ(current->layout, previous->layout);
-    EXPECT_EQ(current->topology, previous->topology);
-    previous = current;
-    std::reverse(state.begin(), state.end());
-    current = update();
-    EXPECT_EQ(current->layout.value(), previous->layout.value() + 1);
-    EXPECT_EQ(current->geometry, previous->geometry);
-    EXPECT_EQ(current->topology, previous->topology);
-    previous = current;
-    state[0].ghost = !state[0].ghost;
-    current = update();
-    EXPECT_EQ(current->topology.value(), previous->topology.value() + 1);
-    EXPECT_EQ(current->geometry, previous->geometry);
-    previous = current;
-    state[0].id += 123;
-    current = update();
-    EXPECT_EQ(current->topology.value(), previous->topology.value() + 1);
-    previous = current;
-    state.push_back({{0, 0, 0}, 1, 98765, 0});
-    current = update();
-    EXPECT_EQ(current->topology.value(), previous->topology.value() + 1);
-}
-TEST(SphGeometry3D, ThreeAxisCrossingAndInputReorderCompareGeometryById) {
+TEST(SphGeometry3D, ThreeAxisCrossingAndInputReorderPreserveNeighbors) {
     std::vector<Particle> state;
     for (int i = 0; i < 27; ++i)
         state.push_back({{real(i % 3 - 1) * real{1.25}, real(i / 3 % 3 - 1) * real{1.25},
@@ -1150,23 +1036,17 @@ TEST(SphGeometry3D, ThreeAxisCrossingAndInputReorderCompareGeometryById) {
                          static_cast<std::uint8_t>(i % 4 == 0)});
     Kokkos::Serial exec;
     detail::ResourceBudget budget;
-    const auto first = checked(indexed_stage(exec, Fields(state).get(), 64, budget, 1));
+    const auto first = checked(budgeted_grid(exec, Fields(state).get(), 64, budget, 1));
     auto crossing = state;
     std::swap(crossing.front().position, crossing.back().position);
     std::reverse(crossing.begin(), crossing.end());
-    const auto next = checked(indexed_stage(exec, Fields(crossing).get(), 64,
+    const auto next = checked(budgeted_grid(exec, Fields(crossing).get(), 64,
                                                        budget, 1, first.get()));
-    EXPECT_EQ(next->geometry.value(), first->geometry.value() + 1);
-    EXPECT_EQ(next->layout.value(), first->layout.value() + 1);
-    EXPECT_EQ(next->topology, first->topology);
-    ASSERT_NO_FATAL_FAILURE(compare(next->grid, crossing, exec));
-    ASSERT_NO_FATAL_FAILURE(compare(first->grid, state, exec));
+    ASSERT_NO_FATAL_FAILURE(compare(*next, crossing, exec));
+    ASSERT_NO_FATAL_FAILURE(compare(*first, state, exec));
     std::reverse(crossing.begin(), crossing.end());
-    const auto reordered = checked(indexed_stage(exec, Fields(crossing).get(), 64,
+    const auto reordered = checked(budgeted_grid(exec, Fields(crossing).get(), 64,
                                                             budget, 1, next.get()));
-    EXPECT_EQ(reordered->geometry, next->geometry);
-    EXPECT_EQ(reordered->layout.value(), next->layout.value() + 1);
-    EXPECT_EQ(reordered->topology, next->topology);
-    ASSERT_NO_FATAL_FAILURE(compare(reordered->grid, crossing, exec));
+    ASSERT_NO_FATAL_FAILURE(compare(*reordered, crossing, exec));
 }
 } // namespace

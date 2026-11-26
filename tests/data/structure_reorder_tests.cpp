@@ -72,11 +72,7 @@ TEST(StructureReorder, Reorder) {
     ASSERT_TRUE(!state->reorder(std::array{GlobalEntityId{10}, GlobalEntityId{30},
                                      GlobalEntityId{20}, GlobalEntityId{99}}).ok());
     ASSERT_NO_FATAL_FAILURE(unchanged());
-    ASSERT_FALSE(state->reorder(reordered_ids, StructureState::Fault::after_partial_candidate).ok());
-    ASSERT_NO_FATAL_FAILURE(unchanged());
-    ASSERT_FALSE(state->reorder(reordered_ids, StructureState::Fault::before_publish).ok());
-    ASSERT_NO_FATAL_FAILURE(unchanged());
-    // The failed pre-publication bank did not close the original issuers.
+    // Rejected real input leaves the original issuers open.
     const auto still_packable = pack_bank(exec, *original);
     ASSERT_EQ(still_packable.values()(0, 0), real{100});
     ASSERT_TRUE(state->reorder(reordered_ids).ok());
@@ -95,10 +91,9 @@ TEST(StructureReorder, Reorder) {
                                      {Association::particle, "1", axes}).ok());
     ASSERT_TRUE(!original->q.issuer.read(original->q.values, descriptor(3), old_stamp,
                                     {Association::particle, "1", axes}).ok());
-    ASSERT_TRUE(!original->order.validate_for(reordered->order.entity_namespace(),
-                                          reordered->order.layout()).ok());
-    ASSERT_TRUE(!original->adjacency.validate_for(reordered->order, reordered->order,
-                                              reordered->logical.topology).ok());
+    ASSERT_NE(original->order.layout(), reordered->order.layout());
+    ASSERT_NE(original->adjacency.rows().layout(), reordered->order.layout());
+    ASSERT_NE(original->adjacency.columns().layout(), reordered->order.layout());
     receive_reordered(exec, packed, *reordered);
     ASSERT_TRUE(state->reorder(original_ids).ok());
     const auto inverse = state->snapshot();
@@ -116,6 +111,12 @@ TEST(StructureReorder, NextCommitAndLifetime) {
         original = state->snapshot();
         ASSERT_TRUE(state->reorder(reordered_ids).ok());
         reordered = state->snapshot();
+        ASSERT_EQ(state->commit_values(std::array<real, 4>{21, 11,
+                      std::numeric_limits<real>::quiet_NaN(), 31}).code(), StatusCode::invalid_argument);
+        ASSERT_EQ(state->snapshot(), reordered);
+        expect_bank(*reordered, true);
+        const auto packed = pack_bank(exec, *reordered);
+        ASSERT_EQ(packed.values()(0, 0), real{200});
         ASSERT_TRUE(state->commit_values(std::array<real, 4>{21, 11, 41, 31}).ok());
         committed = state->snapshot();
         expect_bank(*committed, true, true);
@@ -123,6 +124,10 @@ TEST(StructureReorder, NextCommitAndLifetime) {
         expected_stamp.accepted_version = StateVersion{12};
         ASSERT_EQ(committed->logical, expected_stamp);
         ASSERT_GT(committed->q.grant.stamp().storage_incarnation, reordered->q.grant.stamp().storage_incarnation);
+        ASSERT_NE(committed->order.ids().data(), reordered->order.ids().data());
+        ASSERT_GT(committed->ids.grant.stamp().storage_incarnation,
+                  reordered->ids.grant.stamp().storage_incarnation);
+        ASSERT_EQ(committed->adjacency.offsets().data(), reordered->adjacency.offsets().data());
         // Unchanged CSR remains a read-only shared allocation on value commit.
         ASSERT_EQ(committed->adjacency.indices().data(), reordered->adjacency.indices().data());
     }

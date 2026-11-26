@@ -5,28 +5,14 @@
 #include <numbers>
 
 namespace nexora::sph {
-double density_at_slot_3d(const NeighborView3D& grid, LocalIndex self) {
+real density_at_slot_3d(const NeighborView3D& grid, LocalIndex self) {
     const auto& mass = grid.fields().mass;
-    const double h = grid.smoothing_length();
-    double sum = mass(self) * std::numbers::inv_pi;
-    grid.for_each_neighbor_of_slot(self, [&](LocalIndex slot, double distance_squared) {
+    const real h = grid.smoothing_length();
+    real sum = mass(self) * std::numbers::inv_pi_v<real>;
+    grid.for_each_neighbor_of_slot(self, [&](LocalIndex slot, real distance_squared) {
         sum += mass(slot) * m4_weight_3d(Kokkos::sqrt(distance_squared) / h);
     });
     return sum / (h * h * h);
-}
-
-Result<Values> evaluate_density_3d(const Kokkos::Serial& exec, const NeighborView3D& grid) {
-    try {
-        Values density(Kokkos::view_alloc(exec, Kokkos::WithoutInitializing, "sph.grid.density"),
-                       grid.owned_slots().extent(0));
-        if (auto status = evaluate_density_3d(exec, grid, density); !status.ok())
-            return status;
-        return density;
-    } catch (const std::bad_alloc&) {
-        return Status{StatusCode::resource_exhausted, "cannot allocate 3D SPH density"};
-    } catch (const std::exception&) {
-        return Status{StatusCode::execution_failure, "cannot construct 3D SPH density"};
-    }
 }
 
 Status evaluate_density_3d(const Kokkos::Serial& exec, const NeighborView3D& grid,
@@ -40,9 +26,9 @@ Status evaluate_density_3d(const Kokkos::Serial& exec, const NeighborView3D& gri
         Kokkos::parallel_reduce(
             "sph.grid.density_3d", Policy(exec, 0, rows.extent(0)),
             KOKKOS_LAMBDA(std::size_t row, std::size_t& failures) {
-                const double sum = density_at_slot_3d(grid, rows(row));
-                if (Kokkos::abs(sum) <= std::numeric_limits<real>::max())
-                    density(row) = static_cast<real>(sum);
+                const real sum = density_at_slot_3d(grid, rows(row));
+                if (Kokkos::isfinite(sum))
+                    density(row) = sum;
                 else
                     ++failures;
             },

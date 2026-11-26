@@ -58,7 +58,6 @@ struct StructureBank {
 // The owner and all snapshots must be destroyed before Kokkos finalization.
 class StructureState {
   public:
-    enum class Fault { none, after_partial_candidate, before_publish };
     static Result<std::unique_ptr<StructureState>> create(const Kokkos::Serial&,
                                                          const StructureConfig&);
     ~StructureState();
@@ -67,7 +66,7 @@ class StructureState {
     std::shared_ptr<const StructureBank> snapshot() const;
 
     // Only layout and allocation incarnations change in a pure reorder.
-    Status reorder(std::span<const GlobalEntityId>, Fault = Fault::none);
+    Status reorder(std::span<const GlobalEntityId>);
     // Explicit supplied values, not a solver or a window lifecycle.
     Status commit_values(std::span<const real>);
 

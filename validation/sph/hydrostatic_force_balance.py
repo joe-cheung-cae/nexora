@@ -18,7 +18,7 @@ import numpy as np
 
 HEIGHT, GRAVITY, RHO0, C0, GAMMA = 6., 9.81, 1000., 80., 7.
 BULK = RHO0 * C0**2 / GAMMA
-TIMES = (0., 1.5625, 2.34765625)
+TIMES = (0., .38671875, 1.5625, 2.34765625)
 
 
 def hydrostatic(z):

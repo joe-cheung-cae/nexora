@@ -68,7 +68,7 @@ TEST(FieldGroup, AliasLifetime) {
     const auto left = Kokkos::subview(values, Kokkos::pair{0, 2});
     const auto right = Kokkos::subview(values, Kokkos::pair{2, 4});
     using Subview = std::remove_cv_t<decltype(left)>;
-    const auto issuer = take(FieldIssuer::create(values, FieldStamp{}));
+    const auto issuer = take(FieldIssuer::create_at_validated_time(values, FieldStamp{}));
 
     std::optional<ReadField<Subview>> retained_reader;
     {
@@ -116,8 +116,8 @@ TEST(FieldGroup, AliasLifetime) {
 TEST(FieldGroup, FailedGroupLeavesGrantsUnchanged) {
     const Values first("first allocation", 2);
     const Values second("second allocation", 2);
-    const auto first_issuer = take(FieldIssuer::create(first, FieldStamp{}));
-    auto second_issuer = take(FieldIssuer::create(second, FieldStamp{}));
+    const auto first_issuer = take(FieldIssuer::create_at_validated_time(first, FieldStamp{}));
+    auto second_issuer = take(FieldIssuer::create_at_validated_time(second, FieldStamp{}));
     ASSERT_LT(first_issuer.stamp().storage_incarnation, second_issuer.stamp().storage_incarnation);
     {
         const auto existing_reader = FieldIssuer::grant(read_request(second_issuer, second));
@@ -156,8 +156,8 @@ TEST(FieldGroup, FailedGroupLeavesGrantsUnchanged) {
 TEST(FieldGroup, ConcurrentGroupsUseOneLockOrder) {
     const Values first("concurrent first allocation", 2);
     const Values second("concurrent second allocation", 2);
-    const auto first_issuer = take(FieldIssuer::create(first, FieldStamp{}));
-    const auto second_issuer = take(FieldIssuer::create(second, FieldStamp{}));
+    const auto first_issuer = take(FieldIssuer::create_at_validated_time(first, FieldStamp{}));
+    const auto second_issuer = take(FieldIssuer::create_at_validated_time(second, FieldStamp{}));
     constexpr unsigned attempts = 64;
     using Requests = std::vector<std::pair<WriteRequest, WriteRequest>>;
     auto prepare = [&](const FieldIssuer& a, const Values& a_view, const FieldIssuer& b,

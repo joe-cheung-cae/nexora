@@ -65,9 +65,9 @@ template <class CaptureWalls>
 InitialInput capture_input(const Kokkos::Serial& exec, const Budget& budget,
                            const ParticleFields3D& fluid, std::size_t nw, const CaptureWalls& capture_walls) {
     const auto nf = fluid.ids.extent(0);
-    const auto n = nf + nw; // initialize_state verifies the sum before any allocation
-    auto ticket = require(budget.reserve(require(detail::checked_array_bytes(
-        n, 4 * sizeof(real) + sizeof(std::uint64_t) + sizeof(std::uint8_t)))));
+    const auto n = nf + nw; // Bounded by initial source admission.
+    auto ticket = require(budget.reserve(
+        n * (4 * sizeof(real) + sizeof(std::uint64_t) + sizeof(std::uint8_t))));
     auto position = allocate<Velocity3D>(exec, "sph.geometry.input_position", n);
     auto mass = allocate<Values>(exec, "sph.geometry.input_mass", n);
     auto ids = allocate<decltype(fluid.ids)::non_const_type>(exec, "sph.geometry.input_ids", n);
@@ -123,21 +123,11 @@ const PrescribedMovingWall3D* WcsphStep3D::WallGroup::moving() const {
     return std::get_if<PrescribedMovingWall3D>(&boundary);
 }
 
-void WcsphStep3D::capture_groups(const std::vector<WallGroupInput3D>& inputs, std::size_t nf) {
+void WcsphStep3D::capture_groups(const std::vector<WallGroupInput3D>& inputs) {
     if (inputs.empty())
         return;
-    for (const auto& group : inputs) {
-        const auto count = group.particles.ids.extent(0);
-        if (count > std::numeric_limits<std::size_t>::max() - wall_count_)
-            throw Failure{{StatusCode::resource_exhausted, "WCSPH wall particle count exceeds capacity"}};
-        wall_count_ += count;
-    }
-    if (nf > std::numeric_limits<std::size_t>::max() - wall_count_ ||
-        !detail::checked_entity_count(nf + wall_count_).ok())
-        throw Failure{{StatusCode::resource_exhausted, "WCSPH source count exceeds capacity"}};
-    const auto records = require(detail::checked_array_bytes(wall_count_, sizeof(WallParticle3D)));
     const auto groups = require(detail::checked_array_bytes(inputs.size(), sizeof(WallGroup)));
-    std::size_t bytes = records;
+    std::size_t bytes = wall_count_ * sizeof(WallParticle3D);
     const auto add_bytes = [&](std::size_t extra) {
         if (extra > std::numeric_limits<std::size_t>::max() - bytes)
             throw Failure{{StatusCode::resource_exhausted, "WCSPH wall group storage exceeds capacity"}};
@@ -168,7 +158,7 @@ WcsphStep3D::Ticket WcsphStep3D::reserve_wall_stage(std::size_t bytes) {
     // Wall clocks and samples are created before the first half kick. Any work
     // buffers left by a previous step are disposable here.
     auto reserved = budget_.reserve(bytes);
-    if (!reserved.ok() && reserved.status().code() == StatusCode::resource_exhausted) {
+    if (!reserved.ok()) {
         const bool released = workspace_.release_continuity() || workspace_.half;
         workspace_.half.reset();
         if (released)
@@ -201,7 +191,7 @@ WcsphStep3D::WallMotions WcsphStep3D::sample_groups(const WallPhases3D& phases, 
     return motions;
 }
 
-void WcsphStep3D::set_next_step(WcsphState3D& candidate, double largest_speed_squared) const {
+void WcsphStep3D::set_next_step(WcsphState3D& candidate, real largest_speed_squared) const {
     candidate.maximum_step = require(verlet_step::acoustic_step(largest_speed_squared,
         parameters_.eos.sound_speed, parameters_.cfl, parameters_.smoothing_length));
     for (std::size_t g = 0; g < candidate.wall_phases.extent(0); ++g)
@@ -218,16 +208,13 @@ bool WcsphStep3D::write_wall_slot(const ParticleFields3D& fields, const WallMoti
         if (!particle)
             continue;
         auto& motion = motions.values(group.phase_index);
-        if constexpr (std::is_same_v<real, double>) {
-            if (positions) {
-                const auto position = motion.position(particle->reference_position);
-                for (int k = 0; k < 3; ++k)
-                    output(slot, k) = static_cast<real>(position[k]);
-                return true;
-            }
+        if (positions) {
+            const auto position = motion.position(particle->reference_position);
+            for (int k = 0; k < 3; ++k)
+                output(slot, k) = position[k];
+            return true;
         }
-        const auto sampled = positions ? motion.checked_position(particle->reference_position)
-                                       : motion.velocity(particle->reference_position);
+        const auto sampled = motion.velocity(particle->reference_position);
         if (!sampled)
             return false;
         for (int k = 0; k < 3; ++k)
@@ -239,8 +226,8 @@ bool WcsphStep3D::write_wall_slot(const ParticleFields3D& fields, const WallMoti
     return true;
 }
 
-void WcsphStep3D::write_wall_stage(const ParticleFields3D& fields, const WallMotions& motions,
-                                   const Velocity3D& output, bool positions) const {
+void WcsphStep3D::write_wall_positions(const ParticleFields3D& fields, const WallMotions& motions,
+                                       const Velocity3D& output) const {
     if (!wall_count_)
         return;
     if (!moving_groups_) {
@@ -248,37 +235,24 @@ void WcsphStep3D::write_wall_stage(const ParticleFields3D& fields, const WallMot
             [&](std::size_t slot) {
                 if (fields.ghost(slot))
                     for (int k = 0; k < 3; ++k)
-                        output(slot, k) = positions ? fields.position(slot, k) : real{0};
+                        output(slot, k) = fields.position(slot, k);
             });
         return;
     }
-    if constexpr (std::is_same_v<real, double>) {
-        if (positions) {
-            // No narrowing here. update_positions checks every drifted coordinate
-            // against its bin-conversion range before reading it as an index.
-            Kokkos::parallel_for("sph.wall.drift_position", Policy(exec_, 0, fields.ids.extent(0)),
-                [&](std::size_t slot) {
-                    if (fields.ghost(slot))
-                        write_wall_slot(fields, motions, output, static_cast<LocalIndex>(slot), true);
-                });
-            return;
-        }
-    }
-    std::size_t invalid{};
-    Kokkos::parallel_reduce(positions ? "sph.wall.drift_position" : "sph.wall.stage_velocity",
-        Policy(exec_, 0, fields.ids.extent(0)), [&](std::size_t slot, std::size_t& errors) {
+    // Only drift needs all moving wall slots. Continuity samples their velocity on demand.
+    // update_positions checks every drifted coordinate before converting it to an index.
+    Kokkos::parallel_for("sph.wall.drift_position", Policy(exec_, 0, fields.ids.extent(0)),
+        [&](std::size_t slot) {
             if (fields.ghost(slot))
-                errors += !write_wall_slot(fields, motions, output, static_cast<LocalIndex>(slot), positions);
-        }, invalid);
-    if (invalid)
-        throw Failure{{StatusCode::numerical_failure, "unrepresentable WCSPH moving wall kinematics"}};
+                write_wall_slot(fields, motions, output, static_cast<LocalIndex>(slot), true);
+        });
 }
 
-Result<WallTrajectoryTime3D> WcsphStep3D::wall_time(std::uint64_t particle_id, const WallPhases3D& phases) const {
+WallTrajectoryTime3D WcsphStep3D::committed_wall_time(std::uint64_t particle_id, const WallPhases3D& phases) const {
     for (const auto& group : walls_)
-        if (group.source().find(particle_id))
-            return group.moving() ? phases(group.phase_index).time : WallTrajectoryTime3D{};
-    return Status{StatusCode::invalid_state, "committed WCSPH wall lacks a group"};
+        if (const auto* moving = group.moving(); moving && moving->find(particle_id))
+            return phases(group.phase_index).time;
+    return {}; // A committed ghost outside the moving groups belongs to a fixed wall.
 }
 
 void WcsphStep3D::evaluate_pressure(WcsphState3D& state, const CellGrid& grid,
@@ -291,7 +265,7 @@ void WcsphStep3D::evaluate_pressure(WcsphState3D& state, const CellGrid& grid,
         Ticket scratch;
         if (rows) {
             const auto stride = step_pressure_workspace_bytes_per_source(n != rows);
-            const auto bytes = require(detail::checked_array_bytes(n, stride));
+            const auto bytes = n * stride;
             auto reserved = reserve_with_eviction([&] { return budget_.reserve(bytes); }, trim);
             if (!reserved.ok())
                 return reserved.status();
@@ -304,7 +278,7 @@ void WcsphStep3D::evaluate_pressure(WcsphState3D& state, const CellGrid& grid,
                         return motions.values(group.phase_index).acceleration(particle->reference_position);
                 }
             }
-            return std::array<double, 3>{};
+            return std::array<real, 3>{};
         };
         const TaitEos eos(parameters_.eos);
         return evaluate_step_pressure_3d(exec_, q, eos, state.density->view(), out.pressure,
@@ -323,12 +297,22 @@ Status WcsphStep3D::initialize_state(const ParticleFields3D& fluid,
         const auto nf = fluid.position.extent(0);
         if (!valid_extent(nf, fluid.position, fluid.ids, fluid.mass, fluid.ghost, velocity, density))
             throw Failure{{StatusCode::invalid_argument, "WCSPH fluid field extents disagree"}};
+        std::size_t remaining = std::numeric_limits<LocalIndex>::max();
+        const auto admit_sources = [&](std::size_t count) {
+            if (count > remaining)
+                throw Failure{{StatusCode::resource_exhausted, "WCSPH source count exceeds capacity"}};
+            remaining -= count;
+        };
+        admit_sources(nf);
+        for (const auto& group : initial_walls)
+            admit_sources(group.particles.ids.extent(0));
+        wall_count_ = std::numeric_limits<LocalIndex>::max() - remaining - nf;
         std::size_t ghosts{};
         Kokkos::parallel_reduce("sph.wall.validate_ownership", Policy(exec_, 0, nf),
             [&](std::size_t i, std::size_t& count) { count += fluid.ghost(i) != 0; }, ghosts);
         if (ghosts)
             throw Failure{{StatusCode::unsupported, "WCSPH requires all-owned fluid input"}};
-        capture_groups(initial_walls, nf);
+        capture_groups(initial_walls);
         const auto phases = phase_storage(candidate);
         for (const auto& group : walls_)
             if (const auto* moving = group.moving()) {
@@ -352,18 +336,11 @@ Status WcsphStep3D::initialize_state(const ParticleFields3D& fluid,
                         position(i, k) = x[k];
                 };
                 if (group.moving()) {
-                    std::size_t invalid{};
-                    Kokkos::parallel_reduce("sph.geometry.capture_moving_walls", Policy(exec_, 0, count),
-                        [&](std::size_t w, std::size_t& errors) {
-                            const auto x = samples.values(group.phase_index).checked_position(
-                                particles(w).reference_position);
-                            if (x)
-                                write(w, *x);
-                            else
-                                ++errors;
-                        }, invalid);
-                    if (invalid)
-                        throw Failure{{StatusCode::numerical_failure, "unrepresentable initial WCSPH wall position"}};
+                    // Grid assembly validates the sampled coordinates before publication.
+                    Kokkos::parallel_for("sph.geometry.capture_moving_walls", Policy(exec_, 0, count),
+                        [&](std::size_t w) {
+                            write(w, samples.values(group.phase_index).position(particles(w).reference_position));
+                        });
                 } else {
                     // The initial grid validates fixed coordinates and masses.
                     Kokkos::parallel_for("sph.geometry.capture_fixed_walls", Policy(exec_, 0, count),
@@ -403,7 +380,7 @@ Status WcsphStep3D::initialize_state(const ParticleFields3D& fluid,
                     [&](std::size_t r) { out.density(r) = density(map(r)); });
                 return {};
             }, {}));
-        double largest_speed_squared{};
+        real largest_speed_squared{};
         require(bind(FieldGroup3D::velocity,
             [&](const StepOutputs3D& out) -> Status {
                 const auto speed = verlet_step::capture_velocity(exec_, map, velocity, out.velocity);
@@ -411,8 +388,6 @@ Status WcsphStep3D::initialize_state(const ParticleFields3D& fluid,
                     largest_speed_squared = speed.value();
                 return speed.status();
             }, {}));
-        if (observe_)
-            observe_(observer_context_, StepStage3D::initial, committed_grid_->neighbors());
         evaluate_pressure(candidate, *committed_grid_, bind, nullptr, samples);
         set_next_step(candidate, largest_speed_squared);
     });
@@ -420,20 +395,24 @@ Status WcsphStep3D::initialize_state(const ParticleFields3D& fluid,
 
 Status WcsphStep3D::try_step(const TimeInterval& interval, const WcsphState3D& current,
                              WcsphState3D& candidate, const BindFields3D& bind) {
+    const double requested_step = interval.duration();
+    const real dt = static_cast<real>(requested_step);
+    if (!(dt > 0))
+        return {StatusCode::invalid_argument, "WCSPH step rounds to zero in real precision"};
+
     const auto status = guarded([&] {
-        const auto dt = interval.duration();
         const auto phases = phase_storage(candidate);
         // Validate every group's unwrapped interval before asking any trajectory for an endpoint.
         for (const auto& group : walls_) {
             if (const auto* moving = group.moving()) {
                 const auto index = group.phase_index;
                 const auto& phase = current.wall_phases(index);
-                const auto [time, limit] = require(moving->advance_certified_time(phase.time, dt, phase.maximum_step));
+                const auto [time, limit] = require(
+                    moving->advance_certified_time(phase.time, requested_step, phase.maximum_step));
                 phases(index) = {phase.group_id, time, limit};
             }
         }
-        const bool observe_kinematics = observe_ && observe_kinematics_;
-        const bool use_stage_velocity = current.geometry.owned_row_to_input.extent(0) || observe_kinematics;
+        const bool use_stage_velocity = current.geometry.owned_row_to_input.extent(0);
         auto start_samples = use_stage_velocity ? sample_groups(current.wall_phases, WallMotionUse3D::velocity) : WallMotions{};
         auto end_samples = sample_groups(phases, use_stage_velocity ? WallMotionUse3D::full : WallMotionUse3D::position);
         candidate.wall_phases = phases;
@@ -467,7 +446,7 @@ Status WcsphStep3D::try_step(const TimeInterval& interval, const WcsphState3D& c
                                 const char* label, const auto& trim) {
             if (!buffer) {
                 using V = std::remove_cvref_t<decltype(buffer->values)>;
-                const auto bytes = require(detail::checked_array_bytes(count, stride));
+                const auto bytes = count * stride;
                 auto ticket = require(reserve_with_eviction([&] { return budget_.reserve(bytes); }, trim));
                 buffer.emplace(std::move(ticket), allocate<V>(exec_, label, count));
             }
@@ -484,8 +463,8 @@ Status WcsphStep3D::try_step(const TimeInterval& interval, const WcsphState3D& c
         std::unique_ptr<CellGrid> next_grid;
         {
             const auto& drift = work.stage->values;
-            require(verlet_step::kick_drift(exec_, old, v, a, dt, drift, half, parameters_.gravity));
-            write_wall_stage(old_fields, end_samples, drift, true);
+            verlet_step::kick_drift(exec_, old, v, a, dt, drift, half, parameters_.gravity);
+            write_wall_positions(old_fields, end_samples, drift);
             const ParticleFields3D input{drift, old_fields.mass, old_fields.ids, old_fields.ghost};
             auto updated = old.update_positions(exec_, drift, max_cells_, admit_grid);
             if (updated.status().code() == StatusCode::invalid_argument)
@@ -515,16 +494,8 @@ Status WcsphStep3D::try_step(const TimeInterval& interval, const WcsphState3D& c
             geometry.row_storage = current.geometry.row_storage;
             geometry.owned_row_to_input = current.geometry.owned_row_to_input;
         }
-        // The retained input contains the drifted coordinates in old sorted order,
-        // including when the new grid packed them into different slots.
-        bool moved = false;
-        Kokkos::parallel_for("sph.geometry.compare_drift", Policy(exec_, 0, n), [&](std::size_t slot) {
-            if (!moved)
-                for (int k = 0; k < 3; ++k)
-                    moved |= old_fields.position(slot, k) != geometry.input.position(slot, k);
-        });
-        const auto next_geometry = moved ? require(detail::checked_next_version(current.geometry.geometry))
-                                         : current.geometry.geometry;
+        const auto next_geometry = next.positions_changed_
+            ? require(detail::checked_next_version(current.geometry.geometry)) : current.geometry.geometry;
         const auto next_layout = layout_changed ? require(detail::checked_next_version(current.geometry.layout))
                                                 : current.geometry.layout;
         geometry.topology = current.geometry.topology;
@@ -534,7 +505,7 @@ Status WcsphStep3D::try_step(const TimeInterval& interval, const WcsphState3D& c
         ensure_stage();
         const auto no_trim = [] { return false; };
         ensure(work.old_row, n, sizeof(LocalIndex), "sph.continuity.old_row", no_trim);
-        ensure(work.rate_n, nf, sizeof(double), "sph.continuity.accepted_rate", no_trim);
+        ensure(work.rate_n, nf, sizeof(real), "sph.continuity.accepted_rate", no_trim);
         const Policy rows(exec_, 0, nf);
         {
             const auto& stage = work.stage->values;
@@ -550,13 +521,16 @@ Status WcsphStep3D::try_step(const TimeInterval& interval, const WcsphState3D& c
                 return write_wall_slot(fields, motions, stage, slot, false);
             };
             std::optional<Buffer<StageVelocityReady3D>> ready;
-            const bool use_lazy_prediction = !observe_kinematics && nf && n > 1;
+            const bool use_lazy_prediction = nf && n > 1;
             if (use_lazy_prediction && wall_count_)
                 ensure(ready, n, sizeof(std::uint8_t), "sph.continuity.velocity_ready", no_trim);
-            if (observe_kinematics || (ready && !moving_groups_))
-                write_wall_stage(old_fields, start_samples, stage, false);
-            if (observe_)
-                observe_(observer_context_, StepStage3D::start, old.neighbors());
+            if (ready && !moving_groups_) {
+                Kokkos::parallel_for("sph.wall.fixed_stage", Policy(exec_, 0, n), [&](std::size_t slot) {
+                    if (old_fields.ghost(slot))
+                        for (int k = 0; k < 3; ++k)
+                            stage(slot, k) = real{0};
+                });
+            }
             if (ready && moving_groups_) {
                 const auto write = [&](LocalIndex slot) { return write_wall(old_fields, start_samples, slot); };
                 require(stage_wall_continuity_rate_3d(exec_, old.neighbors(), stage, work.rate_n->values,
@@ -567,21 +541,7 @@ Status WcsphStep3D::try_step(const TimeInterval& interval, const WcsphState3D& c
             start_samples = {};
 
             const ContinuityPredictor3D predictor{v, a, dt, parameters_.gravity};
-            if (observe_kinematics) {
-                const auto& to_new = next.input_to_sorted();
-                std::size_t invalid{};
-                Kokkos::parallel_reduce("sph.continuity.predict_velocity", rows,
-                    [&](std::size_t r, std::size_t& errors) {
-                        errors += !predictor.write<true>(r, to_new(old_owned(r)), stage);
-                    }, invalid);
-                if (invalid)
-                    throw Failure{{StatusCode::numerical_failure, "invalid predicted WCSPH velocity"}};
-            }
-            ensure(work.rate_star, nf, sizeof(double), "sph.continuity.predicted_rate", no_trim);
-            if (observe_kinematics)
-                write_wall_stage(next.fields(), end_samples, stage, false);
-            if (observe_)
-                observe_(observer_context_, StepStage3D::end, next.neighbors());
+            ensure(work.rate_star, nf, sizeof(real), "sph.continuity.predicted_rate", no_trim);
             if (ready) {
                 const auto write = [&](LocalIndex slot) { return write_wall(next.fields(), end_samples, slot); };
                 require(stage_predicted_continuity_rate_3d(exec_, next.neighbors(), stage, work.rate_star->values,
@@ -613,7 +573,7 @@ Status WcsphStep3D::try_step(const TimeInterval& interval, const WcsphState3D& c
         evaluate_pressure(candidate, next, bind, &work, end_samples);
         end_samples.values = {};
         end_samples.ticket.reset();
-        double largest_speed_squared{};
+        real largest_speed_squared{};
         require(bind(FieldGroup3D::velocity, [&](const StepOutputs3D& out) -> Status {
             const auto speed = verlet_step::finish_kick(exec_, next, half, candidate.acceleration->view(),
                                                         dt, out.velocity, parameters_.gravity);

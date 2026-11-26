@@ -8,6 +8,22 @@ if(NOT CMAKE_CROSSCOMPILING)
         -P "${CMAKE_CURRENT_SOURCE_DIR}/RunCliSuite.cmake")
     set_tests_properties(nexora_cli_case_suite PROPERTIES LABELS "cli;reference" TIMEOUT 60)
 
+    add_test(NAME nexora_embedded_reference_profile COMMAND "${CMAKE_COMMAND}"
+        "-Dproject_source=${PROJECT_SOURCE_DIR}"
+        "-Dscratch=${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/embedded-reference"
+        "-Dconfig=$<CONFIG>"
+        "-Dgenerator=${CMAKE_GENERATOR}"
+        "-Dgenerator_platform=${CMAKE_GENERATOR_PLATFORM}"
+        "-Dgenerator_toolset=${CMAKE_GENERATOR_TOOLSET}"
+        "-Dmake_program=${CMAKE_MAKE_PROGRAM}"
+        "-Dc_compiler=${CMAKE_C_COMPILER}"
+        "-Dcxx_compiler=${CMAKE_CXX_COMPILER}"
+        "-Dkokkos_dir=${Kokkos_DIR}"
+        "-Ddouble_precision=${NEXORA_ENABLE_DOUBLE_PRECISION}"
+        "-Dexecutable_suffix=${CMAKE_EXECUTABLE_SUFFIX}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/VerifyEmbeddedReference.cmake")
+    set_tests_properties(nexora_embedded_reference_profile PROPERTIES LABELS "cli;reference" TIMEOUT 120)
+
     add_test(NAME nexora_install_consumer COMMAND "${CMAKE_COMMAND}"
         "-Dproject_source=${PROJECT_SOURCE_DIR}"
         "-Dproject_build=${PROJECT_BINARY_DIR}"

@@ -1,7 +1,9 @@
 #pragma once
-#include "EntityOrder.hpp"
+#include "Permutation.hpp"
 
 namespace nexora::detail {
+struct ReorderedCsr;
+
 // Duplicate edges, self edges, and row-local ordering are consumer semantics.
 class CsrAdjacency {
   public:
@@ -10,6 +12,8 @@ class CsrAdjacency {
     static Result<CsrAdjacency> create(const Kokkos::Serial&, const EntityOrder& rows,
                                        const EntityOrder& columns, TopologyVersion,
                                        std::span<const Offset>, std::span<const LocalIndex>);
+    Result<ReorderedCsr> reorder(const Kokkos::Serial&, const EntityOrder& rows,
+                                 const EntityOrder& columns) const;
     offset_view_type offsets() const {
         return offsets_;
     }
@@ -31,7 +35,6 @@ class CsrAdjacency {
     TopologyVersion topology() const {
         return topology_;
     }
-    Status validate_for(const EntityOrder& rows, const EntityOrder& columns, TopologyVersion) const;
 
   private:
     CsrAdjacency(EntityOrder rows, EntityOrder columns, TopologyVersion topology,
@@ -42,5 +45,10 @@ class CsrAdjacency {
     TopologyVersion topology_;
     offset_view_type offsets_;
     index_view_type indices_;
+};
+
+struct ReorderedCsr {
+    CsrAdjacency adjacency;
+    Permutation rows, columns;
 };
 } // namespace nexora::detail

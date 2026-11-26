@@ -312,7 +312,7 @@ constexpr auto geometry_bytes =
         (sizeof(std::uint64_t) + 2 * sizeof(real) + 2 * sizeof(std::uint8_t));
 constexpr auto density_bytes = fixture::row_ids.size() * sizeof(real);
 constexpr auto reorder_scratch_bytes =
-    csr_bytes + 2 * (fixture::row_ids.size() + fixture::column_ids.size()) * sizeof(LocalIndex);
+    2 * (fixture::row_ids.size() + fixture::column_ids.size()) * sizeof(LocalIndex);
 
 TEST(Sph, RetainedDensityBudget) {
     constexpr double step = 0.125;

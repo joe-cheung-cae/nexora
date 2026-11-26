@@ -1,5 +1,4 @@
-#include <participants/reference/StructureState.hpp>
-#include <data/Permutation.hpp>
+#include "StructureState.hpp"
 #include <cmath>
 #include <exception>
 #include <new>
@@ -111,30 +110,19 @@ StructureState::StructureState(const Kokkos::Serial& exec, std::shared_ptr<Struc
 StructureState::~StructureState() { accepted_->close(); }
 std::shared_ptr<const StructureBank> StructureState::snapshot() const { return accepted_; }
 
-Status StructureState::reorder(std::span<const GlobalEntityId> requested, Fault fault) {
+Status StructureState::reorder(std::span<const GlobalEntityId> requested) {
     try {
         auto stamp = accepted_->logical;
         stamp.layout = require(checked_next_version(stamp.layout));
         auto requested_order = require(EntityOrder::create(
             exec_, accepted_->order.entity_namespace(), stamp.layout, requested));
-        const auto permutation = require(Permutation::between(exec_, accepted_->order,
-                                                               requested_order));
-        const auto forward = permutation.new_to_old();
-        const auto inverse = permutation.old_to_new();
+        auto reordered = require(accepted_->adjacency.reorder(exec_, requested_order, requested_order));
+        const auto forward = reordered.rows.new_to_old();
         const auto count = accepted_->order.size();
-        Kokkos::View<std::uint64_t*, Kokkos::HostSpace> ids(
-            Kokkos::view_alloc(exec_, Kokkos::WithoutInitializing, "reorder.ids"), count);
         Values x(Kokkos::view_alloc(exec_, Kokkos::WithoutInitializing, "reorder.x"), count);
-        const auto old_ids = accepted_->ids.grant.view();
         const auto old_x = accepted_->x.grant.view();
-        Kokkos::parallel_for("structure.gather IDs and geometry", Policy(exec_, 0, count),
-                            KOKKOS_LAMBDA(std::size_t i) {
-            ids(i) = old_ids(forward(i));
-            x(i) = old_x(forward(i));
-        });
-        exec_.fence("structure partial candidate ready");
-        if (fault == Fault::after_partial_candidate)
-            return {StatusCode::execution_failure, "injected partial candidate failure"};
+        Kokkos::parallel_for("structure.gather geometry", Policy(exec_, 0, count),
+                             KOKKOS_LAMBDA(std::size_t i) { x(i) = old_x(forward(i)); });
 
         Values q(Kokkos::view_alloc(exec_, Kokkos::WithoutInitializing, "reorder.q"), count);
         Values h(Kokkos::view_alloc(exec_, Kokkos::WithoutInitializing, "reorder.history"), count);
@@ -145,45 +133,12 @@ Status StructureState::reorder(std::span<const GlobalEntityId> requested, Fault 
             q(i) = old_q(forward(i));
             h(i) = old_h(forward(i));
         });
-        const auto old_offsets = accepted_->adjacency.offsets();
-        const auto old_indices = accepted_->adjacency.indices();
-        Kokkos::View<Offset*, Kokkos::HostSpace> offsets(
-            Kokkos::view_alloc(exec_, Kokkos::WithoutInitializing, "reorder.offsets"), count + 1);
-        Kokkos::View<LocalIndex*, Kokkos::HostSpace> indices(
-            Kokkos::view_alloc(exec_, Kokkos::WithoutInitializing, "reorder.indices"),
-            old_indices.extent(0));
-        // One Serial kernel builds the exclusive prefix; row gathers then
-        // use that prefix on the same execution instance.
-        Kokkos::parallel_for("structure CSR row offsets", Policy(exec_, 0, 1),
-                            KOKKOS_LAMBDA(std::size_t) {
-            offsets(0) = 0;
-            for (std::size_t i = 0; i < count; ++i) {
-                const auto row = forward(i);
-                offsets(i + 1) = offsets(i) + (old_offsets(row + 1) - old_offsets(row));
-            }
-        });
-        Kokkos::parallel_for("structure CSR rows and columns", Policy(exec_, 0, count),
-                            KOKKOS_LAMBDA(std::size_t i) {
-            const auto row = forward(i);
-            for (Offset j = old_offsets(row); j < old_offsets(row + 1); ++j)
-                indices(offsets(i) + (j - old_offsets(row))) = inverse(old_indices(j));
-        });
-        exec_.fence("structure candidate diagnostics ready");
-        auto order = require(EntityOrder::copy_from(exec_, requested_order.entity_namespace(),
-                                                     stamp.layout, ids));
-        if (!order.same_order(requested_order))
-            return {StatusCode::execution_failure, "gathered IDs differ from requested order"};
-        auto graph = require(CsrAdjacency::create(
-            exec_, order, order, stamp.topology,
-            std::span<const Offset>(offsets.data(), offsets.extent(0)),
-            std::span<const LocalIndex>(indices.data(), indices.extent(0))));
+        exec_.fence("structure reordered fields ready");
         // The validated permutation gathers immutable accepted finite fields
         // exactly; no arithmetic can create a new invalid numerical value.
         auto candidate = std::make_shared<StructureBank>(
-            StructureBank::ConstructionKey{}, std::move(order), std::move(graph), stamp,
+            StructureBank::ConstructionKey{}, std::move(requested_order), std::move(reordered.adjacency), stamp,
             fields(*accepted_), x, q, h);
-        if (fault == Fault::before_publish)
-            return {StatusCode::execution_failure, "injected prepared publication failure"};
         publish(std::move(candidate));
         return {};
     } catch (const Failure& failure) {
@@ -215,8 +170,7 @@ Status StructureState::commit_values(std::span<const real> supplied) {
             input(supplied.data(), count);
         Kokkos::deep_copy(exec_, q, input);
         exec_.fence("structure value commit ready");
-        auto order = require(EntityOrder::copy_from(exec_, accepted_->order.entity_namespace(),
-                                                     stamp.layout, accepted_->order.ids()));
+        auto order = require(accepted_->order.clone(exec_));
         // Same logical order/topology: the immutable CSR may stay shared.
         auto candidate = std::make_shared<StructureBank>(
             StructureBank::ConstructionKey{}, std::move(order), accepted_->adjacency, stamp,

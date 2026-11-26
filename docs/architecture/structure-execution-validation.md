@@ -4,7 +4,7 @@
 
 ## 结构状态与安全点
 
-`StructureState` 位于 `src/participants/reference`，由现有 `nexora_participants_reference` 静态目标构建。测试提供输入并调用同一实现。状态由单一调用者同步操作，accepted bank 只签发读取权限。单个本地域的实体全部为 owned，ghost 目标仅用于收发夹具。
+`StructureState` 位于 `tests/validation/structure`，仅编译进结构重排测试及显式构建的 irregular measurement，不属于生产 participant 目标。测试与计量使用同一验证实现。状态由单一调用者同步操作，accepted bank 只签发读取权限。单个本地域的实体全部为 owned，ghost 目标仅用于收发夹具。
 
 | 数据 | 重排与发布规则 |
 | --- | --- |
@@ -13,7 +13,7 @@
 | 逻辑 stamp | 纯重排只推进 layout。topology、geometry、accepted state version 和时钟继承原值。 |
 | 快照与授权 | 候选分配、Kokkos 工作、诊断及只读授权准备完毕后关闭旧 issuer 的新签发，并以一次 bank 交换发布。已签发的旧读取授权随旧快照保活。 |
 
-`nexora_structure_reorder_tests` 用独立字面量核对原序、重排、逆排的 ID、字段、历史和 CSR 边表。它在部分 gather 完成后及候选授权准备完毕后分别注入失败，检查 accepted bank、字段与版本。夹具随后发布一组调用方提供的新值，验证旧快照穿过下一次提交及状态析构，旧 stamp、顺序和 CSR 在新布局上的校验失败。真实 `TransportBuilder` 和 `TransportReceiver` 把重排前的快照解包到重排后的 ghost 目标，并检查 stale stamp 拒绝时目标保持原值。
+`nexora_structure_reorder_tests` 用独立字面量核对原序、重排、逆排的 ID、字段、历史和 CSR 边表。重复或不匹配的 ID、耗尽的 layout 版本以及非有限的提交值通过实际拒绝路径检查 accepted bank、字段、版本和后续签发能力。夹具随后发布一组调用方提供的新值，验证旧快照穿过下一次提交及状态析构，旧 stamp 的签发被拒绝，旧顺序和 CSR 保留各自原 layout。真实 `TransportBuilder` 和 `TransportReceiver` 把重排前的快照解包到重排后的 ghost 目标，并检查 stale stamp 拒绝时目标保持原值。
 
 ## Reference 执行与授权
 
@@ -30,7 +30,9 @@ reference participant 在初始化时选定一个 `Kokkos::Serial` 实例。初�
 
 `nexora_field_group_tests` 覆盖 pending 字段不可访问、移后及关闭请求拒绝、subview 与重复请求、多个 reader、独占 writer、整组冲突与反序申请。`nexora_transport_tests` 使用整组授权给两个独立消费者打包，检查 caller 提前释放后仍可读取，并观察最后一个消费者完成时值和 ID 的 owner 各释放一次。原有 reference 数值和收发测试继续覆盖窗口恢复、不同轴序与独立 Decimal 判据。
 
-## 本地复验
+## 历史本地复验
+
+以下为迁移前记录；其中生产静态库包含 StructureState 及故障注入的结论不适用于当前测试树布局。当前代码不再声称覆盖部分 gather 后或完整候选准备后的人工失败。
 
 Apple M2 Pro arm64，macOS 27.2.1 build 26B131，AppleClang `21.0.0.21000401`，CMake `4.4.3`，Ninja `1.13.2`，Python `3.14.7`。验证复用任务 1/2 记录中按构建类型供应的 Debug 和 Release Kokkos 5.2.2。每次运行重新核对安装文件摘要，开始和结束各 10 个 IPv4/IPv6 TCP、UDP 和 bind 探针均返回 `EPERM`。 [Kokkos 供给记录](serial-ci-validation.md)
 

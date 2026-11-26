@@ -37,7 +37,7 @@ q=0,1
 
 预检使用 Reference 与 `Simulation` 的现有时间步约束。每一步先按请求步长计算舍入后的 `double` 端点。若该端点恰好为 `end`，保留原请求步长。若端点超过 `end`，以 `end - current` 形成末步并重新校验实际端点及步长。不可推进、不能抵达目标或违反 `real` 数值步长约束的计划在预检拒绝。`run` 按预检得到的请求步长推进，积分仍使用 `TimeInterval::duration()`。v1 预检最多保留 1,000,000 个请求步。超限返回 `resource_exhausted`。
 
-`validate` 在通过时输出 `valid=true`。`plan` 分别报告 `built`、`available`、`validated`，并列出参与者、实体数、字段精度与布局、授权、复制和同步边界。`validation_evidence=task6-local-serial` 表示构建配置与下方有实测记录的 profile 匹配。匹配条件为原生 Darwin 27.2.0 arm64、AppleClang `21.0.0.21000401`、默认 Ninja Debug 或 Release、默认架构和 SDK 选择、MPI 关闭及 exact Kokkos 5.2.2 Serial，覆盖 float 和 double。自定义工具链、编译或链接参数、编译器 launcher 与 IPO 属于单独的构建组合。实测源码与所用依赖制品的摘要记录在验收证据中。
+`validate` 在通过时输出 `valid=true`。`plan` 分别报告 `built`、`available`、`validated`，并列出参与者、实体数、字段精度与布局、授权、复制和同步边界。`validation_evidence=task6-local-serial` 表示构建配置与下方有实测记录的 profile 匹配。匹配条件为原生 Darwin 27.2.0 arm64、AppleClang `21.0.0.21000401`、以 Nexora 为顶层项目的默认 Ninja Debug 或 Release、默认架构和 SDK 选择、MPI 关闭及 exact Kokkos 5.2.2 Serial，覆盖 float 和 double。通过 `add_subdirectory` 嵌入的构建不继承该验证证据；父项目的目录编译选项可能影响 Nexora，而不出现在 `CMAKE_CXX_FLAGS` 中。自定义工具链、编译或链接参数、编译器 launcher 与 IPO 属于单独的构建组合。实测源码与所用依赖制品的摘要记录在验收证据中。
 
 其他构建报告 `validated=false`，普通 `run` 会在预检后拒绝运行。启用 `BUILD_TESTING` 的构建提供 `nexora run --fixture <case>`，用于显式执行受控夹具并收集证据。普通运行在已匹配的 profile 上直接使用 `nexora run <case>`。
 
@@ -57,6 +57,8 @@ Apple M2 Pro arm64，macOS 27.2.1 build 26B131，AppleClang `21.0.0.21000401`，
 四组依赖图、安装搬迁和原有数值判据通过，CTest 无失败或跳过。搬迁后的普通 `run` 输出与私有测试驱动直接调用 `Simulation`/Reference 的输出逐字节相同。驱动使用独立固定的非二进制步长序列和 `x/q` 期望。CLI 测试还检查大绝对时间下保留请求步长、末步缩短、`real` 最大有限值，以及恰好 1,000,000 步的计划通过和超限拒绝。源树与搬迁后测试均包含带空格的 case 路径，核对三入口的文件行号、退出码及非法输入诊断。
 
 `2026-11-11T13:57:52+08:00` 至 `2026-11-11T13:58:25+08:00`，在带空格的构建路径以 `CMAKE_INSTALL_BINDIR=tools` 和自定义 `CMAKE_CXX_FLAGS=-g` 复验。测试构建报告 built/available 为 true、validated 为 false，普通 `run` 退出 2，显式 fixture 输出与直接库调用一致。关闭测试后，`--fixture` 退出 2。另于 `2026-11-11T13:59:10+08:00` 至 `2026-11-11T13:59:17+08:00` 验证匹配证据的默认 Release 构建在 `BUILD_TESTING=OFF` 时仍可普通运行，且拒绝 `--fixture`。
+
+`2026-11-26T09:52:24+08:00` 至 `2026-11-26T09:52:56+08:00`，在 Darwin 27.2.0 arm64、上述 AppleClang/CMake/Ninja 版本和本地 exact Kokkos 5.2.2 Serial Debug 包上执行嵌入构建回归。float Debug 的 `nexora_embedded_reference_profile` 为 1/1：父项目以 `add_compile_options(-ffast-math)` 将编译选项传入 `add_subdirectory` 内的 Nexora，实际 CLI 报告 `validated=false`、`validation_evidence=none`，普通 `run` 退出 2，关闭测试后的 `--fixture` 也退出 2。同一依赖的默认顶层 float Debug、`BUILD_TESTING=OFF` 构建仍报告 `validated=true`，普通 `run` 完成 3 步。该回归已列入 Serial 验证器的必执行检查；不将 fast-math 构建视为数值验证通过的 profile。
 
 Apple 链接器继续报告重排测试的重复 `libnexora_data.a` 链接，链接及执行通过。Linux GCC、Linux Clang、Windows MSVC 托管矩阵及 MPI、OpenMP、CUDA/HIP 本轮未执行。
 

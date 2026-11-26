@@ -12,7 +12,7 @@ Status EntityNamespace::validate() const {
 }
 
 Status EntityOrder::validate_input(const EntityNamespace& entity_namespace, std::size_t count) {
-    if (!Kokkos::is_initialized() || Kokkos::is_finalized())
+    if (!Kokkos::is_initialized())
         return {StatusCode::invalid_state, "entity order requires active Kokkos runtime"};
     if (auto status = entity_namespace.validate(); !status.ok())
         return status;
@@ -50,12 +50,6 @@ Result<EntityOrder> EntityOrder::create(const Kokkos::Serial& exec, EntityNamesp
     }
 }
 
-Status EntityOrder::validate_for(const EntityNamespace& entity_namespace, LayoutVersion layout) const {
-    if (namespace_ != entity_namespace || layout_ != layout)
-        return {StatusCode::invalid_state, "entity order namespace or layout is stale"};
-    return {};
-}
-
 bool EntityOrder::same_order(const EntityOrder& other) const {
     if (namespace_ != other.namespace_ || layout_ != other.layout_ || size() != other.size())
         return false;
@@ -75,79 +69,25 @@ Result<Permutation> Permutation::between(const Kokkos::Serial& exec, const Entit
         return mapping.status();
     if (from.layout() == to.layout() && !from.same_order(to))
         return Status{StatusCode::invalid_state, "changed entity order requires a different layout version"};
-    try {
-        return Permutation(from, to, std::move(mapping).value());
-    } catch (const std::bad_alloc&) {
-        return Status{StatusCode::resource_exhausted, "cannot retain permutation orders"};
-    } catch (const std::exception&) {
-        return Status{StatusCode::execution_failure, "cannot retain permutation orders"};
-    }
-}
-
-Result<Permutation> Permutation::create(const Kokkos::Serial& exec, const EntityOrder& from,
-                                        const EntityOrder& to, std::span<const LocalIndex> new_to_old,
-                                        std::span<const LocalIndex> old_to_new) {
-    if (!Kokkos::is_initialized() || Kokkos::is_finalized())
-        return Status{StatusCode::invalid_state, "permutation construction requires active Kokkos runtime"};
-    if (from.entity_namespace() != to.entity_namespace() || from.size() != to.size() ||
-        new_to_old.size() != to.size() || old_to_new.size() != from.size())
-        return Status{StatusCode::invalid_argument, "permutation namespaces or cardinalities differ"};
-    if (from.layout() == to.layout() && !from.same_order(to))
-        return Status{StatusCode::invalid_state, "changed entity order requires a different layout version"};
-    const auto bytes = checked_array_bytes(from.size(), 2 * sizeof(LocalIndex));
-    if (!bytes.ok())
-        return bytes.status();
-    for (std::size_t i = 0; i < new_to_old.size(); ++i)
-        if (!checked_local_index(new_to_old[i], from.size()).ok() ||
-            !checked_local_index(old_to_new[i], to.size()).ok())
-            return Status{StatusCode::invalid_argument, "permutation index is outside its entity order"};
-    const auto from_ids = from.ids();
-    const auto to_ids = to.ids();
-    for (std::size_t i = 0; i < new_to_old.size(); ++i) {
-        if (old_to_new[new_to_old[i]] != i || new_to_old[old_to_new[i]] != i)
-            return Status{StatusCode::invalid_argument, "permutation maps are not mutual inverses"};
-        if (to_ids(i) != from_ids(new_to_old[i]))
-            return Status{StatusCode::invalid_argument, "permutation does not preserve stable entity IDs"};
-    }
-    try {
-        Kokkos::View<LocalIndex*, Kokkos::HostSpace> forward(
-            Kokkos::view_alloc(exec, Kokkos::WithoutInitializing, "permutation.new_to_old"), from.size());
-        Kokkos::View<LocalIndex*, Kokkos::HostSpace> inverse(
-            Kokkos::view_alloc(exec, Kokkos::WithoutInitializing, "permutation.old_to_new"), from.size());
-        for (std::size_t i = 0; i < new_to_old.size(); ++i) {
-            forward(i) = new_to_old[i];
-            inverse(i) = old_to_new[i];
-        }
-        return Permutation(from, to, EntityMapping{forward, inverse});
-    } catch (const std::bad_alloc&) {
-        return Status{StatusCode::resource_exhausted, "cannot allocate permutation"};
-    } catch (const std::exception&) {
-        return Status{StatusCode::execution_failure, "cannot create permutation"};
-    }
-}
-
-Status Permutation::validate_for(const EntityOrder& from, const EntityOrder& to) const {
-    if (!from_.same_order(from) || !to_.same_order(to))
-        return {StatusCode::invalid_state, "permutation source or target entity order is stale"};
-    return {};
+    return Permutation(std::move(mapping).value());
 }
 
 Result<CsrAdjacency> CsrAdjacency::create(const Kokkos::Serial& exec, const EntityOrder& rows,
                                           const EntityOrder& columns, TopologyVersion topology,
                                           std::span<const Offset> offsets,
                                           std::span<const LocalIndex> indices) {
-    if (!Kokkos::is_initialized() || Kokkos::is_finalized())
+    if (!Kokkos::is_initialized())
         return Status{StatusCode::invalid_state, "CSR construction requires active Kokkos runtime"};
-    const auto capacity = checked_csr_capacity(rows.size(), columns.size(), indices.size());
+    const auto capacity = checked_csr_bytes(rows.size(), indices.size());
     if (!capacity.ok())
         return capacity.status();
     if (offsets.size() != rows.size() + 1 || offsets.front() != 0 || offsets.back() != indices.size())
         return Status{StatusCode::invalid_argument, "CSR offsets shape, origin, or terminal offset is invalid"};
     for (std::size_t i = 1; i < offsets.size(); ++i)
-        if (offsets[i] < offsets[i - 1] || offsets[i] > indices.size())
+        if (offsets[i] < offsets[i - 1])
             return Status{StatusCode::invalid_argument, "CSR offsets are not bounded and nondecreasing"};
     for (const auto index : indices)
-        if (!checked_local_index(index, columns.size()).ok())
+        if (index >= columns.size())
             return Status{StatusCode::invalid_argument, "CSR column index is outside the column entity order"};
     try {
         Kokkos::View<Offset*, Kokkos::HostSpace> offset_copy(
@@ -166,10 +106,61 @@ Result<CsrAdjacency> CsrAdjacency::create(const Kokkos::Serial& exec, const Enti
     }
 }
 
-Status CsrAdjacency::validate_for(const EntityOrder& rows, const EntityOrder& columns,
-                                 TopologyVersion topology) const {
-    if (topology_ != topology || !rows_.same_order(rows) || !columns_.same_order(columns))
-        return {StatusCode::invalid_state, "CSR topology or row/column order is stale"};
-    return {};
+Result<EntityOrder> EntityOrder::clone(const Kokkos::Serial& exec) const {
+    try {
+        Kokkos::View<std::uint64_t*, Kokkos::HostSpace> copy(
+            Kokkos::view_alloc(exec, Kokkos::WithoutInitializing, "entity_order.ids"), size());
+        Kokkos::deep_copy(exec, copy, ids_);
+        exec.fence("entity order clone ready");
+        return EntityOrder(namespace_, layout_, copy);
+    } catch (const std::bad_alloc&) {
+        return Status{StatusCode::resource_exhausted, "cannot allocate entity order"};
+    } catch (const std::exception&) {
+        return Status{StatusCode::execution_failure, "cannot snapshot entity order"};
+    }
+}
+
+Result<ReorderedCsr> CsrAdjacency::reorder(const Kokkos::Serial& exec,
+                                           const EntityOrder& rows, const EntityOrder& columns) const {
+    try {
+        auto row_map = Permutation::between(exec, rows_, rows);
+        if (!row_map.ok())
+            return row_map.status();
+        auto column_map = (&rows == &columns && rows_.ids().data() == columns_.ids().data() &&
+                           rows_.layout() == columns_.layout() &&
+                           rows_.entity_namespace() == columns_.entity_namespace())
+                              ? row_map : Permutation::between(exec, columns_, columns);
+        if (!column_map.ok())
+            return column_map.status();
+
+        const auto forward = row_map.value().new_to_old();
+        const auto inverse = column_map.value().old_to_new();
+        const auto old_offsets = offsets_;
+        const auto old_indices = indices_;
+        Kokkos::View<Offset*, Kokkos::HostSpace> offsets(
+            Kokkos::view_alloc(exec, Kokkos::WithoutInitializing, "csr.offsets"), offsets_.extent(0));
+        Kokkos::View<LocalIndex*, Kokkos::HostSpace> indices(
+            Kokkos::view_alloc(exec, Kokkos::WithoutInitializing, "csr.indices"), indices_.extent(0));
+        using Policy = Kokkos::RangePolicy<Kokkos::Serial, Kokkos::IndexType<std::size_t>>;
+        Kokkos::parallel_for("reorder CSR offsets", Policy(exec, 0, 1), KOKKOS_LAMBDA(std::size_t) {
+            offsets(0) = 0;
+            for (std::size_t i = 0; i < forward.extent(0); ++i) {
+                const auto row = forward(i);
+                offsets(i + 1) = offsets(i) + (old_offsets(row + 1) - old_offsets(row));
+            }
+        });
+        Kokkos::parallel_for("reorder CSR edges", Policy(exec, 0, rows.size()), KOKKOS_LAMBDA(std::size_t i) {
+            const auto row = forward(i);
+            for (Offset j = old_offsets(row); j < old_offsets(row + 1); ++j)
+                indices(offsets(i) + (j - old_offsets(row))) = inverse(old_indices(j));
+        });
+        exec.fence("reordered CSR ready");
+        return ReorderedCsr{CsrAdjacency(rows, columns, topology_, offsets, indices),
+                            std::move(row_map).value(), std::move(column_map).value()};
+    } catch (const std::bad_alloc&) {
+        return Status{StatusCode::resource_exhausted, "cannot allocate reordered CSR"};
+    } catch (const std::exception&) {
+        return Status{StatusCode::execution_failure, "cannot reorder CSR"};
+    }
 }
 } // namespace nexora::detail

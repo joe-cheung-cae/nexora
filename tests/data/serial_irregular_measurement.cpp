@@ -106,8 +106,8 @@ bool explicit_fence(std::string_view name) {
     constexpr std::array names{
         "structure initial state ready", "transport stable IDs ready for validation",
         "transport payload ready", "entity matching source ready",
-        "structure partial candidate ready", "structure candidate diagnostics ready",
-        "entity order source ready", "entity order snapshot ready", "transport receive ready",
+        "reordered CSR ready", "structure reordered fields ready",
+        "entity order source ready", "entity order snapshot ready", "entity order clone ready", "transport receive ready",
         "structure value commit ready"};
     return std::find(names.begin(), names.end(), name) != names.end();
 }
@@ -261,19 +261,22 @@ int main() {
     assert(observed.open_fences.empty() && observed.open_kernels.empty());
     assert(observed.kernel_ends == observed.kernels && observed.finalizations == 1);
     // Independent source ledger for this fixed path: create 6 + pack 2 +
-    // reorder 12 + receive 4 + commit 4 allocations. Eleven four-real arrays
-    // contribute 44*sizeof(real); ID/index/CSR arrays contribute 480 bytes,
-    // including three five-LocalIndex spans rounded from 20 to 24 by Kokkos.
-    assert(observed.allocated == 28 && observed.allocated_bytes == 480 + 44 * sizeof(real));
+    // reorder 8 + receive 4 + commit 4 allocations. Eleven four-real arrays
+    // contribute 44*sizeof(real); ID/index/CSR arrays contribute 352 bytes,
+    // including two five-LocalIndex spans rounded from 20 to 24 by Kokkos.
+    assert(observed.allocated == 24 && observed.allocated_bytes == 352 + 44 * sizeof(real));
     assert(observed.deallocated_bytes == observed.allocated_bytes);
-    // Seven four-real copies/fills plus three four-uint64 ID copies.
-    assert(observed.copies == 10 && observed.copy_bytes == 96 + 28 * sizeof(real));
-    assert(observed.explicit_fences == 15 && observed.internal_fences == 28);
+    // Seven four-real copies/fills plus two four-uint64 ID copies.
+    assert(observed.copies == 9 && observed.copy_bytes == 64 + 28 * sizeof(real));
+    assert(observed.explicit_fences == 12 && observed.internal_fences == 24);
     // Pack, two field gathers, two CSR kernels, scalar fill, receive unpack.
     assert(observed.kernels == 7);
-    // Peak: retained original + packed payload + all reorder intermediates
-    // and new bank; seven four-real arrays and 384 bytes of ID/index/CSR.
-    assert(observed.peak_bytes == 384 + 28 * sizeof(real));
+    // Receive holds the destination and both maps. Commit holds three field banks.
+    // With float their peaks tie, so receive reaches the maximum first.
+    constexpr auto receive_peak = 288 + 32 * sizeof(real);
+    constexpr auto commit_peak = 256 + 40 * sizeof(real);
+    assert(observed.peak_bytes == std::max(receive_peak, commit_peak));
+    assert(observed.peak_phase == (receive_peak >= commit_peak ? "receive" : "commit"));
     assert(observed.packed_peak == 32 + 4 * sizeof(real));
     print_report();
 }

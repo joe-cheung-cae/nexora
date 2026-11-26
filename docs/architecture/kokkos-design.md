@@ -163,9 +163,9 @@ template<class Space> struct CsrAdjacency {
 } // namespace nexora
 ```
 
-当前双向排列记录源和目标顺序。它要求同命名空间、等基数和相同稳定 ID 集合。外部给出的两张表必须逐项对应同一稳定 ID 且互为逆。本地接收复用按 ID 构造双射的检查，在各自 stamp 通过校验后允许源和目标 layout 不同。CSR 同时绑定 topology 版本及独立的行列顺序。校验关联时同时检查命名空间、layout 和有序 ID。空图 offsets 为 `[0]`。CSR 保留行内顺序，消费者负责重复边和自环的解释。
+当前 Serial 实现从源和目标顺序构造双向排列。两者必须使用同一命名空间、具有相同基数和稳定 ID 集合，且实体顺序改变时必须使用不同 layout 版本。本地接收复用按 ID 构造双射的检查，在各自 stamp 通过校验后允许源和目标 layout 不同。CSR 同时绑定 topology 版本及独立的行列顺序。空图 offsets 为 `[0]`。CSR 保留行内顺序，消费者负责重复边和自环的解释。
 
-当前私有 `StructureState` 是原子重排的首个消费者。它在只读 accepted bank 上构造并校验独立候选，再发布同一布局版本的实体顺序、字段、被动历史和 CSR。 [状态清单与验证](structure-execution-validation.md#结构状态与安全点)
+测试树的 `StructureState` 验证夹具是原子重排的首个消费者。它在只读 accepted bank 上构造并校验独立候选，再发布同一布局版本的实体顺序、字段、被动历史和 CSR。 [状态清单与验证](structure-execution-validation.md#结构状态与安全点)
 
 重排必须覆盖所有同域主状态、历史、ID、ghost owner map；邻接/contact/face 引用需重映射或重建。先验证 permutation 是双射，再在无在途写的安全点发布新布局。stable ID 不随排序改变，已删除 ID 不复用于新实体。试算中生成的临时 ID 不外发为 accepted；生成器状态属于恢复清单，诊断 operation incarnation 始终递增，避免旧句柄重新有效。
 

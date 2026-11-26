@@ -78,8 +78,8 @@ TransportView<real> pack(const Kokkos::Serial& exec, TransportPurpose purpose, c
     const auto id_storage = Kokkos::create_mirror(ids);
     Kokkos::deep_copy(value_storage, values);
     Kokkos::deep_copy(id_storage, ids);
-    auto value_issuer = take(FieldIssuer::create(value_storage, stamp));
-    auto id_issuer = take(FieldIssuer::create(id_storage, stamp));
+    auto value_issuer = take(FieldIssuer::create_at_validated_time(value_storage, stamp));
+    auto id_issuer = take(FieldIssuer::create_at_validated_time(id_storage, stamp));
     const std::array id_axes{FieldAxis{id_storage.extent(0)}};
     auto read_values = take(value_issuer.read(value_storage, descriptor, value_issuer.stamp(),
                                               {descriptor.association, descriptor.units, axes}));
@@ -110,8 +110,8 @@ TEST(TransportReceive, ValidationAndRetry) {
     const auto target_ids = make_ids(std::array<Id, 3>{29, 41, 7});
     auto target_stamp = stamp;
     target_stamp.layout = LayoutVersion{25};
-    auto target_issuer = take(FieldIssuer::create(target_values, target_stamp));
-    auto id_issuer = take(FieldIssuer::create(target_ids, target_stamp));
+    auto target_issuer = take(FieldIssuer::create_at_validated_time(target_values, target_stamp));
+    auto id_issuer = take(FieldIssuer::create_at_validated_time(target_ids, target_stamp));
     auto target = take(target_issuer.write(target_values, descriptor, target_issuer.stamp(),
                                            value_spec, FieldAccess::overwrite));
     auto ids = take(id_issuer.read(target_ids, id_field(), id_issuer.stamp(), id_spec));
@@ -163,14 +163,14 @@ TEST(TransportReceive, ValidationAndRetry) {
     const auto stale_target_ids = make_ids(std::array<Id, 3>{29, 41, 7});
     auto stale_id_stamp = target_stamp;
     stale_id_stamp.layout = LayoutVersion{26};
-    auto stale_id_issuer = take(FieldIssuer::create(stale_target_ids, stale_id_stamp));
+    auto stale_id_issuer = take(FieldIssuer::create_at_validated_time(stale_target_ids, stale_id_stamp));
     auto stale_ids = take(stale_id_issuer.read(stale_target_ids, id_field(),
                                                stale_id_issuer.stamp(), id_spec));
     ASSERT_FALSE(TransportReceiver::unpack(exec, valid, target, stale_ids, valid.stamp()).ok());
     ASSERT_NO_FATAL_FAILURE(expect_unchanged());
 
     const auto duplicate_ids = make_ids(std::array<Id, 3>{29, 41, 41});
-    auto duplicate_issuer = take(FieldIssuer::create(duplicate_ids, target_stamp));
+    auto duplicate_issuer = take(FieldIssuer::create_at_validated_time(duplicate_ids, target_stamp));
     auto duplicate = take(duplicate_issuer.read(duplicate_ids, id_field(), duplicate_issuer.stamp(),
                                                 id_spec));
     ASSERT_FALSE(TransportReceiver::unpack(exec, valid, target, duplicate, valid.stamp()).ok());
@@ -208,8 +208,8 @@ TEST(TransportReceive, GhostSubview) {
     const auto target_ids = make_ids(std::array<Id, 3>{7, 29, 41});
     const std::array target_axes{FieldAxis{2, true}, FieldAxis{3}};
     stamp.layout = LayoutVersion{26};
-    auto target_issuer = take(FieldIssuer::create(backing, stamp));
-    auto id_issuer = take(FieldIssuer::create(target_ids, stamp));
+    auto target_issuer = take(FieldIssuer::create_at_validated_time(backing, stamp));
+    auto id_issuer = take(FieldIssuer::create_at_validated_time(target_ids, stamp));
     descriptor.ownership = FieldOwnership::ghost;
     auto target = take(target_issuer.write(ghosts, descriptor, target_issuer.stamp(),
                                            {Association::particle, "m", target_axes},

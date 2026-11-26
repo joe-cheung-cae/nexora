@@ -278,16 +278,20 @@ void verify(const Snapshot& state, std::size_t clusters, std::size_t rows, std::
         rounded_sum += result;
     }
 
-    // Both double accumulation and this independent reverse sum contribute at
-    // most gamma_n each. Allow one final rounding to the configured real type.
+    // Bound the real reduction and the independent long-double reverse sum
+    // separately by gamma_n for their respective accumulation precisions.
     const long double nu = static_cast<long double>(rows - 1) *
-                           std::numeric_limits<double>::epsilon() / 2;
+                           std::numeric_limits<real>::epsilon() / 2;
+    const long double reference_nu = static_cast<long double>(rows - 1) *
+                                     std::numeric_limits<long double>::epsilon() / 2;
     const long double reference = clusters > 0
                                       ? rounded_sum
                                       : static_cast<long double>(fixture::sum_numerator) /
                                             fixture::denominator;
     const long double relative_tolerance =
-        clusters > 0 ? 2 * nu / (1 - nu) + eps : fixture::sum_epsilon * eps;
+        clusters > 0 ? (nu / (1 - nu) + reference_nu / (1 - reference_nu)) /
+                           (1 - reference_nu / (1 - reference_nu))
+                     : fixture::sum_epsilon * eps;
     check(std::abs(state.owned_density_sum - reference) <= relative_tolerance * reference,
           "unexpected SPH owned density sum");
     if (before_reorder)

@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | 1 固定基线与 CI | `tools/validate_serial.py verify` 核验本地 Kokkos 安装的 profile 与文件摘要，分构建类型和精度执行配置、构建、依赖检查、CTest、Decimal 及搬迁包测试。`nexora_install_consumer` 从空前缀安装后搬迁，另建三个消费者。 | 检查 `nexora::simulation` 的控制 API 和 `nexora::data_schema` 的纯语义消费。`nexora::data` 消费者经导出 target 获得 Kokkos 并执行算子。配置负例覆盖缺包、错版本、旧 GPU 参数、C++17、Kokkos 设备/标准/编译器不符及消费端精度冲突。编译负例检查精度宏冲突。 [Serial CI 验证](serial-ci-validation.md) · [搬迁与配置负例](../../tests/package/VerifyInstall.cmake) · [消费者与导出断言](../../tests/package/consumer/CMakeLists.txt) |
 | 2 实体顺序、双射与 CSR | `nexora_entity_topology_tests`、`nexora_field_binding_tests`、`nexora_transport_tests`、`nexora_transport_receive_tests`。 | 独立字面量核对稳定 ID、双向排列和稳定 ID 边表。覆盖分域 CSR、空图、空行、长行、重复或缺失 ID、跨域、非互逆映射、非法 offsets/列索引、旧布局与容量溢出。绑定覆盖 rank-1、两种 rank-2 轴序、`LayoutStride` subview、rank-3 和空字段。传输覆盖空 pack、两种 rank-2 轴序、跨布局 ID 对齐与 strided ghost 目标。接收负例校验目标缓冲保留原值，成功时也检查 subview 外的数据未改动。 [实体与拓扑验证](entity-topology-validation.md) · [字段绑定](../../tests/data/field_binding_tests.cpp) · [本地接收](../../tests/data/transport_receive_tests.cpp) |
-| 3 原子重排 | `nexora_structure_reorder_tests` 调用私有 participant target 中的 `StructureState`。 | 原序、重排、逆排分别按独立期望核对 ID、`x/q`、被动历史和 CSR，保留行内稳定 ID 顺序。纯重排推进 layout 并更换受影响字段的 storage incarnation，原 topology、geometry、accepted 版本和时钟继承。部分候选 gather 后及发布前的故障注入检查原 bank 及签发能力。验证旧绑定、旧顺序和旧 CSR 在新布局上失效，旧快照穿过重排、下一次值提交及状态析构仍可读。跨布局接收把重排前的 packed 快照按 ID 解包到重排后的 ghost。 [结构与执行验证](structure-execution-validation.md) · [重排测试](../../tests/data/structure_reorder_tests.cpp) |
+| 3 原子重排 | `nexora_structure_reorder_tests` 直接编译 `tests/validation/structure` 中的 `StructureState`。 | 原序、重排、逆排分别按独立期望核对 ID、`x/q`、被动历史和 CSR，保留行内稳定 ID 顺序。纯重排推进 layout 并更换受影响字段的 storage incarnation，原 topology、geometry、accepted 版本和时钟继承。实际无效输入、版本耗尽及非有限提交值检查原 bank 及签发能力。验证旧绑定拒绝新签发，旧顺序和旧 CSR 保留原布局，旧快照穿过重排、下一次值提交及状态析构仍可读。跨布局接收把重排前的 packed 快照按 ID 解包到重排后的 ghost。 [结构与执行验证](structure-execution-validation.md) · [重排测试](../../tests/data/structure_reorder_tests.cpp) |
 | 4 显式实例和字段交接 | `nexora_field_group_tests`、`nexora_transport_tests`、`nexora_transport_receive_tests`、`nexora_reference_transport_tests`、`nexora_reference_tests` 及 Decimal 检查。 | 实际 reference 算子沿传入的 Serial 实例使用 native Views，主机诊断在相关 fence 后读取。整组授权检查 managed subview 别名、重复请求、多读者、独占写、冲突时权限原样保留及相反顺序的并发申请。传输检查 caller 提前释放后两位独立消费者仍能读取，最后一次释放使值与 ID 的 owner 各销毁一次。校验不通过时保留接收目标和 accepted 状态。 [结构与执行验证](structure-execution-validation.md#reference-执行与授权) · [整组授权测试](../../tests/data/field_group_tests.cpp) · [传输保活测试](../../tests/data/transport_tests.cpp) |
 | 5 事务、历史与资源 | `nexora_reference_resource_tests`、`nexora_reference_tests`、`nexora_reference_transport_tests`、`nexora_simulation_tests`。 | begin、advance、receive、prepare 故障逐一检查 accepted 数值、ID、历史、控制、诊断、stamp、allocation identity、时钟与预算。恢复失败使 Simulation 拒绝后续试算和提交。核对连续推进与重放、旧 layout/attempt/storage incarnation 缓存拒绝、达到上限时分配次数为零、最后一个旧快照释放后同一请求重试、部分初始化回收和显式关闭后的延迟消费。 [Reference 资源验证](reference-resource-validation.md) · [故障与预算测试](../../tests/reference/reference_resource_tests.cpp) |
 | 6 应用装配 | `nexora_cli_case_suite`、`nexora_install_consumer` 内的搬迁 CLI suite，以及 `--version`、`inspect-build` 和无效命令 smoke。 | 合法 case 的 `validate`、`plan`、`run` 共用预检。检查计划的 built/available/validated、精度、布局及访问边界。`cli-nonbinary-tail.case` 的 accepted 时间、版本、步数和 `x/q` 摘要与直接调用 `Simulation`/Reference 的驱动逐字节一致。非法版本、键、数值、时间、步长、精度及执行请求返回非零，三入口的同一负例诊断一致。 [case 格式与验证](reference-case.md) · [CLI suite](../../tests/package/RunCliSuite.cmake) · [直接库调用驱动](../../tests/reference/cli_oracle.cpp) |
@@ -46,13 +46,13 @@ Apple M2 Pro arm64，12 核，16 GB，macOS 27.2.1 build 26B131，Darwin 27.2.0�
 
 四组运行 JUnit 的 19 个名称与任务 6 一致，另有 1 项搬迁包测试。四组依赖图、允许与拒绝边界自检、安装导出及负例、80 位 Decimal 判据均通过。Decimal 文件保存 16/32/64 步误差、守恒、非二进制步长及观测阶，float 和 double 的两段观测阶均在 1.009–1.020。另在带空格的 case 路径上执行搬迁后的普通 `validate`、`plan`、`run`，每项退出 0。四组 `plan` 均报告 `validated=true` 与 `validation_evidence=task6-local-serial`，普通 `run` 均完成 3 步，stdout 与直接库驱动逐字节一致。命令、退出码、输入和输出摘要见 `matrix-summary.json` 与分组日志。
 
-| 一次夹具执行 | float | double |
+| 历史一次夹具执行（2026-11-11，迁移前） | float | double |
 | --- | ---: | ---: |
 | 分配 / 释放事件 | 28 / 28 | 28 / 28 |
 | 累计分配 / 释放字节 | 656 / 656 B | 832 / 832 B |
 | `deep_copy` 次数 / 字节 | 10 / 208 B | 10 / 320 B |
 | `parallel_for` 启动 | 7 | 7 |
-| 显式 fence / Kokkos 内部释放 fence | 15 / 28 | 15 / 28 |
+| 显式 fence / Kokkos 内部释放 fence（历史测量） | 15 / 28 | 15 / 28 |
 | 重排阶段峰值在途 View 字节 | 496 B | 608 B |
 | packed View 峰值 | 48 B | 64 B |
 | finalize 后仍持有的 View 字节 | 0 B | 0 B |
@@ -122,3 +122,21 @@ git -C "$replay" apply "$patch_file"
 ```
 
 复原后可逐项与 `review-manifest.json` 的 `sha256` 及 `tested-source.json` 比对。`patch-replay.log` 保留对干净 Git archive 的实际校验和应用结果。
+
+## 测试树迁移后的结构计量
+
+`2026-11-26T14:30:30+08:00`，上述 Apple M2 Pro / AppleClang 工具链的 `build/sph-must-fix-20261126/debug-float` 与 `release-double` 显式构建并成功执行 `nexora_serial_irregular_measurement`。本次仅运行该计量目标，不替代完整 CTest 验收。结构夹具迁入测试树，删除故障注入专用 fence；CSR 直接保留传入的只读 EntityOrder，不再额外复制一份顺序。
+
+| 当前一次执行 | Debug float | Release double |
+| --- | ---: | ---: |
+| 分配 / 释放事件 | 26 / 26 | 26 / 26 |
+| 累计分配 / 释放字节 | 592 / 592 B | 768 / 768 B |
+| `deep_copy` 次数 / 字节 | 9 / 176 B | 9 / 288 B |
+| `parallel_for` 启动 / 结束 | 7 / 7 | 7 / 7 |
+| 显式 fence / 内部释放 fence | 12 / 26 | 12 / 26 |
+| 峰值在途 View 字节 / 阶段 | 432 B / reorder | 576 B / commit |
+| packed View 峰值 / 最终存活字节 | 48 B / 0 B | 64 B / 0 B |
+
+独立源码账本以 `r=sizeof(real)` 计：create 6、pack 2、reorder 10、receive 4、commit 4 次分配，共 `416+44r` 字节。七个四实数复制/填充加两个四 uint64 ID 复制给出 9 次、`64+28r` 字节。Kernel 为 pack、两次字段 gather、两次 CSR、ghost 标量填充及 unpack。十二个显式 fence 分布为 create 1、pack 2、reorder 2、receive 4、commit 3；释放 26 个分配产生 26 个 Kokkos 内部 fence，全部 begin/end 配对。
+
+重排峰值保留原 bank、新 bank、payload、双向排列及临时 CSR，为 `320+28r`。提交峰值保留三个字段 bank 和 payload，其中新旧提交 bank 共享重排后的 CSR，为 `256+40r`。实际峰值取两者最大值，因此 double 的峰值阶段是 commit。上方旧表保留历史实测记录。

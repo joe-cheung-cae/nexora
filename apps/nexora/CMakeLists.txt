@@ -15,12 +15,13 @@ if(NEXORA_ENABLE_MPI)
 endif()
 
 # The Task 6 evidence covers native Darwin 27.2.0 arm64 Serial, both real precisions,
-# and the default Ninja Debug and Release profiles. Kokkos is verified by the
-# top-level build before this application is configured.
+# and the default top-level Ninja Debug and Release profiles. The root project
+# verifies Kokkos before configuring this application.
 set(NEXORA_REFERENCE_VALIDATION_EVIDENCE "none")
 set(NEXORA_REFERENCE_TEST_FIXTURE "${BUILD_TESTING}")
 string(TOUPPER "${CMAKE_BUILD_TYPE}" reference_config)
-if(CMAKE_SYSTEM_NAME STREQUAL "Darwin"
+if(PROJECT_IS_TOP_LEVEL
+   AND CMAKE_SYSTEM_NAME STREQUAL "Darwin"
    AND CMAKE_SYSTEM_VERSION STREQUAL "27.2.0"
    AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64"
    AND CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "arm64"

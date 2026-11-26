@@ -27,7 +27,7 @@ constexpr double field_tolerance = 4 * std::numeric_limits<real>::epsilon();
 struct TankCase {
     const char* name;
     int n;
-    double h;
+    real h;
     int layers;
     double pressure_rms_pa;
     double acceleration_residual_rms_over_g;
@@ -141,17 +141,20 @@ void measure(TankCase fixture, std::ostream* csv) {
         const double pressure = pressures(row);
         const std::array ap{accelerations(row, 0), accelerations(row, 1), accelerations(row, 2)};
 
-        const double self_weight = sph::m4_weight_3d(0) / h_cubed;
+        const double normalization = 1 / (4 * std::numbers::pi * h_cubed);
+        const double self_weight = 4 * normalization;
         Moments observed{volume * self_weight, {}, center.mass * self_weight, 1};
         // Counts include self, wall sources and admitted q=2 neighbors, whose
         // spline weight and gradient are zero.
         neighbors.for_each_neighbor(row, [&](LocalIndex source_slot, double d2) {
             const auto& source = source_by_id(packed.ids(source_slot));
             const double q = std::sqrt(d2) / fixture.h;
-            const double w = sph::m4_weight_3d(q) / h_cubed;
+            const double inner = std::max(1 - q, 0.);
+            const double outer = std::max(2 - q, 0.);
+            const double w = normalization * (outer * outer * outer - 4 * inner * inner * inner);
             const double dz = double(source.position[2]) - position[2];
-            const double gradient = sph::m4_negative_radial_derivative_over_q_3d(q) /
-                                    (h_cubed * h_squared);
+            const double gradient = normalization * (3 * outer * outer - 12 * inner * inner) /
+                                    (q * h_squared);
             observed.partition += volume * w;
             observed.density += source.mass * w;
             for (int axis = 0; axis < 3; ++axis)
@@ -164,8 +167,11 @@ void measure(TankCase fixture, std::ostream* csv) {
         EXPECT_NEAR(observed.partition, expected.partition, 2e-13);
         for (int axis = 0; axis < 3; ++axis)
             EXPECT_NEAR(observed.gradient[axis], expected.gradient[axis], 2e-13);
-        EXPECT_NEAR(density, expected.density, field_tolerance * expected.density + 5e-10);
-        EXPECT_NEAR(density, observed.density, field_tolerance * observed.density);
+        // Each real kernel evaluation and each positive accumulation rounds;
+        // scale the error budget with the independently counted contributors.
+        const double density_tolerance = 32 * observed.count * std::numeric_limits<real>::epsilon();
+        EXPECT_NEAR(density, expected.density, density_tolerance * expected.density + 5e-10);
+        EXPECT_NEAR(density, observed.density, density_tolerance * observed.density);
         const double expected_pressure =
             tait_b * std::expm1(eos.gamma * std::log(density / eos.reference_density));
         EXPECT_NEAR(pressure, expected_pressure, field_tolerance * tait_b + 1e-8);
@@ -256,10 +262,10 @@ void compare_wall_sets(const sph::CellGrid& grid, const WallSet& solid, double d
     }
 }
 
-void check_shell(int n, double h, int layers) {
+void check_shell(int n, real h, int layers) {
     SCOPED_TRACE(n);
     SCOPED_TRACE(h);
-    const double dx = tank_size / n;
+    const real dx = real(tank_size) / real(n);
     EXPECT_EQ(wall_layers(h, dx), layers);
     const auto tank = make_tank(n, h);
     std::vector<Particle> all = tank.fluid;
@@ -320,7 +326,7 @@ TEST(SphHydrostaticInitial, FixedWallShellCoversNonzeroSupport) {
 
 TEST(SphHydrostaticInitial, AirSideStaysOpen) {
     constexpr int n = 6;
-    constexpr double dx = tank_size / n, h = 1.3;
+    constexpr real dx = real(tank_size) / real(n), h = real(1.3);
     const auto tank = make_tank(n, h);
     std::vector<Particle> all = tank.fluid;
     for (auto wall : tank.wall) {

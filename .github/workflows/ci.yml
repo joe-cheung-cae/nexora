@@ -110,13 +110,13 @@ jobs:
             /usr/bin/env "PATH=$PATH" "ImageVersion=${ImageVersion:-}" "$(command -v python)" tools/validate_serial.py \
             --cc "$NEXORA_CC" --cxx "$NEXORA_CXX" --config "$NEXORA_CONFIG" verify \
             --prefix "$NEXORA_DEPS/kokkos" --gtest-prefix "$NEXORA_DEPS/gtest" --work-dir "$NEXORA_RUN/build" --logs "$NEXORA_RUN/logs" \
-            --require-network-blocked
+            --precisions float double --require-network-blocked
       - name: Verify Windows Serial
         if: runner.os == 'Windows'
         shell: bash
         run: |
           python tools/validate_serial.py --cc "$NEXORA_CC" --cxx "$NEXORA_CXX" --config "$NEXORA_CONFIG" verify \
-            --prefix "$NEXORA_DEPS/kokkos" --gtest-prefix "$NEXORA_DEPS/gtest" --work-dir "$NEXORA_RUN/build" --logs "$NEXORA_RUN/logs"
+            --prefix "$NEXORA_DEPS/kokkos" --gtest-prefix "$NEXORA_DEPS/gtest" --work-dir "$NEXORA_RUN/build" --logs "$NEXORA_RUN/logs" --precisions float double
       - name: Verify the optional two-rank MPI smoke
         if: matrix.toolchain.mpi
         shell: bash

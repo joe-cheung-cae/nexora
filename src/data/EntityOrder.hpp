@@ -55,6 +55,7 @@ class EntityOrder {
             }
         }
     }
+    Result<EntityOrder> clone(const Kokkos::Serial&) const;
     id_view_type ids() const {
         return ids_;
     }
@@ -70,7 +71,6 @@ class EntityOrder {
     LayoutVersion layout() const {
         return layout_;
     }
-    Status validate_for(const EntityNamespace&, LayoutVersion) const;
     bool same_order(const EntityOrder&) const;
 
   private:

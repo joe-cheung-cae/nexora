@@ -1,6 +1,6 @@
 # Nexora 当前架构入口
 
-修订日期 `2026-11-25`。**这是唯一有效的架构入口。Kokkos Serial CPU 已实现参考状态生命周期、P1-04 字段访问与本地传输、P1-07 SPH 代表性切片，以及三维 WCSPH 的密度、压力、Velocity Verlet、恒定重力与 Adami 固定壁。完整 Phase 1 仍开放。**
+修订日期 `2026-11-26`。**这是唯一有效的架构入口。Kokkos Serial CPU 已实现参考状态生命周期、P1-04 字段访问与本地传输、P1-07 SPH 代表性切片，以及三维 WCSPH 的密度、压力、Velocity Verlet、恒定重力与 Adami 固定壁。完整 Phase 1 仍开放。**
 
 ## 1. 决策与文档效力
 
@@ -28,7 +28,7 @@ Nexora 自有数值计算和存储统一使用 Kokkos，包括默认 CPU、可�
 
 ## 2. 当前实现（源码事实）
 
-首个切片要求本地 exact Kokkos 5.2.2 Serial-only、C++20 与 CMake 3.25.2+。`data → Kokkos::kokkos` 公开传递依赖；typed View 测试和只链接 `nexora::data` 的独立安装消费者执行 Kokkos 路径。CLI 报告 Kokkos 构建元数据。早期检查见 [CPU 切片验证](kokkos-cpu-slice-validation.md)。旧 `ArrayView`、`Vec`、`Tensor`、`FieldView`、`KernelView` 和 exec 层及其导出已移除；core 保留领域值契约，数值使用 Kokkos 原生类型。`nexora::real` 默认 `float`，可由构建选项 `NEXORA_ENABLE_DOUBLE_PRECISION=ON` 切换为 `double`，并由安装配置固定；现有 reference 数值字段、参数、算子和本地传输均随 real 精度选择，字段描述符默认 dtype 与之匹配；时间仍为 double。接口与迁移说明见 [core 数据结构](core-data-structures.md)，此前旧层切换的 Serial Debug/Release 测试和安装消费结果见[切换验证](core-data-structures-validation.md)；当前字段/算子的 float/double 数值证据见[数值迁移验证](real-numerics-validation.md)。
+首个切片要求本地 exact Kokkos 5.2.2 Serial-only、C++20 与 CMake 3.25.2+。`data → Kokkos::kokkos` 公开传递依赖；typed View 测试和只链接 `nexora::data` 的独立安装消费者执行 Kokkos 路径。CLI 报告 Kokkos 构建元数据。早期检查见 [CPU 切片验证](kokkos-cpu-slice-validation.md)。旧 `ArrayView`、`Vec`、`Tensor`、`FieldView`、`KernelView` 和 exec 层及其导出已移除；core 保留领域值契约，数值使用 Kokkos 原生类型。`nexora::real` 默认 `float`，可由构建选项 `NEXORA_ENABLE_DOUBLE_PRECISION=ON` 切换为 `double`，并由安装配置固定；现有 reference 数值字段、参数、算子和本地传输均随 real 精度选择，字段描述符默认 dtype 与之匹配；仿真时钟、字段时间戳、调度步长、运动壁的周期与采样时间使用 `double`。WCSPH 的材料与运动参数、邻域几何、密度、压力、积分和工作缓冲均使用 `real`；积分前检查原始步长转换为 `real` 后仍为有限正值。接口与迁移说明见 [core 数据结构](core-data-structures.md)，此前旧层切换的 Serial Debug/Release 测试和安装消费结果见[切换验证](core-data-structures-validation.md)；当前字段/算子的 float/double 数值证据见[数值迁移验证](real-numerics-validation.md)。
 
 同步单参与者的运行入口为 `Simulation::initialize()`、`run(steps)`（或 `run(dt, count)`）和 `finalize()`。`run` 依次消费已计划的请求时长。每步由 `ParticipantIF::step` 对当前已接受约束作一次严格准入，完成全部数值和发布准备后发布状态，随后由 `Simulation` 推进时钟和计数一次。任一步失败即返回原 `Status`，保留前一成功状态和时钟，随后由调用方关闭。步长使用 `core/Time.hpp` 的 `TimeInterval::duration()`，绝对端点使用 double 加法生成。见 [Kokkos 单步契约](kokkos-design.md#7-单求解器的同步推进与状态发布)。
 
@@ -38,13 +38,13 @@ Nexora 自有数值计算和存储统一使用 Kokkos，包括默认 CPU、可�
 
 `data` 内部以只读 Kokkos Views 保存稳定实体顺序、双向排列与独立行列顺序的 CSR 邻接。本地接收复用实体 ID 双射检查。见 [实体与拓扑验证](entity-topology-validation.md)。
 
-私有 reference participant 目标包含专用 `StructureState`，以候选 bank 一次发布实体顺序、主字段、被动历史和 CSR。Reference 步进、快照和结构夹具的本地收发使用整组 allocation 授权，数值工作由选定的 Serial 实例执行。见 [状态重排与整组授权](structure-execution-validation.md)。
+测试树 `tests/validation/structure` 的专用 `StructureState` 验证夹具以候选 bank 一次发布实体顺序、主字段、被动历史和 CSR。Reference 步进、快照和结构夹具的本地收发使用整组 allocation 授权，数值工作由选定的 Serial 实例执行。见 [状态重排与整组授权](structure-execution-validation.md)。
 
 Reference 的数值步同时发布主字段、历史、控制序列、诊断与版本。只读快照和独立传输缓冲各自持票，最后一个持有者释放后回收额度。
 
-P1-07 的 Serial 验证夹具用 Simulation 运行固定 CSR 的一维 M₄ 密度与 owned 归约。逐行输出与普通 double 归约共享一次遍历。夹具 participant 负责稳定 ID、字段授权、行列重排和结果发布，跨步读者持有完整快照。私有目标 `nexora_sph_fixed_csr_fixture` 仅供一维测试及显式构建的 `nexora_sph_benchmark` 使用。[夹具源码](../../validation/sph/fixed_csr/) · [SPH Serial 验证](../../validation/sph/serial.md)
+P1-07 的 Serial 验证夹具用 Simulation 运行固定 CSR 的一维 M₄ 密度与 owned 归约。逐行输出与归约均使用配置的 `real`，共享一次遍历。夹具 participant 负责稳定 ID、字段授权、行列重排和结果发布，跨步读者持有完整快照。私有目标 `nexora_sph_fixed_csr_fixture` 仅供一维测试及显式构建的 `nexora_sph_benchmark` 使用。[夹具源码](../../validation/sph/fixed_csr/) · [SPH Serial 验证](../../validation/sph/serial.md)
 
-给定三维粒子状态可直接建立或更新 `CellGrid`，以只读 `NeighborView3D` 调用密度、压力或连续性算子。格网和版本比较按实际分配前预留受控额度。四组静水初态直接运行密度和固定壁压力算子。[格索引](../../validation/sph/cell-begin-serial.md) · [重构验收](../../validation/sph/sph-3d-refactor-serial.md)
+给定三维粒子状态可直接建立或更新 `CellGrid`，以只读 `NeighborView3D` 调用密度、压力或连续性算子。格网和版本比较按实际分配前预留受控额度。四组静水初态直接运行密度和固定壁压力算子。静水箱轨迹测试用解析剖面构造初态和核对误差，推进时按粒子的实际密度求压力。[格索引](../../validation/sph/cell-begin-serial.md) · [重构验收](../../validation/sph/sph-3d-refactor-serial.md) · [水箱验收](../../validation/sph/hydrostatic-continuity-repair.md)
 
 私有 `sph::WcsphParticipant3D` 拥有输入槽几何、owned 行表及显式初始化的四个流体字段，在一次同步步中验证并发布状态。`WcsphStep3D` 持有零至多组固定壁或规定轨迹壁、派生格网缓存和六个积分缓冲。统一固定平滑长度 h 由 `WcsphVerletParameters::smoothing_length` 给定，格宽及支持半径为 2h。两端连续性经稳定 ID 对齐后作梯形校正，压力用 Tait EOS 和 Adami 外推计算，Velocity Verlet 在两次半踢使用压力加速度和重力。本步准入使用已接受速度的声学 CFL 与各运动壁组显式限制的最小值。步末计算并发布下一步的上限。有限轨迹允许在有效的右端点发布，将可用步长设为零。轨迹回调只用于实际运动学取样。同步逐行及逐壁读取使用已提交几何和行表，驱逐格网后仍可读。步内失败释放临时资源并保留已提交的数值、行序、版本、物理时钟和上限。[WCSPH 当前生命周期](sph-3d-refactor-plan.md) · [固定壁历史对照](../../validation/sph/hydrostatic-continuity-repair.md#solver-cleanup-trajectory)
 

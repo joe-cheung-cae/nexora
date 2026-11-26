@@ -1,13 +1,14 @@
 #pragma once
 
 #include <nexora/core/Status.hpp>
+#include <nexora/core/Real.hpp>
 
 namespace nexora::sph {
 
 struct WcsphParameters {
-    double reference_density{};
-    double sound_speed{};
-    double gamma{};
+    real reference_density{};
+    real sound_speed{};
+    real gamma{};
     Status validate() const;
 };
 
@@ -17,12 +18,12 @@ class TaitEos {
     Status validate() const;
 
     // The caller validates the input density and the representability of each result.
-    double pressure(double density) const;
-    double density_from_pressure(double pressure) const;
+    real pressure(real density) const;
+    real density_from_pressure(real pressure) const;
 
   private:
     WcsphParameters parameters_;
-    double bulk_modulus_;
+    real bulk_modulus_;
 };
 
 } // namespace nexora::sph

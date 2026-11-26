@@ -109,15 +109,14 @@ Result<TimeConstraint> Participant::case_time_constraint(real lambda) {
     if (!(real{0} < lambda && lambda <= real_max)) {
         return Status{StatusCode::invalid_argument, "invalid reference initial state or lambda"};
     }
-    const double lambda_time = static_cast<double>(lambda);
     const auto stable_maximum = [&](double step) {
         if constexpr (std::is_same_v<real, float>) {
             if (static_cast<real>(step) * lambda > real{1})
                 return false;
         }
-        return step * lambda_time <= 1.0;
+        return step * lambda <= 1.0;
     };
-    double max_step = std::min(1.0 / lambda_time, static_cast<double>(real_max));
+    double max_step = std::min(1.0 / lambda, static_cast<double>(real_max));
     constexpr auto invalid_bounds = "reference lambda has no supported step bounds";
     // Rounding to real can cross the upper stability limit, especially for
     // subnormals. A predecessor in real is below the original double bound.
@@ -127,7 +126,7 @@ Result<TimeConstraint> Participant::case_time_constraint(real lambda) {
             return Status{StatusCode::invalid_argument, invalid_bounds};
     }
     const double real_min_step = static_cast<double>(std::numeric_limits<real>::denorm_min());
-    const double min_step = std::max(real_min_step, real_min_step / lambda_time);
+    const double min_step = std::max(real_min_step, real_min_step / lambda);
     // The cast and multiplication by a positive lambda are monotone. Checking
     // the real product here covers positive dt and factor at every admitted
     // duration, including subnormals. In float the double product cannot
@@ -171,8 +170,7 @@ Status Participant::initialize_at_finite_time(double t) {
         bank_ticket = std::move(bank_reservation).value();
 
         selected.emplace();
-        if (auto status = state_.initialize(t, *selected); !status.ok())
-            return status;
+        state_.initialize(t, *selected);
         auto access = claim_bank(state_.accepted_x_, state_.accepted_q_, state_.accepted_history_,
                                  state_.accepted_stamp());
         if (!access.ok())
@@ -274,10 +272,7 @@ Result<Snapshot> Participant::snapshot() const {
         auto reservation = budget_.reserve(0, 1);
         if (!reservation.ok())
             return reservation.status();
-        auto result = state_.snapshot();
-        if (!result.ok())
-            return result.status();
-        auto& out = result.value();
+        auto out = state_.snapshot();
         auto fields = detail::FieldIssuer::grant(
             request_read(accepted_access_->x, state_.accepted_x_, out.x_descriptor()),
             request_read(accepted_access_->q, state_.accepted_q_, out.q_descriptor()),
@@ -292,7 +287,7 @@ Result<Snapshot> Participant::snapshot() const {
         out.grants_ = std::make_shared<const Snapshot::Grants>(
             Snapshot::Grants{ids_budget_, accepted_budget_, std::move(reservation).value(),
                              std::move(x), std::move(q), std::move(history)});
-        return result;
+        return out;
     } catch (const std::bad_alloc&) {
         return Status{StatusCode::resource_exhausted, "reference snapshot allocation failed"};
     } catch (const std::exception& e) {

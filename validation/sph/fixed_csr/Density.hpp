@@ -21,6 +21,6 @@ struct DensityInput {
 // fields, with positive masses and neighbors within support, and owns a disjoint
 // output with one value per row. The host scalar reduction completes the gather on
 // the supplied instance before publication or discard. The owned diagnostic uses
-// ordinary double accumulation, then checks its rounded finite value against real range.
+// ordinary real accumulation and checks that the result is finite.
 Result<real> evaluate_density(const Kokkos::Serial&, const DensityInput&, const Values& output);
 } // namespace nexora::sph_fixture

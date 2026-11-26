@@ -42,7 +42,6 @@ struct StepOutputs3D {
 using FieldWrite3D = std::function<Status(const StepOutputs3D&)>;
 using BindFields3D = std::function<Status(FieldGroup3D, const FieldWrite3D&,
                                           const std::function<bool()>& evict_unused)>;
-enum class StepStage3D { initial, start, end };
 
 class WcsphStep3D {
   public:
@@ -51,6 +50,7 @@ class WcsphStep3D {
     Status initialize_state(const ParticleFields3D&, const Velocity3D::const_type&,
                             const Values::const_type&, const std::vector<SphBoundary::WallGroupInput3D>&,
                             WcsphState3D&, const BindFields3D&);
+    // ParticipantIF::step admits a finite positive duration within the published CFL/wall limit.
     Status try_step(const TimeInterval&, const WcsphState3D& current, WcsphState3D& candidate,
                     const BindFields3D&);
     void release_workspace() noexcept;
@@ -58,9 +58,6 @@ class WcsphStep3D {
   private:
     friend struct WcsphTestAccess;
     friend class WcsphParticipant3D;
-    void* observer_context_{};
-    void (*observe_)(void*, StepStage3D, const NeighborView3D&){};
-    bool observe_kinematics_{};
     using Ticket = detail::ResourceBudget::Ticket;
     template <class V> struct Buffer {
         Ticket ticket;
@@ -90,16 +87,15 @@ class WcsphStep3D {
     using WallMotions = Buffer<Kokkos::View<SphBoundary::SampledWallMotion3D*, Kokkos::HostSpace>>;
     std::vector<WallGroup> walls_;
     std::size_t wall_count_{}, moving_groups_{};
-    void capture_groups(const std::vector<SphBoundary::WallGroupInput3D>&, std::size_t fluid_count);
+    void capture_groups(const std::vector<SphBoundary::WallGroupInput3D>&);
     Ticket reserve_wall_stage(std::size_t bytes);
     WallPhases3D::non_const_type phase_storage(WcsphState3D&);
     WallMotions sample_groups(const WallPhases3D&, SphBoundary::WallMotionUse3D);
-    void set_next_step(WcsphState3D&, double largest_speed_squared) const;
+    void set_next_step(WcsphState3D&, real largest_speed_squared) const;
     bool write_wall_slot(const ParticleFields3D&, const WallMotions&, const Velocity3D& output,
                          LocalIndex slot, bool positions) const;
-    void write_wall_stage(const ParticleFields3D&, const WallMotions&, const Velocity3D& output,
-                          bool positions) const;
-    Result<SphBoundary::WallTrajectoryTime3D> wall_time(std::uint64_t particle_id, const WallPhases3D&) const;
+    void write_wall_positions(const ParticleFields3D&, const WallMotions&, const Velocity3D& output) const;
+    SphBoundary::WallTrajectoryTime3D committed_wall_time(std::uint64_t particle_id, const WallPhases3D&) const;
 
     std::unique_ptr<CellGrid> committed_grid_;
     Workspace workspace_;

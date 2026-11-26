@@ -18,7 +18,7 @@ cmake --fresh --preset cpu-debug -DKokkos_DIR="<kokkos-debug-prefix>/lib/cmake/K
 cmake --build --preset cpu-debug
 ctest --preset cpu-debug
 cmake --fresh --preset cpu-release -DKokkos_DIR="<kokkos-release-prefix>/lib/cmake/Kokkos" \
-  -DGTest_DIR="<gtest-release-prefix>/lib/cmake/GTest" -DNEXORA_ENABLE_DOUBLE_PRECISION=ON
+  -DGTest_DIR="<gtest-release-prefix>/lib/cmake/GTest"
 cmake --build --preset cpu-release
 ctest --preset cpu-release
 ```
@@ -31,7 +31,7 @@ The same CTest suite checks Reference Euler convergence, requested-duration roun
 
 The package is required offline; configuration does not download it. `nexora::data` propagates Kokkos; the new installed consumer uses only that exported Nexora target. Legacy exec exports and their bootstrap consumer have been removed. Use a clean install prefix when verifying the package: installing over an existing prefix does not remove obsolete headers or libraries. `NEXORA_GPU_BACKEND` is rejected for every value; the old native CUDA source is dormant. OpenMP and GPU profiles are future work. The `mpi-debug` preset retains an optional MPI C API smoke probe.
 
-The [Serial validation runner](docs/architecture/serial-ci-validation.md) provisions the checksum-verified archives in a separate step, then uses the local Kokkos and GoogleTest packages for the dependency check, CTest, Decimal oracle and relocated package consumer. For routine validation use float Debug and double Release. For precision, packaging or merge acceptance run both precisions with each build type. Use matching Debug and Release Kokkos packages for MSVC. The CI matrix requests all four combinations on Linux GCC, Linux Clang and Windows MSVC, with the separate MPI smoke on Linux. See the runner record for the profiles actually executed.
+The [Serial validation runner](docs/architecture/serial-ci-validation.md) provisions the checksum-verified archives in a separate step, then uses the local Kokkos and GoogleTest packages for the dependency check, CTest, Decimal oracle and relocated package consumer. Routine validation uses float Debug and Release. The 24³ hydrostatic tank acceptance is paused. Re-enable it in float Release when the high-precision SPH algorithm is introduced. Use `--precisions float double` to additionally validate double, including for precision, packaging or merge acceptance. The double trajectory executable can be run manually for comparisons. Use matching Debug and Release Kokkos packages for MSVC. CI runs both precisions on Linux GCC, Linux Clang and Windows MSVC, with a separate float MPI smoke on Linux. See the runner record for the profiles actually executed.
 
 ## API documentation
 

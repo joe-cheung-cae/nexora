@@ -91,10 +91,6 @@ Result<AllocationSize> validate_initial_fields(const Config& config, ConfigField
             return invalid(ConfigField::q, nonfinite_values);
     }
     const auto n = config.ids.size();
-    constexpr auto max = std::numeric_limits<std::size_t>::max();
-    if (n > max / sizeof(std::uint64_t) ||
-        n > (max - sizeof(std::uint64_t)) / (2 * sizeof(real)))
-        return Status{StatusCode::resource_exhausted, "reference state byte count overflow"};
     return AllocationSize{n * sizeof(std::uint64_t),
                           2 * n * sizeof(real) + sizeof(std::uint64_t)};
 }
@@ -103,13 +99,13 @@ Status State::preflight_initialize() const {
     if (phase_ != Phase::created) {
         return invalid_state("reference state already initialized");
     }
-    if (!Kokkos::is_initialized() || Kokkos::is_finalized()) {
+    if (!Kokkos::is_initialized()) {
         return invalid_state("Kokkos must be initialized by the application");
     }
     return {};
 }
 
-Status State::initialize(double time, const Kokkos::Serial& exec) {
+void State::initialize(double time, const Kokkos::Serial& exec) {
     // Participant already validated input and reserved IDs plus bank payload.
     const auto n = config_.ids.size();
     EntityIds ids(Kokkos::view_alloc(exec, Kokkos::WithoutInitializing, "reference.ids"), n);
@@ -131,7 +127,6 @@ Status State::initialize(double time, const Kokkos::Serial& exec) {
     accepted_diagnostic_ = config_.history_seed + config_.control_seed.sequence;
     time_ = time;
     phase_ = Phase::initialized;
-    return {};
 }
 
 void State::finish_initialization() noexcept {
@@ -156,8 +151,6 @@ FieldStamp State::accepted_stamp() const noexcept {
 }
 
 Result<std::size_t> State::preflight_step(const TimeInterval& i) const {
-    if (phase_ != Phase::initialized)
-        return invalid_state("step requires initialized reference state");
     if (i.begin != time_)
         return invalid_argument("invalid reference time interval");
     if (version_ == std::numeric_limits<std::uint64_t>::max())
@@ -217,10 +210,7 @@ FieldDescriptor State::history_descriptor(FieldAccess access) {
     return descriptor;
 }
 
-Result<Snapshot> State::snapshot() const {
-    if (phase_ == Phase::created || phase_ == Phase::finalized) {
-        return invalid_state("reference snapshot requires initialized state");
-    }
+Snapshot State::snapshot() const {
     Snapshot out;
     out.ids = ids_;
     out.history = accepted_history_;

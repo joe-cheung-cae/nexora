@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <nexora/core/Types.hpp>
 #include <vector>
 
 namespace nexora::sph_fixture {
@@ -9,7 +10,7 @@ namespace nexora::sph_fixture {
 // Transcribed from validation/baselines/sph-density-1d-v1.json.
 inline constexpr std::array<std::uint64_t, 5> row_ids{10, 30, 20, 40, 50};
 inline constexpr std::array<std::uint64_t, 6> column_ids{10, 30, 20, 40, 50, 60};
-inline constexpr std::array positions{0.0, 0.5, 1.5, 2.0, 5.0, 2.5};
+inline constexpr std::array<real, 6> positions{0, .5, 1.5, 2, 5, 2.5};
 inline constexpr std::array masses{1, 2, 3, 4, 5, 6};
 inline constexpr std::array<std::uint8_t, 6> ghost{0, 0, 0, 0, 0, 1};
 inline constexpr std::array<std::uint8_t, 6> boundary{0, 0, 0, 1, 0, 0};

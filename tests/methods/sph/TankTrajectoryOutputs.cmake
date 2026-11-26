@@ -1,0 +1,46 @@
+string(RANDOM LENGTH 12 suffix)
+set(work "${scratch}/tank-trajectory-${suffix}")
+set(partial "${work}/partial")
+file(MAKE_DIRECTORY "${partial}")
+file(WRITE "${partial}/crossings.csv" "previous crossings\n")
+execute_process(COMMAND "${trajectory}" 6 "${partial}"
+    RESULT_VARIABLE result ERROR_VARIABLE error)
+file(READ "${partial}/crossings.csv" contents)
+file(GLOB entries RELATIVE "${partial}" "${partial}/*")
+if(NOT result STREQUAL "1" OR NOT error MATCHES "output already exists"
+        OR NOT contents STREQUAL "previous crossings\n" OR NOT entries STREQUAL "crossings.csv")
+    message(FATAL_ERROR "Partial output was not preserved (exit ${result}, entries ${entries}): ${error}")
+endif()
+
+set(fresh "${work}/fresh")
+file(MAKE_DIRECTORY "${fresh}")
+file(WRITE "${fresh}/run.log" "replay wrapper log\n")
+# execute_process starts pipelined commands concurrently.
+execute_process(COMMAND "${trajectory}" 6 "${fresh}"
+    COMMAND "${trajectory}" 6 "${fresh}"
+    RESULTS_VARIABLE results ERROR_VARIABLE errors)
+list(SORT results)
+if(NOT results STREQUAL "0;1" OR NOT errors MATCHES "output (is already reserved|already exists)")
+    message(FATAL_ERROR "Expected one concurrent writer (exits ${results}): ${errors}")
+endif()
+
+set(csv_files steps.csv frames.csv profiles.csv crossings.csv)
+foreach(csv IN LISTS csv_files)
+    file(SHA256 "${fresh}/${csv}" "digest_${csv}")
+endforeach()
+execute_process(COMMAND "${trajectory}" 6 "${fresh}"
+    RESULT_VARIABLE result ERROR_VARIABLE error)
+if(NOT result STREQUAL "1" OR NOT error MATCHES "output already exists")
+    message(FATAL_ERROR "Expected refusal to overwrite completed output (exit ${result}): ${error}")
+endif()
+foreach(csv IN LISTS csv_files)
+    file(SHA256 "${fresh}/${csv}" digest)
+    if(NOT digest STREQUAL "${digest_${csv}}")
+        message(FATAL_ERROR "Completed output changed: ${csv}")
+    endif()
+endforeach()
+file(READ "${fresh}/run.log" contents)
+if(NOT contents STREQUAL "replay wrapper log\n")
+    message(FATAL_ERROR "The replay wrapper log changed")
+endif()
+file(REMOVE_RECURSE "${work}")

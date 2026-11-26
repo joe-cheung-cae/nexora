@@ -115,7 +115,7 @@ class State {
     enum class Phase { created, initialized, finalized };
     Status preflight_initialize() const;
     Result<std::size_t> preflight_step(const TimeInterval& interval) const;
-    Status initialize(double time, const Kokkos::Serial& exec);
+    void initialize(double time, const Kokkos::Serial& exec);
     void cancel_initialization() noexcept;
     void finish_initialization() noexcept;
     static Status evaluate(const Kokkos::Serial& exec, real factor,
@@ -123,7 +123,7 @@ class State {
                            const Values& next_x, const Values& next_q,
                            const History& history, std::uint64_t sequence);
     Status finalize();
-    Result<Snapshot> snapshot() const;
+    Snapshot snapshot() const;
     static FieldDescriptor field_descriptor(Field field, FieldAccess access);
     static FieldDescriptor history_descriptor(FieldAccess access);
     FieldStamp accepted_stamp() const noexcept;

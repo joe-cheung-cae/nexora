@@ -31,7 +31,7 @@ TEST(SphAdamiWall, InitialAdamiFieldsAndAcousticBoundScaleWithSmoothingLength) {
         const sph::FixedWallParticles3D boundary{wall.position, wall.mass, wall.ids};
         sph::Velocity3D velocity("test.h_scaled_velocity", 2);
         velocity(0, 0) = 1;
-        const sph::WcsphVerletParameters parameters{{.5, 3, 1}, .25, {-.125 / h, 0, 0}, h};
+        const sph::WcsphVerletParameters parameters{{.5, 3, 1}, .25, {real{-.125} / h, 0, 0}, h};
         sph::Values density("test.scaled_physical_density", 2);
         density(0) = fluid.mass(0) / volume;
         density(1) = fluid.mass(1) / volume;
@@ -60,8 +60,8 @@ TEST(SphAdamiWall, InitialAdamiFieldsAndAcousticBoundScaleWithSmoothingLength) {
 TEST(SphAdamiWall, GravityOnlyMatchesFreeFall) {
     Fields fluid({{{0, 0, 0}, 1, 41, 0}});
     sph::Velocity3D velocity("wall_test.initial_velocity", 1);
-    const std::array<double, 3> gravity{1, -2, -4};
-    const std::array<double, 3> initial_velocity{2, 1, -1};
+    const std::array<real, 3> gravity{1, -2, -4};
+    const std::array<real, 3> initial_velocity{2, 1, -1};
     for (int axis = 0; axis < 3; ++axis)
         velocity(0, axis) = static_cast<real>(initial_velocity[axis]);
     sph::WcsphParticipant3D participant(fluid.get(), 512, {{1, 2, 2}, .8, gravity}, velocity, fluid.mass);
@@ -95,7 +95,7 @@ struct WallForceReference {
 WallForceReference independent_wall_forces(
     const std::vector<Particle>& particles, const std::map<std::uint64_t, real>& density,
     const sph::WcsphVerletParameters& parameters,
-    const std::array<double, 3>& wall_acceleration = {}) {
+    const std::array<real, 3>& wall_acceleration = {}) {
     constexpr long double pi = std::numbers::pi_v<long double>;
     const long double rho0 = parameters.eos.reference_density;
     const long double gamma = parameters.eos.gamma;
@@ -204,7 +204,7 @@ TEST(SphAdamiWall, WallPressureAndForcesMatchIndependentReference) {
     particles.push_back(wall);
     const sph::WcsphVerletParameters parameters{{1, 2, 3}, .75, {-.25, .125, -.375}, 1.25};
     const sph::TaitEos eos(parameters.eos);
-    const std::array<double, 3> fixed_acceleration{};
+    const std::array<real, 3> fixed_acceleration{};
     const Kokkos::Serial exec;
     const auto grid = checked(sph::CellGrid::build(exec, Fields(particles).get(), 64, {},
                                                    parameters.smoothing_length));
@@ -243,7 +243,7 @@ TEST(SphAdamiWall, WallPressureAndForcesMatchIndependentReference) {
                                                        parameters.gravity, eos);
         ASSERT_TRUE(coefficient.has_value());
         EXPECT_NEAR(raw, reference.wall_pressure.at(wall.id),
-                    32 * std::numeric_limits<double>::epsilon());
+                    32 * std::numeric_limits<real>::epsilon());
         EXPECT_NEAR(*coefficient, reference.coefficient.at(wall.id),
                     16 * std::numeric_limits<real>::epsilon());
 
@@ -263,7 +263,7 @@ TEST(SphAdamiWall, AcceleratedWallPressureAndForcesMatchIndependentHead) {
         {{.25, .375, .5}, 4, 99, 1}};
     const std::map<std::uint64_t, real> density{{20, real{1.25}}, {40, real{1.125}}};
     const sph::WcsphVerletParameters parameters{{1, 2, 3}, .75, {-.25, .125, -.375}, 1.25};
-    const std::array<double, 3> wall_acceleration{1.5, -1, .5};
+    const std::array<real, 3> wall_acceleration{1.5, -1, .5};
     const auto expected = independent_wall_forces(particles, density, parameters, wall_acceleration);
     const auto stationary = independent_wall_forces(particles, density, parameters);
     EXPECT_GT(std::abs(expected.wall_pressure.at(99) - stationary.wall_pressure.at(99)), .1);
@@ -296,7 +296,7 @@ TEST(SphAdamiWall, AcceleratedWallPressureAndForcesMatchIndependentHead) {
     const auto coefficient = sph::wall_coefficient(query, wall_slot, row_of_slot, rho, fluid_pressure,
                                                    wall_acceleration, parameters.gravity, eos);
     ASSERT_TRUE(coefficient.has_value());
-    EXPECT_NEAR(raw, expected.wall_pressure.at(99), 64 * std::numeric_limits<double>::epsilon());
+    EXPECT_NEAR(raw, expected.wall_pressure.at(99), 64 * std::numeric_limits<real>::epsilon());
     EXPECT_NEAR(*coefficient, expected.coefficient.at(99), 32 * std::numeric_limits<real>::epsilon());
 
     sph::WallAcceleration3D wall_a("moving_wall_test.acceleration", 3);
@@ -336,7 +336,6 @@ TEST(SphAdamiWall, StandaloneWallAccelerationMayOverlapAccelerationButNotPressur
                 std::numeric_limits<real>::epsilon());
     EXPECT_EQ(acceleration(0, 1), 0);
     EXPECT_EQ(acceleration(0, 2), 0);
-#if NEXORA_ENABLE_DOUBLE_PRECISION
     const real expected_ax = acceleration(0, 0);
     const sph::Values shared_pressure(&wall_a(wall, 0), 1);
     EXPECT_EQ(evaluate(shared_pressure, acceleration).code(), StatusCode::invalid_argument);
@@ -347,7 +346,6 @@ TEST(SphAdamiWall, StandaloneWallAccelerationMayOverlapAccelerationButNotPressur
     ASSERT_TRUE(evaluate(pressure, shared_acceleration).ok());
     for (int axis = 0; axis < 3; ++axis)
         EXPECT_EQ(shared_acceleration(0, axis), acceleration(0, axis));
-#endif
 }
 
 TEST(SphAdamiWall, FixedSourcesMatchIndependentWallForcesAcrossSteps) {

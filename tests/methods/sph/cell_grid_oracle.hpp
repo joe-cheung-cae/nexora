@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <map>
 #include <methods/sph/neighbors/CellGrid.hpp>
+#include <methods/sph/Density3D.hpp>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -46,42 +47,32 @@ template <class T> T checked(Result<T> result) {
     return std::move(result).value();
 }
 
+inline sph::Values density_values(const Kokkos::Serial& exec, const sph::NeighborView3D& grid) {
+    sph::Values values(Kokkos::view_alloc(exec, Kokkos::WithoutInitializing, "test.density"),
+                       grid.owned_slots().extent(0));
+    if (auto status = sph::evaluate_density_3d(exec, grid, values); !status.ok())
+        throw std::runtime_error(status.message());
+    return values;
+}
+
 // This oracle uses only source particles and an all-pairs scan, never cell keys,
 // packed slot ranges, or the production neighbor enumerator to construct CSR.
-// Membership requires exact component distances <=2 followed by the public
-// binary64 squared-distance <=4 contract. Diagonal classification is not exact-real.
+// Rounded ties spanning two cells are covered separately by explicit neighbor IDs.
 struct Oracle {
     std::vector<std::size_t> offsets{0};
     std::vector<std::uint64_t> ids;
     std::map<std::uint64_t, long double> density;
     std::map<std::uint64_t, std::size_t> row_by_id;
 };
-// Independent error-free TwoDiff: the rounded difference plus residual is
-// the exact component distance of the two binary64 source coordinates.
-// Ordinary cutoff neighbors such as nextafter(2, 0) and 4 can subtract to 2
-// after rounding even though their exact distance exceeds the support radius.
-inline bool exact_component_support(real first, real second) {
-    const double high = std::max(double(first), double(second));
-    const double low = std::min(double(first), double(second));
-    const double difference = high - low;
-    if (difference != 2.0)
-        return difference < 2.0;
-    const double virtual_low = high - difference;
-    const double virtual_high = difference + virtual_low;
-    const double low_roundoff = virtual_low - low;
-    const double high_roundoff = high - virtual_high;
-    const double residual = high_roundoff + low_roundoff;
-    return residual <= 0;
-}
 inline Oracle explicit_csr(const std::vector<Particle>& input) {
     Oracle oracle;
     std::map<std::uint64_t, const Particle*> by_id;
     for (const auto& particle : input)
         by_id.emplace(particle.id, &particle);
-    const auto distance_squared = [](const Particle& a, const Particle& b) {
-        double sum = 0;
+    const auto distance_squared = [](const Particle& a, const Particle& b, auto sum) {
+        using Scalar = decltype(sum);
         for (int k = 0; k < 3; ++k) {
-            const double d = double(a.position[k]) - double(b.position[k]);
+            const Scalar d = Scalar(a.position[k]) - Scalar(b.position[k]);
             sum = std::fma(d, d, sum);
         }
         return sum;
@@ -93,11 +84,7 @@ inline Oracle explicit_csr(const std::vector<Particle>& input) {
         oracle.row_by_id.emplace(owned.id, oracle.offsets.size() - 1);
         std::vector<std::uint64_t> neighbors;
         for (const auto& source : input) {
-            bool component_support = true;
-            for (int axis = 0; axis < 3; ++axis)
-                component_support &=
-                    exact_component_support(owned.position[axis], source.position[axis]);
-            if (source.id != owned.id && component_support && distance_squared(owned, source) <= 4)
+            if (source.id != owned.id && distance_squared(owned, source, real{0}) <= 4)
                 neighbors.push_back(source.id);
         }
         std::sort(neighbors.begin(), neighbors.end());
@@ -108,8 +95,7 @@ inline Oracle explicit_csr(const std::vector<Particle>& input) {
         for (std::size_t edge = oracle.offsets[oracle.offsets.size() - 2];
              edge < oracle.offsets.back(); ++edge) {
             const auto& source = *by_id.at(oracle.ids[edge]);
-            const long double q =
-                std::sqrt(static_cast<long double>(distance_squared(owned, source)));
+            const long double q = std::sqrt(distance_squared(owned, source, 0.0L));
             // Independent truncated-power cubic, equivalent to the 3D M4 spline.
             const auto cube = [](long double v) { return v * v * v; };
             const long double weight =

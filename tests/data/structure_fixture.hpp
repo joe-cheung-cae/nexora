@@ -6,7 +6,7 @@
 #include <cmath>
 #include <data/CsrAdjacency.hpp>
 #include <data/FieldIssuer.hpp>
-#include <participants/reference/StructureState.hpp>
+#include <validation/structure/StructureState.hpp>
 #include <data/TransportBuilder.hpp>
 #include <data/TransportReceiver.hpp>
 #include <limits>
@@ -100,7 +100,9 @@ inline void expect_bank(const Bank& bank, bool reordered, bool committed = false
             NEXORA_FIXTURE_CHECK(bank.order.ids()(row) == (reordered ? ne : oe)[edge][0]);
             NEXORA_FIXTURE_CHECK(bank.order.ids()(bank.adjacency.indices()(k)) == (reordered ? ne : oe)[edge][1]);
         }
-    NEXORA_FIXTURE_CHECK(bank.adjacency.validate_for(bank.order, bank.order, bank.logical.topology).ok());
+    NEXORA_FIXTURE_CHECK(bank.adjacency.rows().same_order(bank.order));
+    NEXORA_FIXTURE_CHECK(bank.adjacency.columns().same_order(bank.order));
+    NEXORA_FIXTURE_CHECK(bank.adjacency.topology() == bank.logical.topology);
     auto check_stamp = [&](const FieldStamp& field) {
         auto logical = field;
         NEXORA_FIXTURE_CHECK(logical.storage_incarnation != 0);
@@ -130,10 +132,10 @@ inline void receive_reordered(const Kokkos::Serial& exec, const TransportView<re
     Kokkos::deep_copy(exec, values, real{-999});
     auto stamp = target.logical;
     stamp.accepted = false;
-    auto value_issuer = require(FieldIssuer::create(values, stamp));
+    auto value_issuer = require(FieldIssuer::create_at_validated_time(values, stamp));
     auto ids = require(EntityOrder::copy_from(exec, target.order.entity_namespace(), stamp.layout,
                                               target.order.ids()));
-    auto id_issuer = require(FieldIssuer::create(ids.ids(), stamp));
+    auto id_issuer = require(FieldIssuer::create_at_validated_time(ids.ids(), stamp));
     auto field = descriptor(3);
     field.ownership = FieldOwnership::ghost;
     field.access = FieldAccess::overwrite;

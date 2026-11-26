@@ -126,7 +126,7 @@ CMAKE
     cmake -S "$probe" -B "$probe/build" -G Ninja
     python tools/validate_serial.py --cc "$NEXORA_CC" --cxx "$NEXORA_CXX" --config Release verify \
         --prefix "$NEXORA_DEPS/kokkos" --gtest-prefix "$NEXORA_DEPS/gtest" \
-        --work-dir "$run/build" --logs "$run/logs" --require-network-blocked
+        --work-dir "$run/build" --logs "$run/logs" --precisions float double --require-network-blocked
     grep -Fx 'NEXORA_BUILD_DOCS:BOOL=OFF' "$run/build/release-float/CMakeCache.txt"
     local result=0
     cmake -S . -B "$run/docs-missing" -G Ninja -DCMAKE_BUILD_TYPE=Release \

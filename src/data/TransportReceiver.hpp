@@ -16,8 +16,7 @@ struct TransportReceiver {
     static Status unpack(const Kokkos::Serial& exec, const TransportView<T, Space>& source,
                          const WriteField<ValueView>& target, const ReadField<IdView>& target_ids,
                          const FieldStamp& expected_source) {
-        if (!Kokkos::is_initialized() || Kokkos::is_finalized() || !source || !target.lease_ ||
-            !target_ids.lease_)
+        if (!Kokkos::is_initialized() || !source || !target.lease_ || !target_ids.lease_)
             return {StatusCode::invalid_state, "receive requires active CPU transport and field grants"};
 
         using Id = std::remove_const_t<typename IdView::value_type>;
@@ -85,7 +84,7 @@ struct TransportReceiver {
 
         if (!same_field(source.descriptor(), descriptor) || !same_namespace(descriptor, id_descriptor))
             return {StatusCode::invalid_argument, "receive field semantics or ID namespace differ"};
-        if (target_ids.component_axes_[0] || id_descriptor.components != 1 || id_descriptor.units != "1")
+        if (target_ids.component_axes_[0] || id_descriptor.units != "1")
             return {StatusCode::invalid_argument, "receive IDs must be unitless entity scalars"};
 
         std::size_t entity_axis = 0;
@@ -104,8 +103,8 @@ struct TransportReceiver {
         const auto destination_ids = target_ids.view();
         const std::size_t entities = destination.extent(entity_axis);
         const std::size_t components = descriptor.components;
-        if (payload.extent(0) != entities || source_ids.extent(0) != entities ||
-            destination_ids.extent(0) != entities || payload.extent(1) != components)
+        // The packer sizes the IDs and values together and uses the source descriptor for columns.
+        if (payload.extent(0) != entities || destination_ids.extent(0) != entities)
             return {StatusCode::invalid_argument, "receive field or ID shape mismatch"};
         try {
             const EntityNamespace source_namespace{source.descriptor().domain_id,

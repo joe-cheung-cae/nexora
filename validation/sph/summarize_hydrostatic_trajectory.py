@@ -65,7 +65,7 @@ def moments(particles):
     )
 
 
-def sample_frames(path, steps, n):
+def sample_frames(path, steps, n, precision="double"):
     profiles = {}
     samples = {}
     masses_by_id = {}
@@ -85,6 +85,7 @@ def sample_frames(path, steps, n):
             require(int(row["n"]) == n, f"{path}: wrong resolution")
             require(float(row["time"]) == time, f"{path}: frame time differs from step {step}")
             pid = int(row["id"])
+            require(1 <= pid <= n**3, f"{path}: invalid particle ID {pid}")
             require(pid not in seen, f"{path}: duplicate particle ID {pid} at step {step}")
             seen.add(pid)
             if int(row["crossed"]):
@@ -94,13 +95,28 @@ def sample_frames(path, steps, n):
             require(p["density"] > 0 and p["mass"] > 0, f"{path}: nonpositive density or mass")
             p["reference"] = reference_pressure(p["z"])
             if step == 0:
+                expected_z = ((pid - 1) // (n * n) + .5) * DEPTH / n
+                if precision == "float":
+                    require(math.isclose(p["z"], expected_z, rel_tol=2 * 2**-23),
+                            f"{path}: initial height for ID {pid}")
+                else:
+                    compare(p["z"], expected_z, f"{path}: initial height for ID {pid}")
                 density = RHO0 * (
                     1 + (GAMMA - 1) * GRAVITY * (DEPTH - p["z"]) / SOUND_SPEED**2
                 )**(1 / (GAMMA - 1))
-                compare(p["mass"], density * (DEPTH / n)**3, f"{path}: initial mass")
+                expected_mass = density * (DEPTH / n)**3
+                # The input formula performs several operations in the selected
+                # precision; compare independently to the analytic mass within
+                # their rounding budget, retaining the historic double check.
+                if precision == "float":
+                    require(math.isclose(p["mass"], expected_mass, rel_tol=8 * 2**-23),
+                            f"{path}: initial mass for ID {pid}: {p['mass']:.17g} vs {expected_mass:.17g}")
+                else:
+                    compare(p["mass"], expected_mass, f"{path}: initial mass")
                 masses_by_id[pid] = p["mass"]
             else:
-                compare(p["mass"], masses_by_id[pid], f"{path}: mass change for ID {pid}")
+                require(pid in masses_by_id and p["mass"] == masses_by_id[pid],
+                        f"{path}: mass change or unknown ID {pid}")
             particles.append(p)
             if all(0 <= p[axis] <= DEPTH for axis in ("x", "y", "z")):
                 bins[min(int(p["z"]), DEPTH - 1)].append(p)
@@ -193,9 +209,9 @@ def read_steps(path, n):
     return steps
 
 
-def summarize(directory, n):
+def summarize(directory, n, precision="double"):
     steps = read_steps(directory / "steps.csv", n)
-    profiles, samples, ids, marked = sample_frames(directory / "frames.csv", steps, n)
+    profiles, samples, ids, marked = sample_frames(directory / "frames.csv", steps, n, precision)
     expected_rows = {(step, layer) for step in profiles for layer in range(DEPTH)}
     for row in read_rows(directory / "profiles.csv"):
         step, layer = int(row["step"]), int(row["bin"])
@@ -245,20 +261,44 @@ def write_csv(path, rows):
         writer.writerows(rows)
 
 
+def target_flags(summary, crossings):
+    """Original tank limits; speed covers every accepted step, not just saved frames."""
+    pressure = summary["final_in_tank_pressure_rms_error_pa"]
+    union = next(row for row in crossings if row["face"] == "any")
+    return dict(
+        pressure_pass=pressure is not None and pressure <= .05 * RHO0 * GRAVITY * DEPTH,
+        speed_pass=summary["peak_speed_rms_m_s"] <= .01 * math.sqrt(GRAVITY * DEPTH),
+        crossing_pass=union["event_count"] == 0,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("--output-dir", type=Path, default=Path(__file__).resolve().parent)
     parser.add_argument("--resolutions", type=int, nargs="+", default=[6, 12, 24])
+    parser.add_argument("--precision", choices=("float", "double"), default="float",
+                        help="precision used to generate the trajectory (default: float; use double for historic inputs)")
+    parser.add_argument("--require-targets", action="store_true",
+                        help="require full cohorts, the final time, and the original physical targets")
     args = parser.parse_args()
     summaries, profiles, crossings = [], [], []
+    failures = []
     for n in args.resolutions:
-        summary, profile, faces = summarize(args.run_dir / f"n{n}", n)
+        summary, profile, faces = summarize(args.run_dir / f"n{n}", n, args.precision)
+        if args.require_targets:
+            flags = target_flags(summary, faces)
+            flags["cohort_pass"] = summary["final_in_tank_particle_count"] == n**3
+            flags["end_time_pass"] = summary["end_time_s"] == FRAME_TIMES[-1]
+            failures.extend(f"n{n}: {name}" for name, passed in flags.items() if not passed)
+            summary.update(flags)
         summaries.append(summary)
         profiles.extend(profile)
         crossings.extend(faces)
     for name, rows in (("summary", summaries), ("profiles", profiles), ("crossings", crossings)):
         write_csv(args.output_dir / f"hydrostatic-trajectory-{name}.csv", rows)
+    if failures:
+        raise SystemExit("Hydrostatic acceptance failed: " + ", ".join(failures))
 
 
 if __name__ == "__main__":

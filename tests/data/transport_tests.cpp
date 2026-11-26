@@ -107,7 +107,12 @@ TEST(Transport, ExternalValidation) {
     const auto descriptor = field(FieldOwnership::external);
     auto invalid_stamp = trial_stamp();
     invalid_stamp.valid_until = 0.0;
-    ASSERT_FALSE(External::create(base, 3, 2, bytes, owner, invalid_stamp).ok());
+    EXPECT_EQ(External::create(base, 3, 2, bytes, owner, invalid_stamp).status().code(),
+              StatusCode::invalid_argument);
+    invalid_stamp = trial_stamp();
+    invalid_stamp.time.physical_time = std::numeric_limits<double>::infinity();
+    EXPECT_EQ(External::create(base, 3, 2, bytes, owner, invalid_stamp).status().code(),
+              StatusCode::invalid_argument);
 
     auto imported = take(External::create(base, 3, 2, bytes, owner, trial_stamp()));
     ASSERT_TRUE(External::create(base, 3, 2, bytes, owner, trial_stamp()).status().code() ==
@@ -156,16 +161,16 @@ TEST(Transport, ManagedExternalOverlap) {
     auto* const data = storage->data();
     const std::shared_ptr<const void> alias(storage, data);
     {
-        auto managed = take(FieldIssuer::create(*storage, trial_stamp()));
+        auto managed = take(FieldIssuer::create_at_validated_time(*storage, trial_stamp()));
         ASSERT_TRUE(!ExternalField<real>::create(data, 4, 1, 4 * sizeof(real), alias,
                                               trial_stamp()).ok());
     }
     {
         auto external = take(ExternalField<real>::create(data, 4, 1, 4 * sizeof(real), alias,
                                                            trial_stamp()));
-        ASSERT_FALSE(FieldIssuer::create(*storage, trial_stamp()).ok());
+        ASSERT_FALSE(FieldIssuer::create_at_validated_time(*storage, trial_stamp()).ok());
     }
-    ASSERT_TRUE(FieldIssuer::create(*storage, trial_stamp()).ok());
+    ASSERT_TRUE(FieldIssuer::create_at_validated_time(*storage, trial_stamp()).ok());
 }
 
 TEST(Transport, ConsumerCompletion) {
@@ -279,8 +284,8 @@ TEST(Transport, PackComponents) {
     }
     const std::array values_axes{FieldAxis{2, true}, FieldAxis{3}};
     const std::array id_axes{FieldAxis{3}};
-    auto values_issuer = take(FieldIssuer::create(values, trial_stamp()));
-    auto ids_issuer = take(FieldIssuer::create(ids, trial_stamp()));
+    auto values_issuer = take(FieldIssuer::create_at_validated_time(values, trial_stamp()));
+    auto ids_issuer = take(FieldIssuer::create_at_validated_time(ids, trial_stamp()));
     auto packed = take(TransportBuilder::prepare(
         exec, TransportPurpose::coupling,
         take(values_issuer.read(values, field(FieldOwnership::owned, 2), values_issuer.stamp(),
@@ -314,8 +319,8 @@ TEST(Transport, PrepareRejectionAndRetry) {
     const FieldBindingSpec value_spec{Association::particle, "m", axes};
     const FieldBindingSpec ids_spec{Association::particle, "1", axes};
     const auto descriptor = field();
-    auto values_issuer = take(FieldIssuer::create(values, trial_stamp()));
-    auto short_issuer = take(FieldIssuer::create(short_ids, trial_stamp()));
+    auto values_issuer = take(FieldIssuer::create_at_validated_time(values, trial_stamp()));
+    auto short_issuer = take(FieldIssuer::create_at_validated_time(short_ids, trial_stamp()));
 
     auto with_ids = [&](const FieldIssuer& issuer, FieldDescriptor ids_descriptor,
                         TransportPurpose purpose = TransportPurpose::coupling) {
@@ -327,11 +332,11 @@ TEST(Transport, PrepareRejectionAndRetry) {
     {
         auto different_layout = trial_stamp();
         different_layout.layout = LayoutVersion{1};
-        auto stale_issuer = take(FieldIssuer::create(ids, different_layout));
+        auto stale_issuer = take(FieldIssuer::create_at_validated_time(ids, different_layout));
         ASSERT_FALSE(with_ids(stale_issuer, id_field()).ok());
     }
 
-    auto ids_issuer = take(FieldIssuer::create(ids, trial_stamp()));
+    auto ids_issuer = take(FieldIssuer::create_at_validated_time(ids, trial_stamp()));
     ASSERT_FALSE(with_ids(ids_issuer, id_field(), static_cast<TransportPurpose>(255)).ok());
     auto foreign_ids = id_field();
     foreign_ids.entity_set = "foreign particles";
@@ -366,7 +371,7 @@ TEST(Transport, EmptyTransport) {
     auto values = take(ExternalField<real>::create(backing.get(), 0, 1, sizeof(real), backing,
                                                      trial_stamp()));
     Kokkos::View<Id*, Kokkos::Serial> ids("empty ids", 0);
-    auto ids_issuer = take(FieldIssuer::create(ids, trial_stamp()));
+    auto ids_issuer = take(FieldIssuer::create_at_validated_time(ids, trial_stamp()));
     const std::array axes{FieldAxis{0}};
     auto empty = take(TransportBuilder::prepare(
         exec, TransportPurpose::coupling,

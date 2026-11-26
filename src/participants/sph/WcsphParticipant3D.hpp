@@ -96,9 +96,6 @@ class WcsphParticipant3D final : public ParticipantIF {
     std::unique_ptr<WcsphState3D> accepted_;
     bool finalized_{};
     mutable bool active_{};
-    void* observer_context_{};
-    void (*observe_)(void*, StepStage3D, const NeighborView3D&){};
-    bool observe_kinematics_{};
 };
 
 } // namespace nexora::sph

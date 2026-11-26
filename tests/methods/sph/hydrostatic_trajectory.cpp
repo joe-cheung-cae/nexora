@@ -9,7 +9,9 @@
 #include <iostream>
 #include <nexora/simulation/Simulation.hpp>
 #include <participants/sph/WcsphParticipant3D.hpp>
+#include <stdexcept>
 #include <string_view>
+#include <system_error>
 
 namespace {
 using namespace nexora;
@@ -19,6 +21,29 @@ using Center = std::array<real, 3>;
 constexpr double length = tank_size, g = gravity;
 constexpr std::array frame_times{0., .38671875, 1.5625, 2.34765625};
 constexpr std::array face_names{"x_min", "x_max", "y_min", "y_max", "bottom"};
+constexpr auto steps_csv = "steps.csv", frames_csv = "frames.csv";
+constexpr auto profiles_csv = "profiles.csv", crossings_csv = "crossings.csv";
+
+class OutputClaim {
+public:
+    explicit OutputClaim(const std::filesystem::path& path)
+        : marker_(path / ".nexora-tank-trajectory") {
+        std::filesystem::create_directories(path);
+        if (!std::filesystem::create_directory(marker_))
+            throw std::runtime_error("tank trajectory output is already reserved in " + path.string());
+    }
+
+    ~OutputClaim() {
+        std::error_code ignored;
+        std::filesystem::remove(marker_, ignored);
+    }
+
+    OutputClaim(const OutputClaim&) = delete;
+    OutputClaim& operator=(const OutputClaim&) = delete;
+
+private:
+    std::filesystem::path marker_;
+};
 
 std::array<double, 5> distances(const Center& x) {
     return {x[0], length - x[0], x[1], length - x[1], x[2]};
@@ -81,15 +106,23 @@ struct Crossings {
 };
 
 void run(int n, const std::filesystem::path& path) {
-    const double h = length / n;
+    // Hold the claim from the preflight through closing all CSV streams.
+    const OutputClaim claim(path);
+    for (const auto* name : {steps_csv, frames_csv, profiles_csv, crossings_csv}) {
+        const auto output = path / name;
+        if (std::filesystem::symlink_status(output).type() != std::filesystem::file_type::not_found)
+            throw std::runtime_error("tank trajectory output already exists at " + output.string());
+    }
+
+    const real h = real(length) / real(n);
     const auto tank = make_tank(n, h, std::max(n * n * n + 1, 10000));
     const Fields fluid(tank.fluid), wall(tank.wall);
     const sph::Velocity3D rest("trajectory.rest", tank.fluid.size());
-    const sph::WcsphVerletParameters parameters{eos, .5, {0, 0, -g}, h};
+    const sph::WcsphVerletParameters parameters{eos, real(.5), {0, 0, real(-g)}, h};
     const sph::FixedWallParticles3D fixed{wall.position, wall.mass, wall.ids};
     const sph::Values initial_density("trajectory.density", tank.fluid.size());
     for (std::size_t row = 0; row < tank.fluid.size(); ++row)
-        initial_density(row) = static_cast<real>(hydrostatic_density(tank.fluid[row].position[2]));
+        initial_density(row) = hydrostatic_density(tank.fluid[row].position[2]);
     // Escaped particles enlarge the occupied bounding box of the dense grid.
     // The admission limits bound its storage independently of physical inputs.
     constexpr std::size_t max_cells = 50000000;
@@ -106,15 +139,14 @@ void run(int n, const std::filesystem::path& path) {
     if (const auto status = sim.initialize(); !status.ok())
         fail("initialize tank: ", status);
 
-    std::filesystem::create_directories(path);
     auto steps =
-        csv(path / "steps.csv", "n,step,time,dt,cfl_bound,pressure_rms,speed_rms,speed_max,in_tank,"
-                                "unique_any,x_min,x_max,y_min,y_max,bottom,controlled_bytes,net_acceleration_rms");
+        csv(path / steps_csv, "n,step,time,dt,cfl_bound,pressure_rms,speed_rms,speed_max,in_tank,"
+                              "unique_any,x_min,x_max,y_min,y_max,bottom,controlled_bytes,net_acceleration_rms");
     auto frames =
-        csv(path / "frames.csv", "n,step,time,id,x,y,z,density,pressure,speed,crossed,mass,ap_x,ap_y,ap_z");
-    auto profiles = csv(path / "profiles.csv",
+        csv(path / frames_csv, "n,step,time,id,x,y,z,density,pressure,speed,crossed,mass,ap_x,ap_y,ap_z");
+    auto profiles = csv(path / profiles_csv,
                         "n,step,time,bin,count,mass,mean_pressure,mean_reference_pressure,net_acceleration_rms");
-    auto events = csv(path / "crossings.csv", "n,step,time,id,face,fraction,x,y,z");
+    auto events = csv(path / crossings_csv, "n,step,time,id,face,fraction,x,y,z");
     Crossings crossings(tank.fluid.size());
     std::size_t frame = 0;
     double dt = 0, bound = participant.time_constraint().maximum_step;
@@ -139,9 +171,9 @@ void run(int n, const std::filesystem::path& path) {
             const auto& ap = row.pressure_acceleration;
             const double acceleration = std::hypot(ap[0], ap[1], double(ap[2]) - g);
             const double speed = std::hypot(v[0], v[1], v[2]);
-            const double reference = eos.reference_density * eos.sound_speed * eos.sound_speed /
-                                     eos.gamma *
-                                     std::expm1(eos.gamma / (eos.gamma - 1) *
+            const double rho0 = eos.reference_density, sound_speed = eos.sound_speed, gamma = eos.gamma;
+            const double reference = rho0 * sound_speed * sound_speed / gamma *
+                                     std::expm1(gamma / (gamma - 1) *
                                                 std::log1p(std::max(0., depth_term(x[2]))));
             if (!std::isfinite(rho) || !std::isfinite(p) || !std::isfinite(speed) ||
                 !std::isfinite(acceleration) ||

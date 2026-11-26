@@ -4,7 +4,6 @@
 
 #include <array>
 #include <functional>
-#include <limits>
 #include <optional>
 
 namespace nexora::sph {
@@ -19,49 +18,41 @@ template <class A, class B> bool overlaps(const A& a, const B& b) {
     return before(a.data(), b.data() + b.span()) && before(b.data(), a.data() + a.span());
 }
 
-bool fits_real(double value) {
-    return Kokkos::abs(value) <= std::numeric_limits<real>::max();
-}
-
-bool prepare_source(const TaitEos& eos, real rho, real& pressure, double& coefficient) {
-    const double raw = eos.pressure(rho);
-    if (!fits_real(raw))
+bool prepare_source(const TaitEos& eos, real rho, real& pressure, real& coefficient) {
+    const real value = eos.pressure(rho);
+    if (!Kokkos::isfinite(value))
         return false;
-    pressure = static_cast<real>(raw);
-    coefficient = double(pressure) / (double(rho) * rho);
+    pressure = value;
+    coefficient = pressure / (rho * rho);
     return true;
 }
 
-std::optional<double> ghost_source_coefficient(const NeighborView3D& grid, LocalIndex slot,
+std::optional<real> ghost_source_coefficient(const NeighborView3D& grid, LocalIndex slot,
                                                 const TaitEos& eos) {
-    const double density = density_at_slot_3d(grid, slot);
+    const real density = density_at_slot_3d(grid, slot);
     real pressure{};
-    double coefficient{};
-    real rho{};
-    if (!store_positive_density(density, rho) || !prepare_source(eos, rho, pressure, coefficient))
+    real coefficient{};
+    if (!(density > 0 && Kokkos::isfinite(density)) ||
+        !prepare_source(eos, density, pressure, coefficient))
         return std::nullopt;
     return coefficient;
 }
 
-bool contributes(double d2, double cutoff_squared, double dx, double dy, double dz) {
-    // Squaring a nonzero displacement can underflow even in double.
-    return d2 < cutoff_squared && (dx != 0 || dy != 0 || dz != 0);
-}
-
 template <class Prepare>
-std::array<double, 3>
+std::array<real, 3>
 acceleration_at_row(const NeighborView3D& grid, std::size_t row,
-                    const Kokkos::View<const double*, Kokkos::HostSpace>& force_coefficient,
-                    double cutoff_squared, double inverse_h5, const Prepare& prepare) {
+                    const Kokkos::View<const real*, Kokkos::HostSpace>& force_coefficient,
+                    real inverse_h5, const Prepare& prepare) {
     const auto i = grid.owned_slots()(row);
     const auto& mass = grid.fields().mass;
-    const double h = grid.smoothing_length();
-    std::array<double, 3> a{};
-    grid.for_each_neighbor_with_displacement(row, [&](LocalIndex j, double d2, double dx, double dy, double dz) {
-        if (!contributes(d2, cutoff_squared, dx, dy, dz) || !prepare(j))
+    const real h = grid.smoothing_length();
+    std::array<real, 3> a{};
+    grid.for_each_neighbor_with_displacement(row, [&](LocalIndex j, real d2, real dx, real dy, real dz) {
+        const real q = Kokkos::sqrt(d2) / h;
+        if (q == 0 || q >= 2 || !prepare(j))
             return;
-        const double gradient = m4_negative_radial_derivative_over_q_inside_support_3d(Kokkos::sqrt(d2) / h);
-        const double pair =
+        const real gradient = m4_negative_radial_derivative_over_q_inside_support_3d(q);
+        const real pair =
             (force_coefficient(i) + force_coefficient(j)) * (gradient * inverse_h5) * mass(j);
         a[0] -= pair * dx;
         a[1] -= pair * dy;
@@ -74,7 +65,7 @@ template <bool from_step, bool check_density = !from_step, class WallAcceleratio
 Status evaluate(const Kokkos::Serial& exec, const NeighborView3D& grid, const TaitEos& eos,
                 const Values::const_type& density, const Values& pressure,
                 const Acceleration3D& acceleration, const WallAcceleration& wall_acceleration,
-                const std::array<double, 3>* gravity) {
+                const std::array<real, 3>* gravity) {
     const auto& rows = grid.owned_slots();
     const auto count = rows.extent(0);
     if constexpr (!from_step) {
@@ -92,11 +83,10 @@ Status evaluate(const Kokkos::Serial& exec, const NeighborView3D& grid, const Ta
         return {};
     const auto n = grid.fields().ids.extent(0);
     const auto& ghost = grid.fields().ghost;
-    const double h = grid.smoothing_length();
-    const double cutoff_squared = strict_m4_cutoff_squared_3d(grid.support_radius(), h);
-    const double inverse_h5 = 1 / (h * h * h * h * h);
+    const real h = grid.smoothing_length();
+    const real inverse_h5 = 1 / (h * h * h * h * h);
     try {
-        Kokkos::View<double*, Kokkos::HostSpace> coefficient(
+        Kokkos::View<real*, Kokkos::HostSpace> coefficient(
             Kokkos::view_alloc(exec, Kokkos::WithoutInitializing,
                                "sph.pressure_over_density_squared"),
             n);
@@ -120,11 +110,13 @@ Status evaluate(const Kokkos::Serial& exec, const NeighborView3D& grid, const Ta
                     const auto i = rows(row);
                     if (gravity)
                         fluid_row(i) = static_cast<LocalIndex>(row);
-                    grid.for_each_neighbor_with_displacement(row,
-                        [&](LocalIndex j, double d2, double dx, double dy, double dz) {
-                            if (ghost(j) && contributes(d2, cutoff_squared, dx, dy, dz))
+                    grid.for_each_neighbor(row, [&](LocalIndex j, real d2) {
+                        if (ghost(j)) {
+                            const real q = Kokkos::sqrt(d2) / h;
+                            if (q > 0 && q < 2)
                                 needed(j) = 1;
-                        });
+                        }
+                    });
                 });
             }
         }
@@ -183,10 +175,10 @@ Status evaluate(const Kokkos::Serial& exec, const NeighborView3D& grid, const Ta
                 "sph.pressure.acceleration", owned,
                 [&](std::size_t row, std::size_t& errors) {
                     const auto a = acceleration_at_row(grid, row, force_coefficient,
-                                                       cutoff_squared, inverse_h5, prepare);
+                                                       inverse_h5, prepare);
                     for (int axis = 0; axis < 3; ++axis) {
-                        if (fits_real(a[axis]))
-                            acceleration(row, axis) = static_cast<real>(a[axis]);
+                        if (Kokkos::isfinite(a[axis]))
+                            acceleration(row, axis) = a[axis];
                         else
                             ++errors;
                     }
@@ -232,21 +224,21 @@ Status evaluate(const Kokkos::Serial& exec, const NeighborView3D& grid, const Ta
 } // namespace
 
 std::size_t step_pressure_workspace_bytes_per_source(bool has_walls) {
-    return sizeof(double) + (has_walls ? sizeof(LocalIndex) : 0);
+    return sizeof(real) + (has_walls ? sizeof(LocalIndex) : 0);
 }
 
 Status evaluate_pressure_3d(const Kokkos::Serial& exec, const NeighborView3D& grid, const TaitEos& eos,
                             const Values::const_type& density, const Values& pressure,
                             const Acceleration3D& acceleration) {
     return evaluate<false>(exec, grid, eos, density, pressure, acceleration,
-                           [](LocalIndex) { return std::array<double, 3>{}; }, nullptr);
+                           [](LocalIndex) { return std::array<real, 3>{}; }, nullptr);
 }
 
 Status evaluate_pressure_3d(const Kokkos::Serial& exec, const NeighborView3D& grid, const TaitEos& eos,
                             const Values::const_type& density, const Values& pressure,
                             const Acceleration3D& acceleration,
                             const WallAcceleration3D::const_type& wall_acceleration,
-                            const std::array<double, 3>& gravity) {
+                            const std::array<real, 3>& gravity) {
     const auto rows = grid.owned_slots().extent(0), n = grid.fields().ids.extent(0);
     if (rows && n != rows && (wall_acceleration.extent(0) != n || !wall_acceleration.data()))
         return {StatusCode::invalid_argument, "Adami wall acceleration must follow source slots"};
@@ -262,7 +254,7 @@ Status evaluate_step_pressure_3d(const Kokkos::Serial& exec, const NeighborView3
                                  const Values::const_type& density, const Values& pressure,
                                  const Acceleration3D& acceleration,
                                  const WallAccelerationAt3D& wall_acceleration,
-                                 const std::array<double, 3>& gravity, bool initial_density) {
+                                 const std::array<real, 3>& gravity, bool initial_density) {
     if (initial_density)
         return evaluate<true, true>(exec, grid, eos, density, pressure, acceleration, wall_acceleration, &gravity);
     return evaluate<true>(exec, grid, eos, density, pressure, acceleration, wall_acceleration, &gravity);

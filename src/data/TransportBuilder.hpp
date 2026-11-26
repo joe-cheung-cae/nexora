@@ -38,7 +38,7 @@ struct TransportBuilder {
                         SourceLifetime lifetime = SourceLifetime::until_complete,
                         std::shared_ptr<const void> retention = {})
         -> Result<TransportView<std::remove_const_t<typename ValueView::value_type>>> {
-        if (!Kokkos::is_initialized() || Kokkos::is_finalized() || !values.lease_ || !ids.lease_)
+        if (!Kokkos::is_initialized() || !values.lease_ || !ids.lease_)
             return Status{StatusCode::invalid_state, "transport requires active CPU read grants"};
         if (static_cast<unsigned>(purpose) > static_cast<unsigned>(TransportPurpose::visualization))
             return Status{StatusCode::invalid_argument, "invalid transport purpose"};
@@ -69,7 +69,7 @@ struct TransportBuilder {
         const auto& value_descriptor = values.descriptor();
         const auto& id_descriptor = ids.descriptor();
 
-        if (ids.component_axes_[0] || id_descriptor.components != 1 || id_descriptor.units != "1")
+        if (ids.component_axes_[0] || id_descriptor.units != "1")
             return Status{StatusCode::invalid_argument, "stable IDs must be unitless entity scalars"};
         if (value_descriptor.entity_set.empty() ||
             value_descriptor.entity_set != id_descriptor.entity_set ||

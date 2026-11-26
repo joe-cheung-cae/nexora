@@ -5,14 +5,15 @@
 应用调用 `Simulation::initialize()`、`run(steps)`（或 `run(dt, count)`）和 `finalize()`。`run` 依次执行给定步长，首个失败的 `Status` 立即结束运行。每个成功步发布一次，随后时钟与已接受步数各更新一次。直接调用 `ParticipantIF::step(interval)` 与通过 `Simulation` 走相同的准入路径。[Simulation](../../include/nexora/simulation/Simulation.hpp) · [ParticipantIF](../../include/nexora/participant/ParticipantIF.hpp)
 
 - **本步准入。** 声学 CFL 为 `C h / (c₀ + max |v|)`，空流体取 `C h / c₀`。初速导入和每步终速写入时同步归约存储精度下的最大速度平方。声学上限同各运动组的有效采样上限取最小值，随状态提交。`step` 用已提交上限对请求的正 `dt` 严格检查一次。可直接查询 `time_constraint()`。[步长校验](../../include/nexora/participant/TimeConstraint.hpp) · [声学归约](../../src/methods/sph/Verlet3D.cpp)
-- **运动壁数据。** 每个规定轨迹提供在其整个定义域都能分辨实际运动的有限正常量 `sample_step_limit`。例如，单周期活塞测试中用解析最大壁速和允许的壁行程确定 `1/32` 的全域上限。此前依赖动态上限的轨迹须给出有物理依据的全域安全值才能使用当前接口。缺省、非正或非有限值使初始化失败。有效上限再受定义域剩余可表示历时约束。步末位置用于建格，运动壁速度在连续性邻域实际使用该槽时生成。纯平移组在本阶段首次读取时转换一次，旋转速度按粒子求值。壁加速度由参与 Adami 外推的壁槽求值。仅有壁粒子的常规步进只采样末端位置。独立壁面采样返回并校验完整运动学。固定壁不引入采样上限。[轨迹声明与输入约束](../../src/methods/sph/PrescribedMovingWall3D.hpp)
-- **组内跨度与终点。** 步进器从已认证起点按请求时长计算各组的 `τ₁ = τ₀ + dt`。在取样前检查新端点的定义域、实际跨度 `δ = τ₁ − τ₀ > 0`、`δ <= 该组起点上限` 以及 `abs(δ − dt) <= time_resolution`。周期折返仅用于运动学求值。纯平移使用平移运动量，旋转分支按组归一化旋转轴，粒子运动学在生成时检查。当起始相位加组内历时精确到达有限右端 `T` 时，允许提交有效的终点数值，该组的下一步上限为零。随后请求任何正步长都会失败并保留终点。若向内舍入的最后可表示历时仍落在定义域内部，又无可表示的正跨度，则下一上限无效，计算该候选的步返回失败。[时间域与采样实现](../../src/methods/sph/PrescribedMovingWall3D.cpp)
-- **数值检查位置。** 完整步的 double 半步速度和漂移位置直接写入，随后由格网在坐标转整数前检查范围。float 在窄化前检查。端点预测速度只在粒子参与非零连续性项或显式运动学观测时计算。几何观测只读取格网、位置和邻居。最终速度在字段写入时检查。仅更新位置时，分箱前检查新坐标的索引区间，格子成员未变时直接共享已接受的质量、ID 和归属。驱逐缓存后，步进器用已提交几何重建格索引。步进内部的两组连续性率经稳定 ID 对齐后进入每行密度校正，校正写入检查字段范围和窄化后的正值。独立算子在自身入口或输出处负责其调用契约。[数值步](../../src/participants/sph/WcsphStep3D.cpp) · [建格](../../src/methods/sph/neighbors/CellGrid.cpp)
+- **运动壁数据。** 每个规定轨迹提供在其整个定义域都能分辨实际运动的有限正常量 `sample_step_limit`。例如，单周期活塞测试中用解析最大壁速和允许的壁行程确定 `1/32` 的全域上限。此前依赖动态上限的轨迹须给出有物理依据的全域安全值才能使用当前接口。缺省、非正或非有限值使初始化失败。有效上限再受定义域剩余可表示历时约束。步末位置用于建格，运动壁速度在连续性邻域实际使用该槽时生成。纯平移组在本阶段首次读取时转换一次，旋转速度按粒子求值。壁加速度由参与 Adami 外推的壁槽求值。仅有壁粒子的常规步进只采样末端位置。固定壁不引入采样上限。[轨迹声明与输入约束](../../src/methods/sph/PrescribedMovingWall3D.hpp)
+- **组内跨度与终点。** 步进器从已认证起点按请求时长计算各组的 `τ₁ = τ₀ + dt`。在取样前检查新端点的定义域、实际跨度 `δ = τ₁ − τ₀ > 0`、`δ <= 该组起点上限` 以及 `abs(δ − dt) <= time_resolution`。周期轨迹用起始相位加组内历时的 `double` 和对周期取模。旋转轴按组归一化。有限域的总历时取 `last_phase - initial_phase`，每步用总历时减去已用历时计算剩余量。到达右端时允许提交当前状态，下一步上限为零。[时间域与采样实现](../../src/methods/sph/PrescribedMovingWall3D.cpp)
+- **数值检查位置。** 完整步按配置的 `real` 计算半步速度与漂移位置，格网在坐标转为整数前检查范围。端点预测速度在粒子首次参与非零连续性项时计算。终速写入与声学限使用同一次归约检测非有限速度平方。仅更新位置时，分箱前检查新坐标的索引区间，格子成员未变时直接共享已接受的质量、ID 和归属。驱逐缓存后，步进器用已提交几何重建格索引。步进内部的两组连续性率经稳定 ID 对齐后进入每行密度校正，校正写入检查字段范围和窄化后的正值。[数值步](../../src/participants/sph/WcsphStep3D.cpp) · [建格](../../src/methods/sph/neighbors/CellGrid.cpp)
 - **数值发布与资源。** 步进器在一次调用中组装两端连续性、压力与 Velocity Verlet。候选的几何、行表、四个只读字段、轨迹相位以及下步约束准备完毕后，参与者一次替换已接受状态。数值计算或资源准入失败会释放候选字段和临时资源，保留最近成功的数值、版本与时钟，调用方可读出结果并关闭。Serial 工作区可在成功步之间复用，参与者关闭时释放自己持有的资源。此实现限于同步单进程，持久化检查点和分布式通信尚未实现。[WCSPH 参与者](../../src/participants/sph/WcsphParticipant3D.cpp) · [数值步](../../src/participants/sph/WcsphStep3D.cpp)
+- **几何与邻居验证。** 每一步保持稳定 ID 和所有权，位置变化推进几何版本，格网排列变化推进布局版本。回归测试在初始化和成功步后读取已提交的格网，核对邻居 ID、距离和 owned 行序。跨格用例按旧、新行序分别核对两端密度率，驱逐格网后继续用提交行表读出粒子，并在下一步检查重建结果。[积分与邻居回归](../../tests/methods/sph/verlet_window_tests.cpp)
 
 ## 原 M0–M5 方案与验收背景（历史记录）
 
-下面的第 1–4 节及附录 A 保留当时的设计、测量条件和验收步骤。其中的窗口、跨调用候选授权、失败后缩步重试、用户步长回调及终点必须有正余量等约定已由上文替代。
+下面的第 1–4 节及附录 A 保留当时的设计、测量条件和验收步骤。其中的窗口、跨调用候选授权、失败后缩步重试、用户步长回调、终点必须有正余量、独立壁面采样、全粒子版本比较及步内观测回调等约定已由上文替代。
 
 本设计提案最初提交于 `e8b01a1`。冻结的 6³ 轨迹和历史测试集取自 `ce54294`。M1/M2 的实施起点为 `d5bfb10` 加当前工作树中尚未提交的实现补丁，包含 [ParticipantIF](../../include/nexora/participant/ParticipantIF.hpp) 的 `Status` 窗口接口和数值窄化修订。可复算的补丁指纹和两个时期的测试清单见 [M0](#m0-固定对照)。本计划细化三维 WCSPH 重构，并为 IISPH 和显式 ISPH 保留独立参与者入口。现有单进程 Kokkos Serial 基线已验证流体与 Adami 固定壁。多壁组和指定轨迹运动壁是本次确认的设计，数值验收列于 M5。设计遵循[架构入口](overview.md)、[Kokkos 数据与执行契约](kokkos-design.md)及[现行 SPH 路线](migration-roadmap.md#sph-cell-begin)。
 
@@ -30,7 +31,7 @@
 
 基线的 `Participant3D` 同时提供有、无初始密度参数的构造入口。省略密度时，`compute` 核求和得到初态流体密度，`initialize` 可成功，随后 `begin_window` 拒绝推进。当前四组静水初态测试借此读取 `t=0` 的场值。目标设计将这些用例迁到方法层，并从参与者装配和步进器初始化入口移除省略密度的调用形式。[初始化分支](../../src/participants/sph/Participant3D.cpp) · [静水初态用例](../../tests/methods/sph/hydrostatic_initial_tests.cpp)
 
-基线的 `ParticleFields3D` 定义在 `CellGrid.hpp` 中。`prepare_geometry_3d` 调用 `build/update` 并把格网和预算票据放入几何对象，`update_geometry_versions` 比较前后两份格网。实施时需要迁移这些调用点和直接读取 `geometry->grid` 的测试。[字段与格网](../../src/methods/sph/neighbors/CellGrid.hpp) · [几何装配](../../src/participants/sph/Geometry3D.cpp) · [版本比较](../../src/participants/sph/GeometryVersions3D.hpp)
+基线的 `ParticleFields3D` 定义在 `CellGrid.hpp` 中。`prepare_geometry_3d` 调用 `build/update` 并把格网和预算票据放入几何对象，`update_geometry_versions` 比较前后两份格网。实施时需要迁移这些调用点和直接读取 `geometry->grid` 的测试。[字段与格网](../../src/methods/sph/neighbors/CellGrid.hpp) · [几何装配](../../src/participants/sph/Geometry3D.cpp)
 
 ## 2. 目标类图
 
@@ -296,7 +297,7 @@ classDiagram
 | `reuse` | 输入顺序和逐 ID 格归属、ownership 匹配时，共享旧格的 ID/ghost、`cell_begin`、owned 槽表和双向排列及其原票据，仅为本阶段排序位置、质量预留新额度。 |
 | `remap` 探测 | 在第一张表分配前，为双向 `LocalIndex[N]` 一起取得临时票据。验证新输入到旧槽的双射、格归属与 ownership。匹配后为本阶段位置、质量取得额度，将同一对表和同一票据转为新排列，继续共享旧格其余索引。若任何准入被拒，结束本次更新。 |
 | 回退 `rebuild` | 探测发现成员或格归属等不匹配，完成相关访问并先销毁两张临时表、释放临时票据，再进入独立的 rebuild 准入。直接重建也走同一入口。首次分配前覆盖新排序字段、索引、偏移与并存的 `N * sizeof(SortEntry)` 排序键。排序键最后一次读取完成后单独释放。重复 ID、异常及后续失败均按分配寿命释放本次资源。旧查询仍读旧数据。 |
-| 版本比较 | 需要按 ID 排序比对时，先为 `old_by_id` 与 `new_by_id` 同时预留 `2 * N * sizeof(ParticleSlot)`，比较完成后释放，两表和排序键均按含对齐填充的实际元素大小计。槽或输入顺序可直接对齐的路径无此项开销。失败保留原三个版本。[现有版本比较](../../src/participants/sph/GeometryVersions3D.hpp) |
+| 版本比较 | 需要按 ID 排序比对时，先为 `old_by_id` 与 `new_by_id` 同时预留 `2 * N * sizeof(ParticleSlot)`，比较完成后释放，两表和排序键均按含对齐填充的实际元素大小计。槽或输入顺序可直接对齐的路径无此项开销。失败保留原三个版本。（历史方案） |
 
 `controlled_bytes` 覆盖 Nexora 显式创建且同时存活的这些输出、scratch 和已提交行表。同一分配有多个持有者时共享原票据，只计一次。Kokkos 内部排序等实现工作区及分配器开销另列可观测值，进程内存峰值用独立指标报告。
 
@@ -448,7 +449,7 @@ git diff --no-ext-diff --no-textconv --binary --full-index --no-renames --no-col
 | 阶段 | 基线中决定设计的行为 | 查验位置 |
 |---|---|---|
 | M1 | 当前压力按 owned 行做 EOS，匿名函数 `wall_pressure` 用反表取同阶段的密度、表压。M1 将它声明在 Adami 私有头，生产系数路径与命名壁压测试调用同一实现。固定壁质量来自粒子输入。 | [基线壁压求和](../../src/methods/sph/Pressure3D.cpp#L38-L59) · [生产系数路径](../../src/methods/sph/Pressure3D.cpp#L181-L197) · [流体前缀及壁输入](../../src/participants/sph/Participant3D.cpp#L154-L169) |
-| M2 | 格网 rebuild 按 (cell, stable ID) 打包字段并建立两种排列。reuse/remap 依本次映射刷新位置和质量。当前 remap 在路由回调前分配。按 ID 比较还有两张临时表。 | [查询与排列](../../src/methods/sph/neighbors/CellGrid.hpp) · [remap](../../src/methods/sph/neighbors/CellGrid.cpp#L103-L138) · [版本比较](../../src/participants/sph/GeometryVersions3D.hpp) |
+| M2 | 格网 rebuild 按 (cell, stable ID) 打包字段并建立两种排列。reuse/remap 依本次映射刷新位置和质量。当前 remap 在路由回调前分配。按 ID 比较还有两张临时表。 | [查询与排列](../../src/methods/sph/neighbors/CellGrid.hpp) · [remap](../../src/methods/sph/neighbors/CellGrid.cpp#L103-L138) |
 | M3 | 连续性读阶段源槽，最终半踢从旧槽取值。现有逐行结果从几何内的格网取 ID。新行表须在驱逐格网后仍与字段同行。 | [速度装配](../../src/participants/sph/Participant3D.cpp#L425-L453) · [半步速度读取](../../src/methods/sph/Verlet3D.cpp#L156-L178) · [当前快照](../../src/participants/sph/Participant3D.hpp) |
 | M4 | 试算阶段从候选速度取得 CFL。预提交在同一分配上重签 accepted 读权，基线遇到外部 trial 读者时才改走复制。协调器依次调用预提交与发布。 | [当前发布分支](../../src/participants/sph/Participant3D.cpp#L572-L607) · [签发与授权](../../src/data/FieldAccess.cpp) · [提交顺序](../../src/simulation/Simulation.cpp#L102-L118) |
 | M5 | 轨迹与流体用相同的请求时长。从 `2^52` 请求 `0.75` 时绝对终点舍入为 `2^52 + 1`。单周期活塞选定 `A = 1/128, T = 1`，两端壁运动学相同，中点进入流体支撑域。有限域的最后一步在采样后认证下一步正上限。 | [往返活塞夹具](#往返活塞的单周期验收) · [有限域成对验收](#有限轨迹终点的发布条件) · [时长定义](../../include/nexora/core/Time.hpp#L5-L14) · [舍入用例](../../tests/simulation/simulation_tests.cpp#L359-L366) · [参与者严格上限](../../src/participants/sph/Participant3D.cpp#L523-L535) |
@@ -554,7 +555,7 @@ WcsphStep3D.initialize_state(initial_time, fluid_fields, initial_velocity, initi
         candidate.v[r,:] = initial_velocity[i,:]
         candidate.rho[r] = initial_density[i]
     结束密度和速度写访问，转为初态只读绑定
-    q_init = grid.neighbors()       # 私有阶段观测同步检查传给初态压力的这个查询
+    q_init = grid.neighbors()       # 历史方案在初态压力前记录查询
     借用参与者签发的表压和压力加速度写权，以密度只读绑定、q_init 和同一时刻的壁加速度直接填入这两项输出
     结束两项写访问，转为同一初态版本的只读绑定
     对每个运动组 g 调用 g.maximum_sample_step(phase0[g])。若无可认证的有限正时长则返回失败，否则将相位及 limit0[g] 写入 candidate
@@ -616,7 +617,7 @@ try_step(interval, current, candidate, bind_fields):
         stage[s0] = current.v[r0]
     按 ID 将 w0.velocity 填入旧壁槽
     预留或复用 R0
-    q0 = old.neighbors()            # 私有验收在实际起点查询上记录中心 ID 和各回调的 (邻居 ID, d²)
+    q0 = old.neighbors()            # 历史方案在起点记录邻居 ID 和距离
     Continuity.rate(q0, stage, R0)                 # 按旧槽读，按旧行写
     此次读取完成后，步进器对每个旧行 r0:
         s1 = new.input_to_sorted[old.owned_slots[r0]]

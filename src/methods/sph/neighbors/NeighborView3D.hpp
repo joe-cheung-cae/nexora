@@ -20,8 +20,8 @@ class NeighborView3D {
         return *this;
     }
 
-    double smoothing_length() const { return smoothing_length_; }
-    double support_radius() const { return 2 * smoothing_length_; }
+    real smoothing_length() const { return smoothing_length_; }
+    real support_radius() const { return 2 * smoothing_length_; }
 
     const ParticleFields3D& fields() const {
         return fields_;
@@ -38,11 +38,11 @@ class NeighborView3D {
     template <class Callback>
     void for_each_neighbor_of_slot(LocalIndex self, Callback&& visit) const {
         for_each_neighbor_impl(self,
-            [&](LocalIndex j, double d2, double, double, double) { visit(j, d2); });
+            [&](LocalIndex j, real d2, real, real, real) { visit(j, d2); });
     }
 
     // The displacement is position(neighbor) - position(center), using the
-    // same double differences already evaluated by the neighbor cutoff.
+    // same real differences already evaluated by the neighbor cutoff.
     template <class Callback>
     void for_each_neighbor_with_displacement(std::size_t row, Callback&& visit) const {
         for_each_neighbor_impl(owned_slots_(row), std::forward<Callback>(visit));
@@ -51,7 +51,7 @@ class NeighborView3D {
   private:
     template <class Callback>
     void for_each_neighbor_impl(LocalIndex self, Callback&& visit) const {
-        std::array<double, 3> center{};
+        std::array<real, 3> center{};
         std::array<std::size_t, 3> lo{}, hi{};
         for (int axis = 0; axis < 3; ++axis) {
             center[axis] = fields_.position(self, axis);
@@ -67,14 +67,12 @@ class NeighborView3D {
                 for (auto j = cell_begin_(base + lo[0]); j < end; ++j) {
                     if (j == self)
                         continue;
-                    const double dx = double(fields_.position(j, 0)) - center[0];
-                    const double dy = double(fields_.position(j, 1)) - center[1];
-                    const double dz = double(fields_.position(j, 2)) - center[2];
+                    const real dx = fields_.position(j, 0) - center[0];
+                    const real dy = fields_.position(j, 1) - center[1];
+                    const real dz = fields_.position(j, 2) - center[2];
                     // Fix the rounding order for near-cutoff diagonals in every build.
-                    const double d2 = Kokkos::fma(dz, dz, Kokkos::fma(dy, dy, dx * dx));
-                    // A component just outside R can round to R on subtraction.
-                    // Only a squared-distance tie can admit that candidate.
-                    if (d2 < radius_squared_ || (d2 == radius_squared_ && components_within_support(self, j)))
+                    const real d2 = Kokkos::fma(dz, dz, Kokkos::fma(dy, dy, dx * dx));
+                    if (d2 <= radius_squared_)
                         visit(j, d2, dx, dy, dz);
                 }
             }
@@ -95,15 +93,13 @@ class NeighborView3D {
         swap(origin_, other.origin_);
         swap(shape_, other.shape_);
     }
-    bool components_within_support(LocalIndex self, LocalIndex neighbor) const;
-    std::int64_t absolute_bin(double x) const;
+    std::int64_t absolute_bin(real x) const;
     static std::size_t relative_bin(std::int64_t bin, std::int64_t origin) {
-        // The nonnegative difference may exceed INT64_MAX across a signed origin.
-        return static_cast<std::uint64_t>(bin) - static_cast<std::uint64_t>(origin);
+        return static_cast<std::size_t>(bin - origin);
     }
 
-    double smoothing_length_ = 1;
-    double radius_squared_ = 4;
+    real smoothing_length_ = 1;
+    real radius_squared_ = 4;
     std::array<std::shared_ptr<const void>, 3> field_storage_; // position, mass, IDs/ghost
     std::shared_ptr<const void> cells_ticket_;
     ParticleFields3D fields_;

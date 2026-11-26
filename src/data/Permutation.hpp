@@ -1,5 +1,6 @@
 #pragma once
 #include "EntityOrder.hpp"
+#include <type_traits>
 #include <unordered_map>
 
 namespace nexora::detail {
@@ -20,20 +21,20 @@ Result<EntityMapping> match_entity_ids(const Kokkos::Serial& exec,
                   std::is_same_v<typename ToView::non_const_value_type, std::uint64_t>);
     static_assert(Kokkos::SpaceAccessibility<Kokkos::Serial, typename FromView::memory_space>::accessible &&
                   Kokkos::SpaceAccessibility<Kokkos::Serial, typename ToView::memory_space>::accessible);
-    if (!Kokkos::is_initialized() || Kokkos::is_finalized())
+    if (!Kokkos::is_initialized())
         return Status{StatusCode::invalid_state, "ID matching requires active Kokkos runtime"};
     if (auto status = from_namespace.validate(); !status.ok())
         return status;
-    if (auto status = to_namespace.validate(); !status.ok())
-        return status;
-    if (from_namespace != to_namespace || from.extent(0) != to.extent(0))
+    const bool same_namespace = from_namespace == to_namespace;
+    if (!same_namespace) {
+        if (auto status = to_namespace.validate(); !status.ok())
+            return status;
+    }
+    if (!same_namespace || from.extent(0) != to.extent(0))
         return Status{StatusCode::invalid_argument, "entity namespaces or cardinalities differ"};
     const auto count = checked_entity_count(from.extent(0));
     if (!count.ok())
         return count.status();
-    const auto bytes = checked_array_bytes(count.value(), 2 * sizeof(LocalIndex));
-    if (!bytes.ok())
-        return bytes.status();
     if (count.value() == 0)
         return EntityMapping{};
     try {
@@ -41,8 +42,7 @@ Result<EntityMapping> match_entity_ids(const Kokkos::Serial& exec,
         std::unordered_map<std::uint64_t, LocalIndex> source_indices;
         source_indices.reserve(count.value());
         for (std::size_t i = 0; i < count.value(); ++i) {
-            const auto index = checked_local_index(i, count.value());
-            if (!source_indices.emplace(from(i), index.value()).second)
+            if (!source_indices.emplace(from(i), static_cast<LocalIndex>(i)).second)
                 return Status{StatusCode::invalid_argument, "source entity IDs are not unique"};
         }
         Kokkos::View<LocalIndex*, Kokkos::HostSpace> forward(
@@ -54,7 +54,7 @@ Result<EntityMapping> match_entity_ids(const Kokkos::Serial& exec,
             if (found == source_indices.end())
                 return Status{StatusCode::invalid_argument, "target entity IDs are missing or repeated"};
             forward(i) = found->second;
-            inverse(found->second) = checked_local_index(i, count.value()).value();
+            inverse(found->second) = static_cast<LocalIndex>(i);
             source_indices.erase(found);
         }
         return EntityMapping{forward, inverse};
@@ -68,27 +68,14 @@ Result<EntityMapping> match_entity_ids(const Kokkos::Serial& exec,
 class Permutation {
   public:
     static Result<Permutation> between(const Kokkos::Serial&, const EntityOrder&, const EntityOrder&);
-    static Result<Permutation> create(const Kokkos::Serial&, const EntityOrder&, const EntityOrder&,
-                                      std::span<const LocalIndex> new_to_old,
-                                      std::span<const LocalIndex> old_to_new);
     EntityMapping::view_type new_to_old() const {
         return mapping_.new_to_old;
     }
     EntityMapping::view_type old_to_new() const {
         return mapping_.old_to_new;
     }
-    LayoutVersion from_layout() const {
-        return from_.layout();
-    }
-    LayoutVersion to_layout() const {
-        return to_.layout();
-    }
-    Status validate_for(const EntityOrder& from, const EntityOrder& to) const;
-
   private:
-    Permutation(EntityOrder from, EntityOrder to, EntityMapping mapping)
-        : from_(std::move(from)), to_(std::move(to)), mapping_(std::move(mapping)) {}
-    EntityOrder from_, to_;
+    explicit Permutation(EntityMapping mapping) : mapping_(std::move(mapping)) {}
     EntityMapping mapping_;
 };
 } // namespace nexora::detail

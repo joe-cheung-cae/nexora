@@ -184,7 +184,7 @@ void FieldIssuer::close() noexcept {
 }
 
 Status FieldIssuer::check_runtime() {
-    if (!Kokkos::is_initialized() || Kokkos::is_finalized())
+    if (!Kokkos::is_initialized())
         return {StatusCode::invalid_state, "field access requires an active Kokkos runtime"};
     return {};
 }

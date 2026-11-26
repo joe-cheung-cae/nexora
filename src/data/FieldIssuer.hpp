@@ -44,13 +44,6 @@ class FieldIssuer {
     };
 
   public:
-    template <class View>
-    static Result<FieldIssuer> create(const View& allocation, FieldStamp stamp) {
-        if (auto valid = stamp.validate(); !valid.ok())
-            return valid;
-        return create_at_validated_time(allocation, stamp);
-    }
-
     // Private participant adapter. Its owner has validated the time interval
     // at ingress or constructed a point interval from its admitted clock.
     template <class View>

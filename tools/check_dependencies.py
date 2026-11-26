@@ -65,7 +65,7 @@ SPECIAL_TEST_LINKS = {
     "nexora_data_uninitialized_tests": {GTEST_MAIN, "nexora_data"},
     "nexora_reference_uninitialized_tests": {GTEST_MAIN, "nexora_participants_reference"},
     "nexora_entity_topology_tests": {KOKKOS_TEST_MAIN, "nexora_data"},
-    "nexora_structure_reorder_tests": {KOKKOS_TEST_MAIN, "nexora_participants_reference", "nexora_data"},
+    "nexora_structure_reorder_tests": {KOKKOS_TEST_MAIN, "nexora_data"},
     "nexora_field_group_tests": {KOKKOS_TEST_MAIN, "nexora_data", "Threads::Threads"},
     "nexora_field_binding_tests": {KOKKOS_TEST_MAIN, "nexora_data"},
     "nexora_kokkos_tests": {KOKKOS_TEST_MAIN, "nexora_data"},
@@ -76,7 +76,7 @@ SPECIAL_TEST_LINKS = {
     "nexora_sph_tank_trajectory": SPH_LEAF_LINKS,
     "nexora_transport_tests": {KOKKOS_TEST_MAIN, "nexora_data"},
     "nexora_transport_receive_tests": {KOKKOS_TEST_MAIN, "nexora_data"},
-    "nexora_serial_irregular_measurement": {"nexora_participants_reference", "nexora_data"},
+    "nexora_serial_irregular_measurement": {"nexora_data"},
     "nexora_reference_cli_oracle": REFERENCE_TEST_LINKS,
 }
 REQUIRED_LINKS.update(SPECIAL_TEST_LINKS)
@@ -99,7 +99,7 @@ STRUCTURE_REORDER_TEST = Path("tests/data/structure_reorder_tests.cpp")
 STRUCTURE_FIXTURE = Path("tests/data/structure_fixture.hpp")
 SERIAL_IRREGULAR_MEASUREMENT = Path("tests/data/serial_irregular_measurement.cpp")
 STRUCTURE_FIXTURE_CONSUMERS = {STRUCTURE_REORDER_TEST, SERIAL_IRREGULAR_MEASUREMENT}
-STRUCTURE_STATE = Path("src/participants/reference/StructureState.hpp")
+STRUCTURE_STATE = Path("tests/validation/structure/StructureState.hpp")
 STRUCTURE_STATE_SOURCES = {STRUCTURE_STATE, STRUCTURE_STATE.with_suffix(".cpp")}
 FIELD_GROUP_TEST = Path("tests/data/field_group_tests.cpp")
 BINDING_TEST = Path("tests/data/field_binding_tests.cpp")
@@ -160,10 +160,9 @@ SPH_WINDOW_TESTS = {SPH_ADAMI_TEST,
 SPH_PARTICIPANT_CONSUMERS = (SPH_WINDOW_TESTS - {SPH_HYDROSTATIC_INITIAL_TEST}) | {SPH_TANK_TRAJECTORY}
 SPH_PARTICIPANT_HEADER = "participants/sph/WcsphParticipant3D.hpp"
 SPH_STEP_HEADER = "participants/sph/WcsphStep3D.hpp"
-SPH_GEOMETRY_VERSIONS_HEADER = "participants/sph/GeometryVersions3D.hpp"
 SPH_GEOMETRY_SOURCES = {
     Path(*SPH_PARTICIPANT_DIR) / name
-    for name in ("Geometry3D.hpp", "Geometry3D.cpp", "GeometryVersions3D.hpp")
+    for name in ("Geometry3D.hpp", "Geometry3D.cpp")
 }
 SPH_GRID_ORACLE = SPH_CELL_GRID_TEST.with_name("cell_grid_oracle.hpp")
 DATA_PREINIT_TEST = Path("tests/data/preinitialization_tests.cpp")
@@ -281,6 +280,10 @@ def check_internal_include(relative: Path, scope: str, header: str,
         return [f"{relative}: {header} is private to GoogleTest unit targets"]
     if parts[-1] == "view_probe.hpp" and relative not in KOKKOS_VIEW_PROBE_CONSUMERS:
         return [f"{relative}: {header} is private to the Kokkos unit test and installed consumer"]
+    if parts[-1] == STRUCTURE_STATE.name:
+        if relative in {*STRUCTURE_STATE_SOURCES, STRUCTURE_FIXTURE}:
+            return []
+        return [f"{relative}: {header} is private to the structure validation fixture"]
     if parts[-1] == STRUCTURE_FIXTURE.name:
         if relative in STRUCTURE_FIXTURE_CONSUMERS:
             return []
@@ -328,6 +331,7 @@ def check_internal_include(relative: Path, scope: str, header: str,
         return [f"{relative}: {header} is private to data and the approved structure boundaries"]
     if parts[-1] in PRIVATE_DATA_HEADERS:
         if (location[:2] in {("src", "data"), ("src", "participants")}
+                or relative in STRUCTURE_STATE_SOURCES
                 or relative in PRIVATE_DATA_HEADERS[parts[-1]]):
             return []
         return [f"{relative}: {header} is private to data and concrete participants"]
@@ -340,7 +344,6 @@ def check_internal_include(relative: Path, scope: str, header: str,
         if (location[:3] == SPH_PARTICIPANT_DIR
                 or (parts[0] == "methods"
                     and (location[:3] == SPH_METHOD_DIR or relative in {SPH_CELL_GRID_TEST, SPH_GRID_ORACLE}))
-                or (relative == SPH_CELL_GRID_TEST and "/".join(parts) == SPH_GEOMETRY_VERSIONS_HEADER)
                 or (relative == SPH_VERLET_TEST and "/".join(parts) == SPH_STEP_HEADER)
                 or (relative == SPH_HYDROSTATIC_INITIAL_TEST
                     and parts == ["methods", "sph", "Density3D.hpp"])
@@ -359,9 +362,6 @@ def check_internal_include(relative: Path, scope: str, header: str,
     in_reference_test = scope == "tests" and location[:2] == ("tests", "reference")
     if (relative in REFERENCE_ASSEMBLY_SOURCES
             and parts == ["participants", "reference", "Participant.hpp"]):
-        return []
-    if (relative == STRUCTURE_FIXTURE
-            and parts == ["participants", "reference", "StructureState.hpp"]):
         return []
     if parts[0] == "methods" and (in_method or in_participant or in_reference_test):
         return []
@@ -565,7 +565,7 @@ def policy_self_test() -> list[str]:
             failures.append(f"checker self-test failed to reject {header} in methods")
     for header in PRIVATE_ENTITY_HEADERS:
         for path, scope in ((Path("src/data/TransportReceiver.hpp"), "src"),
-                            (STRUCTURE_STATE, "src"),
+                            (STRUCTURE_STATE, "tests"),
                             (Path("src") / SPH_PARTICIPANT_HEADER, "src"),
                             (ENTITY_TOPOLOGY_TEST, "tests"), (STRUCTURE_FIXTURE, "tests")):
             if check_internal_include(path, scope, f"data/{header}"):
@@ -577,10 +577,12 @@ def policy_self_test() -> list[str]:
                             (RECEIVE_TEST, "tests")):
             if not check_internal_include(path, scope, f"data/{header}"):
                 failures.append(f"checker self-test failed to reject {header} in {path}")
-    if check_internal_include(STRUCTURE_STATE, "src", "data/FieldIssuer.hpp"):
+    if check_internal_include(STRUCTURE_STATE, "tests", "data/FieldIssuer.hpp"):
         failures.append("checker self-test failed to allow the structure state to own field grants")
-    if check_internal_include(STRUCTURE_FIXTURE, "tests", "participants/reference/StructureState.hpp"):
+    if check_internal_include(STRUCTURE_FIXTURE, "tests", "validation/structure/StructureState.hpp"):
         failures.append("checker self-test failed to allow the structure fixture's private state")
+    if not check_internal_include(REFERENCE_COMMAND_SOURCE, "apps", "validation/structure/StructureState.hpp"):
+        failures.append("checker self-test failed to reject validation structure state in the CLI")
     for path in sorted(STRUCTURE_FIXTURE_CONSUMERS):
         if check_internal_include(path, "tests", STRUCTURE_FIXTURE.name):
             failures.append(f"checker self-test failed to allow the structure fixture in {path}")
@@ -603,7 +605,7 @@ def policy_self_test() -> list[str]:
     if check_kokkos_header(Path("src/methods/reference/State.hpp"),
                            "src", "methods", "Kokkos_Core.hpp"):
         failures.append("checker self-test failed to allow Kokkos in reference methods")
-    if check_kokkos_header(STRUCTURE_STATE, "src", "participants", "Kokkos_Core.hpp"):
+    if check_kokkos_header(STRUCTURE_STATE, "tests", "validation", "Kokkos_Core.hpp"):
         failures.append("checker self-test failed to allow Kokkos in structure state")
     if check_internal_include(Path("src/participants/reference/Participant.hpp"),
                               "src", "methods/reference/State.hpp"):
@@ -687,9 +689,7 @@ def policy_self_test() -> list[str]:
         if check_internal_include(SPH_HYDROSTATIC_INITIAL_TEST, "tests", f"methods/sph/{name}"):
             failures.append(f"checker self-test failed to allow direct {name} static diagnostics")
     if check_internal_include(SPH_VERLET_TEST, "tests", SPH_STEP_HEADER):
-        failures.append("checker self-test failed to allow the real window observer")
-    if check_internal_include(SPH_CELL_GRID_TEST, "tests", SPH_GEOMETRY_VERSIONS_HEADER):
-        failures.append("checker self-test failed to allow the grid version regression")
+        failures.append("checker self-test failed to allow committed step inspection in the Verlet tests")
     for path in (SPH_ADAMI_TEST, SPH_TANK_TRAJECTORY, SPH_HYDROSTATIC_INITIAL_TEST,
                  REFERENCE_COMMAND_SOURCE, package_consumer):
         if not check_internal_include(path, path.parts[0], SPH_STEP_HEADER):

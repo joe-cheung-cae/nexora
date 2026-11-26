@@ -24,12 +24,13 @@ class CellGrid {
         swap(sorted_to_input_, replacement.sorted_to_input_);
         swap(input_to_sorted_, replacement.input_to_sorted_);
         swap(input_order_, replacement.input_order_);
+        swap(positions_changed_, replacement.positions_changed_);
         return *this;
     }
 
     static Result<CellGrid> build(const Kokkos::Serial&, const ParticleFields3D&,
                                   std::size_t max_cells, const AdmitStorage& admit = {},
-                                  double smoothing_length = 1.0);
+                                  real smoothing_length = 1);
     // Return a fresh field snapshot. Share cell_begin when each ID retains its cell
     // and ownership. Input rows may be reordered between calls.
     Result<CellGrid> update(const Kokkos::Serial&, const ParticleFields3D&, std::size_t max_cells,
@@ -41,8 +42,8 @@ class CellGrid {
                                      std::size_t max_cells, const AdmitStorage& admit = {}) const;
 
     const NeighborView3D& neighbors() const { return query_; }
-    double smoothing_length() const { return query_.smoothing_length(); }
-    double support_radius() const { return query_.support_radius(); }
+    real smoothing_length() const { return query_.smoothing_length(); }
+    real support_radius() const { return query_.support_radius(); }
     const std::array<Ticket, 3>& field_storage() const { return query_.field_storage_; }
     const ParticleFields3D& fields() const { return query_.fields(); }
     const Indices& owned_slots() const { return query_.owned_slots(); }
@@ -65,14 +66,14 @@ class CellGrid {
     // General build/update callers still validate every external field.
     static Result<CellGrid> build_initial(const Kokkos::Serial&, const ParticleFields3D&,
                                          std::size_t fluid_count, std::size_t max_cells,
-                                         const AdmitStorage&, double smoothing_length);
+                                         const AdmitStorage&, real smoothing_length);
     static Result<CellGrid> rebuild_committed(const Kokkos::Serial&, const ParticleFields3D&,
                                              std::size_t owned_count, std::size_t max_cells,
-                                             const AdmitStorage&, double smoothing_length);
+                                             const AdmitStorage&, real smoothing_length);
     CellGrid() = default;
     static Result<CellGrid> prepare(const Kokkos::Serial&, const ParticleFields3D&,
                                     std::size_t max_cells, const CellGrid* previous,
-                                    const AdmitStorage&, double smoothing_length,
+                                    const AdmitStorage&, real smoothing_length,
                                     InputKind = InputKind::external, std::size_t owned_count = 0);
     template <bool PositionsOnly>
     Result<bool> try_reuse(const Kokkos::Serial&, const ParticleFields3D&, const CellGrid& previous,
@@ -82,5 +83,6 @@ class CellGrid {
     Ticket permutations_ticket_;
     Indices sorted_to_input_, input_to_sorted_;
     InputOrder input_order_{InputOrder::unknown};
+    bool positions_changed_{}; // Computed by update_positions in the previous grid's slot order.
 };
 } // namespace nexora::sph

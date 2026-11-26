@@ -86,7 +86,7 @@ cmake --build "$build_dir" --target nexora_sph_tank_trajectory
 for n in 6 12 24; do
   "$build_dir/tests/methods/sph/nexora_sph_tank_trajectory" "$n" "$out/n$n" || exit 1
 done
-python3 validation/sph/summarize_hydrostatic_trajectory.py "$out"
+python3 validation/sph/summarize_hydrostatic_trajectory.py "$out" --precision double
 python3 tools/plot_sph_hydrostatic_trajectories.py "$out"
 ```
 

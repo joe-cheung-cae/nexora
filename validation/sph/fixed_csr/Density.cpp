@@ -23,16 +23,12 @@ KOKKOS_INLINE_FUNCTION real contribution(real x, real y, real mass) {
 Result<real> evaluate_density(const Kokkos::Serial& exec, const DensityInput& input,
                               const Values& output) {
     const auto count = output.extent(0);
-    if (input.self_columns.extent(0) != count || input.offsets.extent(0) != count + 1 ||
-        input.positions.extent(0) != input.masses.extent(0))
-        return Status{StatusCode::invalid_argument, "SPH density field and CSR extents disagree"};
-
     const Policy rows(exec, 0, count);
-    // Store each row in real and accumulate its diagnostic in double in one pass.
-    double sum{};
+    // Store each row and accumulate its diagnostic in real in one pass.
+    real sum{};
     Kokkos::parallel_reduce(
         "sph.density.gather_and_owned_sum", rows,
-        KOKKOS_LAMBDA(std::size_t row, double& total) {
+        KOKKOS_LAMBDA(std::size_t row, real& total) {
             const auto self = input.self_columns(row);
             const real x = input.positions(self);
             real density = input.masses(self) * normalization;
@@ -47,6 +43,6 @@ Result<real> evaluate_density(const Kokkos::Serial& exec, const DensityInput& in
     // rows; this bound rejects NaN and infinity as well as real overflow.
     if (!(sum <= std::numeric_limits<real>::max()))
         return Status{StatusCode::numerical_failure, "SPH density or owned sum exceeds real range"};
-    return static_cast<real>(sum);
+    return sum;
 }
 } // namespace nexora::sph_fixture

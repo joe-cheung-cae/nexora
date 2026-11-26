@@ -46,7 +46,9 @@ TEST(FieldStamp, ValidatesTimeInterval) {
     ASSERT_TRUE(stamp.validate().ok());
     stamp.valid_from = 2;
     stamp.valid_until = 1;
-    ASSERT_FALSE(stamp.validate().ok());
+    const auto inverted = stamp.validate();
+    ASSERT_EQ(inverted.code(), StatusCode::invalid_argument);
+    ASSERT_EQ(inverted.message(), "field time is outside its validity interval");
     stamp.valid_until = 3;
     ASSERT_FALSE(stamp.validate().ok());
     stamp.time.physical_time = 3;

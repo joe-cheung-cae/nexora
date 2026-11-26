@@ -4,7 +4,6 @@
 #include <cmath>
 #include <data/CsrAdjacency.hpp>
 #include <data/FieldIssuer.hpp>
-#include <data/Permutation.hpp>
 #include <exception>
 #include <initializer_list>
 #include <limits>
@@ -21,9 +20,7 @@ using detail::CsrAdjacency;
 using detail::EntityOrder;
 using detail::FieldAxis;
 using detail::FieldIssuer;
-using detail::Permutation;
 using detail::ResourceBudget;
-using detail::checked_array_bytes;
 using detail::checked_csr_capacity;
 using Policy = Kokkos::RangePolicy<Kokkos::Serial, Kokkos::IndexType<std::size_t>>;
 template <class T> using View = Kokkos::View<T*, Kokkos::HostSpace>;
@@ -50,9 +47,9 @@ std::size_t payload_bytes(std::initializer_list<std::size_t> arrays) {
 
 ResourceBudget::Ticket reserve_layout(const ResourceBudget& budget, std::size_t rows,
                                       std::size_t columns, std::size_t csr_bytes) {
-    const auto row_bytes = require(checked_array_bytes(rows, sizeof(std::uint64_t) + sizeof(LocalIndex)));
-    const auto column_bytes = require(checked_array_bytes(
-        columns, sizeof(std::uint64_t) + 2 * sizeof(real) + 2 * sizeof(std::uint8_t)));
+    // checked_csr_capacity bounds both counts to LocalIndex on the 64-bit target.
+    const auto row_bytes = rows * (sizeof(std::uint64_t) + sizeof(LocalIndex));
+    const auto column_bytes = columns * (sizeof(std::uint64_t) + 2 * sizeof(real) + 2 * sizeof(std::uint8_t));
     return require(budget.reserve(payload_bytes({row_bytes, column_bytes, csr_bytes})));
 }
 
@@ -210,7 +207,7 @@ Status Participant::initialize(double initial_time) {
 }
 
 Status Participant::initialize_at_finite_time(double initial_time) {
-    if (accepted_ || finalized_ || !Kokkos::is_initialized() || Kokkos::is_finalized())
+    if (accepted_ || finalized_ || !Kokkos::is_initialized())
         return {StatusCode::invalid_state, "SPH initialization requires a new participant and active Kokkos"};
     const auto count = config_.column_ids.size();
     if (config_.row_ids.empty() ||
@@ -268,7 +265,7 @@ Status Participant::do_step(const TimeInterval& interval) {
         stamp.valid_from = stamp.valid_until = interval.end;
 
         const auto count = accepted_->row_count();
-        const auto reservation = require(budget_.reserve(require(checked_array_bytes(count, sizeof(real)))));
+        const auto reservation = require(budget_.reserve(count * sizeof(real)));
         const auto values = allocate<real>(*exec_, "sph.accepted_density", count);
         real sum{};
         {
@@ -336,21 +333,18 @@ Status Participant::reorder(std::span<const GlobalEntityId> row_ids,
         ResourceBudget::Ticket density_ticket;
         if (has_density)
             density_ticket = require(budget_.reserve(count * sizeof(real)));
-        // Matching retains two maps per axis. CSR construction copies the
-        // rewritten offsets and indices into the promised immutable layout.
+        // The two maps per axis are temporary. The new CSR belongs to the layout ticket.
         const auto scratch_reservation = require(budget_.reserve(payload_bytes({
-            require(checked_array_bytes(count, 2 * sizeof(LocalIndex))),
-            require(checked_array_bytes(sources, 2 * sizeof(LocalIndex))), csr_bytes})));
+            count * (2 * sizeof(LocalIndex)), sources * (2 * sizeof(LocalIndex))})));
 
         const auto rows = require(EntityOrder::create(exec, before.rows().entity_namespace(),
                                                        stamp.layout, row_ids));
         const auto columns = require(EntityOrder::create(exec, before.columns().entity_namespace(),
                                                           stamp.layout, column_ids));
-        const auto row_map = require(Permutation::between(exec, before.rows(), rows));
-        const auto column_map = require(Permutation::between(exec, before.columns(), columns));
-        const auto row_forward = row_map.new_to_old();
-        const auto column_forward = column_map.new_to_old();
-        const auto column_inverse = column_map.old_to_new();
+        auto reordered = require(before.reorder(exec, rows, columns));
+        const auto row_forward = reordered.rows.new_to_old();
+        const auto column_forward = reordered.columns.new_to_old();
+        const auto column_inverse = reordered.columns.old_to_new();
 
         const auto old_positions = old_geometry.x.view();
         const auto old_masses = old_geometry.mass.view();
@@ -361,12 +355,8 @@ Status Participant::reorder(std::span<const GlobalEntityId> row_ids,
         auto ghost = allocate<std::uint8_t>(exec, "sph.reorder.ghost", sources);
         auto boundary = allocate<std::uint8_t>(exec, "sph.reorder.boundary", sources);
         const auto old_self = old_geometry.self;
-        const auto old_offsets = before.offsets();
-        const auto old_indices = before.indices();
         const auto old_density = has_density ? previous.density_->values : ConstView<real>{};
         auto self = allocate<LocalIndex>(exec, "sph.reorder.self_columns", count);
-        auto offsets = allocate<Offset>(exec, "sph.reorder.offsets", count + 1);
-        auto indices = allocate<LocalIndex>(exec, "sph.reorder.indices", edges);
         auto density = has_density ? allocate<real>(exec, "sph.reorder.density", count) : Values{};
 
         Kokkos::parallel_for("sph reorder sources", Policy(exec, 0, columns.size()),
@@ -377,29 +367,15 @@ Status Participant::reorder(std::span<const GlobalEntityId> row_ids,
             ghost(i) = old_ghost(from);
             boundary(i) = old_boundary(from);
         });
-        // The Serial prefix preserves edge order as rows and columns move independently.
-        Kokkos::parallel_for("sph reorder CSR offsets", Policy(exec, 0, 1),
-                             KOKKOS_LAMBDA(std::size_t) {
-            offsets(0) = 0;
-            for (std::size_t i = 0; i < count; ++i) {
-                const auto from = row_forward(i);
-                offsets(i + 1) = offsets(i) + (old_offsets(from + 1) - old_offsets(from));
-            }
-        });
-        Kokkos::parallel_for("sph reorder CSR and owned fields", Policy(exec, 0, count),
+        Kokkos::parallel_for("sph reorder owned fields", Policy(exec, 0, count),
                              KOKKOS_LAMBDA(std::size_t i) {
             const auto from = row_forward(i);
             self(i) = column_inverse(old_self(from));
             if (has_density)
                 density(i) = old_density(from);
-            for (Offset edge = old_offsets(from); edge < old_offsets(from + 1); ++edge)
-                indices(offsets(i) + (edge - old_offsets(from))) = column_inverse(old_indices(edge));
         });
         exec.fence("SPH reordered fields ready");
-        auto adjacency = require(CsrAdjacency::create(
-            exec, rows, columns, stamp.topology, {offsets.data(), offsets.extent(0)},
-            {indices.data(), indices.extent(0)}));
-        auto geometry = std::make_shared<Geometry>(reservation, std::move(adjacency), self, positions, masses,
+        auto geometry = std::make_shared<Geometry>(reservation, std::move(reordered.adjacency), self, positions, masses,
                                                    ghost, boundary, stamp);
         auto snapshot = layout_snapshot(geometry);
         if (has_density) {

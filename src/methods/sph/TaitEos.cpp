@@ -21,17 +21,17 @@ Status TaitEos::validate() const {
     return parameters_.validate();
 }
 
-double TaitEos::pressure(double density) const {
+real TaitEos::pressure(real density) const {
     // log1p and expm1 retain small pressure perturbations near equilibrium.
-    const double reference = parameters_.reference_density;
-    const double difference = density - reference;
-    const double log_ratio = Kokkos::abs(difference) <= .5 * reference
+    const real reference = parameters_.reference_density;
+    const real difference = density - reference;
+    const real log_ratio = Kokkos::abs(difference) <= real{.5} * reference
                                  ? Kokkos::log1p(difference / reference)
                                  : Kokkos::log(density / reference);
     return bulk_modulus_ * Kokkos::expm1(parameters_.gamma * log_ratio);
 }
 
-double TaitEos::density_from_pressure(double pressure) const {
+real TaitEos::density_from_pressure(real pressure) const {
     return parameters_.reference_density *
            Kokkos::exp(Kokkos::log1p(pressure / bulk_modulus_) / parameters_.gamma);
 }

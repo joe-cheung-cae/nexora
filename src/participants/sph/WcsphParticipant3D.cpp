@@ -149,10 +149,9 @@ BindFields3D WcsphParticipant3D::bind_fields(WcsphState3D& candidate) const {
             const auto rows = candidate.geometry.owned_row_to_input.extent(0);
             const auto& stamp = candidate.stamp;
             const auto reserve = [&](std::size_t components) {
-                const auto bytes = require(detail::checked_array_bytes(rows, components * sizeof(real)));
+                const auto bytes = rows * components * sizeof(real);
                 auto storage = budget_.reserve(bytes);
-                if (!storage.ok() && storage.status().code() == StatusCode::resource_exhausted &&
-                    evict_unused && evict_unused())
+                if (!storage.ok() && evict_unused && evict_unused())
                     storage = budget_.reserve(bytes);
                 return require(std::move(storage));
             };
@@ -196,32 +195,30 @@ BindFields3D WcsphParticipant3D::bind_fields(WcsphState3D& candidate) const {
                 candidate.acceleration.emplace(std::move(acceleration));
                 return {};
             }
-            case FieldGroup3D::velocity: {
-                auto storage = reserve(3);
-                const auto values = allocate<Velocity3D>(*exec_, "sph.participant3d.velocity", rows);
-                {
-                    const auto grant =
-                        write_field(values, velocity_field(FieldAccess::overwrite), stamp);
-                    if (auto status = write({.velocity = grant.view()}); !status.ok())
-                        return status;
-                }
-                auto velocity = read_field(Velocity3D::const_type(values),
-                                           velocity_field(FieldAccess::read), stamp);
-                candidate.field_storage[2] = std::move(storage);
-                candidate.velocity.emplace(std::move(velocity));
-                return {};
+            case FieldGroup3D::velocity:
+                break;
             }
+            auto storage = reserve(3);
+            const auto values = allocate<Velocity3D>(*exec_, "sph.participant3d.velocity", rows);
+            {
+                const auto grant =
+                    write_field(values, velocity_field(FieldAccess::overwrite), stamp);
+                if (auto status = write({.velocity = grant.view()}); !status.ok())
+                    return status;
             }
-            return {StatusCode::invalid_state, "unknown WCSPH field grant group"};
+            auto velocity = read_field(Velocity3D::const_type(values),
+                                       velocity_field(FieldAccess::read), stamp);
+            candidate.field_storage[2] = std::move(storage);
+            candidate.velocity.emplace(std::move(velocity));
+            return {};
         });
     };
 }
 
 TimeConstraint WcsphParticipant3D::time_constraint() const {
-    TimeConstraint result;
-    if (accepted_)
-        result.maximum_step = accepted_->maximum_step;
-    return result;
+    if (!accepted_)
+        return {.available = false};
+    return {.maximum_step = accepted_->maximum_step};
 }
 
 Status WcsphParticipant3D::initialize(double time) {
@@ -231,16 +228,13 @@ Status WcsphParticipant3D::initialize(double time) {
 }
 
 Status WcsphParticipant3D::initialize_at_finite_time(double time) {
-    if (finalized_ || accepted_ || active_ || !Kokkos::is_initialized() || Kokkos::is_finalized())
+    if (finalized_ || accepted_ || active_ || !Kokkos::is_initialized())
         return {StatusCode::invalid_state,
                 "3D SPH initialization requires a new participant and active Kokkos"};
 
     const ActiveScope evaluation(active_);
     const auto result = guarded([&]() -> Status {
         step_.emplace(exec_.emplace(), budget_, max_cells_, parameters_);
-        step_->observer_context_ = observer_context_;
-        step_->observe_ = observe_;
-        step_->observe_kinematics_ = observe_kinematics_;
         auto candidate = std::make_unique<WcsphState3D>();
         auto& stamp = candidate->stamp;
         stamp.accepted = true;
@@ -331,11 +325,9 @@ Result<WallValue3D> WcsphParticipant3D::read_committed_wall(std::uint64_t id) co
     const auto& fields = state.geometry.fields();
     for (std::size_t slot = 0; slot < fields.ids.extent(0); ++slot) {
         if (fields.ghost(slot) && fields.ids(slot) == id) {
-            const auto time = step_->wall_time(id, state.wall_phases);
-            if (!time.ok())
-                return time.status();
+            const auto time = step_->committed_wall_time(id, state.wall_phases);
             return WallValue3D{id, fields.mass(slot), vector_at(fields.position, slot), state.stamp,
-                               time.value().initial_phase + time.value().elapsed};
+                               time.initial_phase + time.elapsed};
         }
     }
     return Status{StatusCode::invalid_argument, "3D SPH wall ID is unknown"};

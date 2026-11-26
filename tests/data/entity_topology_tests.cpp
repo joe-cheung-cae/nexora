@@ -35,8 +35,8 @@ TEST(EntityTopology, OrderAndPermutation) {
     old_ids[0] = GlobalEntityId{999}; // Order owns a stable snapshot, not the caller's span.
     const auto& old = old_order.value();
     const auto& next = new_order.value();
-    ASSERT_TRUE(old.validate_for(ns, LayoutVersion{3}).ok());
-    ASSERT_FALSE(old.validate_for(ns, LayoutVersion{4}).ok());
+    EXPECT_EQ(old.entity_namespace(), ns);
+    EXPECT_EQ(old.layout(), LayoutVersion{3});
     const std::array<std::uint64_t, 4> expected_old_ids{10, 30, 20, 40};
     for (std::size_t i = 0; i < expected_old_ids.size(); ++i)
         ASSERT_EQ(old.ids()(i), expected_old_ids[i]);
@@ -49,7 +49,6 @@ TEST(EntityTopology, OrderAndPermutation) {
         ASSERT_EQ(permutation.value().new_to_old()(i), expected_new_to_old[i]);
         ASSERT_EQ(permutation.value().old_to_new()(i), expected_old_to_new[i]);
     }
-    ASSERT_TRUE(permutation.value().validate_for(old, next).ok());
 
     // Independent gather check for field alignment under this permutation.
     const std::array<int, 4> old_field{100, 300, 200, 400};
@@ -75,12 +74,6 @@ TEST(EntityTopology, OrderAndPermutation) {
                                                GlobalEntityId{20}, GlobalEntityId{40}});
     ASSERT_TRUE(same_version_wrong_order.ok());
     ASSERT_FALSE(Permutation::between(exec, old, same_version_wrong_order.value()).ok());
-    const std::array<LocalIndex, 4> bad_forward{2, 0, 3, 3};
-    const std::array<LocalIndex, 4> bad_reverse{1, 3, 0, 2};
-    ASSERT_FALSE(Permutation::create(exec, old, next, bad_forward, bad_reverse).ok());
-    const std::array<LocalIndex, 4> out_of_range{2, 0, 3, 4};
-    ASSERT_FALSE(Permutation::create(exec, old, next, out_of_range, expected_old_to_new).ok());
-
     const auto empty = EntityOrder::create(exec, ns, LayoutVersion{6}, std::span<const GlobalEntityId>{});
     ASSERT_TRUE(empty.ok() && empty.value().size() == 0);
     const auto empty_perm = Permutation::between(exec, empty.value(), empty.value());
@@ -107,17 +100,17 @@ TEST(EntityTopology, OrderAndPermutation) {
     Kokkos::View<std::int32_t*, Kokkos::Serial> wrong_dtype("wrong type IDs", 2);
     ASSERT_FALSE(EntityOrder::copy_from(exec, particles(), LayoutVersion{18}, wrong_rank).ok());
     ASSERT_FALSE(EntityOrder::copy_from(exec, particles(), LayoutVersion{18}, wrong_dtype).ok());
+}
 
-    auto supplied_forward = expected_new_to_old;
-    auto supplied_inverse = expected_old_to_new;
-    const auto supplied = Permutation::create(exec, old, next, supplied_forward, supplied_inverse);
-    ASSERT_TRUE(supplied.ok());
-    supplied_forward.fill(0);
-    supplied_inverse.fill(0);
-    for (std::size_t i = 0; i < 4; ++i) {
-        ASSERT_EQ(supplied.value().new_to_old()(i), expected_new_to_old[i]);
-        ASSERT_EQ(supplied.value().old_to_new()(i), expected_old_to_new[i]);
-    }
+TEST(EntityTopology, MatchingNamespaceErrorPriority) {
+    const Kokkos::Serial exec;
+    const EntityOrder::id_view_type ids;
+    const auto invalid_source = particles(DomainId{1}, Association::particle, "");
+    const auto invalid_target = particles(DomainId{1}, static_cast<Association>(255));
+    const auto source_error = match_entity_ids(exec, invalid_source, ids, invalid_target, ids);
+    EXPECT_EQ(source_error.status().message(), "entity namespace has an empty entity set");
+    const auto target_error = match_entity_ids(exec, particles(), ids, invalid_target, ids);
+    EXPECT_EQ(target_error.status().message(), "entity namespace has an invalid association");
 }
 
 TEST(EntityTopology, Csr) {
@@ -161,19 +154,13 @@ TEST(EntityTopology, Csr) {
             ASSERT_EQ(reordered.value().ids()(col), expected_stable_edges[edge][1]);
         }
     }
-    ASSERT_TRUE(graph.value().validate_for(row_order.value(), row_order.value(), TopologyVersion{9}).ok());
-    ASSERT_FALSE(graph.value().validate_for(reordered.value(), row_order.value(), TopologyVersion{9}).ok());
-    ASSERT_FALSE(graph.value().validate_for(row_order.value(), row_order.value(), TopologyVersion{10}).ok());
-    const auto same_version_different_order = EntityOrder::create(
-        exec, ns, LayoutVersion{7}, std::array{GlobalEntityId{30}, GlobalEntityId{10},
-                                               GlobalEntityId{20}, GlobalEntityId{40}});
-    ASSERT_TRUE(same_version_different_order.ok());
-    ASSERT_TRUE(!graph.value().validate_for(same_version_different_order.value(), row_order.value(),
-                                       TopologyVersion{9}).ok());
-
     const std::array<Offset, 5> decreasing{0, 2, 1, 3, 5};
-    ASSERT_TRUE(!CsrAdjacency::create(exec, row_order.value(), row_order.value(), TopologyVersion{9},
-                                 decreasing, indices).ok());
+    const std::array<Offset, 5> above_terminal{0, 2, 3, 6, 5};
+    for (const auto& invalid_offsets : {decreasing, above_terminal}) {
+        const auto invalid = CsrAdjacency::create(exec, row_order.value(), row_order.value(),
+                                                 TopologyVersion{9}, invalid_offsets, indices);
+        EXPECT_EQ(invalid.status().code(), StatusCode::invalid_argument);
+    }
     const std::array<Offset, 5> wrong_end{0, 2, 2, 3, 4};
     ASSERT_TRUE(!CsrAdjacency::create(exec, row_order.value(), row_order.value(), TopologyVersion{9},
                                  wrong_end, indices).ok());
@@ -203,11 +190,10 @@ TEST(EntityTopology, Csr) {
                                                 std::array<Offset, 3>{0, 1, 3},
                                                 std::array<LocalIndex, 3>{1, 0, 1});
     ASSERT_TRUE(bipartite.ok());
-    const auto stale_columns = EntityOrder::create(
-        exec, col_ns, LayoutVersion{14}, std::array{GlobalEntityId{5}, GlobalEntityId{6}});
-    ASSERT_TRUE(stale_columns.ok());
-    ASSERT_TRUE(!bipartite.value().validate_for(rows.value(), stale_columns.value(),
-                                           TopologyVersion{14}).ok());
+    EXPECT_EQ(bipartite.value().topology(), TopologyVersion{14});
+    EXPECT_EQ(bipartite.value().rows().entity_namespace(), ns);
+    EXPECT_EQ(bipartite.value().columns().entity_namespace(), col_ns);
+    EXPECT_EQ(bipartite.value().columns().layout(), LayoutVersion{13});
     ASSERT_TRUE(!CsrAdjacency::create(exec, rows.value(), columns.value(), TopologyVersion{14},
                                  std::array<Offset, 3>{0, 1, 3},
                                  std::array<LocalIndex, 3>{1, 0, 2}).ok());
@@ -231,9 +217,6 @@ TEST(EntityTopology, CapacityAndVersions) {
     const auto max_count = static_cast<std::uint64_t>(std::numeric_limits<LocalIndex>::max());
     ASSERT_TRUE(checked_entity_count(max_count).ok());
     ASSERT_FALSE(checked_entity_count(max_count + 1).ok());
-    ASSERT_TRUE(checked_local_index(max_count - 1, max_count).ok());
-    ASSERT_FALSE(checked_local_index(max_count, max_count).ok());
-    ASSERT_FALSE(checked_local_index(0, 0).ok());
     ASSERT_TRUE(checked_array_bytes(3, sizeof(Offset)).ok());
     ASSERT_TRUE(!checked_array_bytes(std::numeric_limits<std::uint64_t>::max(),
                                 std::numeric_limits<std::size_t>::max()).ok());
@@ -241,7 +224,9 @@ TEST(EntityTopology, CapacityAndVersions) {
     const auto max_entries_without_multiply_overflow =
         static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max() / sizeof(LocalIndex));
     ASSERT_FALSE(checked_csr_capacity(1, 1, max_entries_without_multiply_overflow).ok());
-    ASSERT_FALSE(checked_csr_capacity(std::numeric_limits<std::uint64_t>::max(), 0, 0).ok());
+    const auto overflowing_rows = checked_csr_capacity(std::numeric_limits<std::uint64_t>::max(), 0, 0);
+    EXPECT_EQ(overflowing_rows.status().code(), StatusCode::invalid_argument);
+    EXPECT_EQ(overflowing_rows.status().message(), "integer conversion out of range");
     ASSERT_FALSE(checked_next_version(LayoutVersion{std::numeric_limits<std::uint64_t>::max()}).ok());
     ASSERT_FALSE(checked_increment(std::numeric_limits<std::uint64_t>::max()).ok());
 }

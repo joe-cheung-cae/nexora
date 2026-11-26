@@ -22,7 +22,7 @@ FieldStamp trial_stamp() {
 TEST(DataPreinitialization, FieldIssuerRequiresInitializedRuntime) {
     ASSERT_FALSE(Kokkos::is_initialized());
     using View = Kokkos::View<real*, Kokkos::Serial>;
-    const auto result = detail::FieldIssuer::create(View{}, trial_stamp());
+    const auto result = detail::FieldIssuer::create_at_validated_time(View{}, trial_stamp());
     EXPECT_EQ(result.status().code(), StatusCode::invalid_state);
 }
 
