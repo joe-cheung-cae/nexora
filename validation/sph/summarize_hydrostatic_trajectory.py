@@ -12,7 +12,7 @@ from pathlib import Path
 FACES = ("x_min", "x_max", "y_min", "y_max", "bottom")
 FACE_PLANES = (("x", 0), ("x", 6), ("y", 0), ("y", 6), ("z", 0))
 DEPTH = 6
-END = 2.34765625
+FRAME_TIMES = (0., 0.38671875, 1.5625, 2.34765625)
 GRAVITY = 9.81
 RHO0 = 1000
 SOUND_SPEED = 80
@@ -70,15 +70,20 @@ def sample_frames(path, steps, n):
     samples = {}
     masses_by_id = {}
     marked_by_step = {}
+    missing_times = set(FRAME_TIMES)
     for step, rows in groupby(read_rows(path), key=lambda row: int(row["step"])):
         particles = []
         bins = [[] for _ in range(DEPTH)]
         seen = set()
         marked = set()
-        require(step not in samples, f"{path}: repeated frame {step}")
+        require(0 <= step < len(steps), f"{path}: invalid frame step {step}")
+        time = float(steps[step]["time"])
+        require(step == 0 or 0 in samples, f"{path}: missing initial frame at time 0")
+        require(time in missing_times, f"{path}: unexpected or repeated frame time {time}")
+        missing_times.remove(time)
         for row in rows:
             require(int(row["n"]) == n, f"{path}: wrong resolution")
-            compare(float(row["time"]), float(steps[step]["time"]), f"{path}: time")
+            require(float(row["time"]) == time, f"{path}: frame time differs from step {step}")
             pid = int(row["id"])
             require(pid not in seen, f"{path}: duplicate particle ID {pid} at step {step}")
             seen.add(pid)
@@ -111,7 +116,8 @@ def sample_frames(path, steps, n):
         profiles[step] = [moments(layer) for layer in bins]
         samples[step] = moments(occupied)
         marked_by_step[step] = marked
-    require(set(samples) >= {0, len(steps) - 1}, f"{path}: initial or final frame missing")
+    require(not missing_times, f"{path}: missing frame times {sorted(missing_times)}")
+    require(len(steps) - 1 in samples, f"{path}: final step has no frame")
     return profiles, samples, set(masses_by_id), marked_by_step
 
 
@@ -183,7 +189,7 @@ def read_steps(path, n):
             value = float(row[key])
             require(math.isfinite(value) and value >= 0, f"{path}: invalid {key} at step {index}")
         previous_time = time
-    compare(previous_time, END, f"{path}: final time")
+    compare(previous_time, FRAME_TIMES[-1], f"{path}: final time")
     return steps
 
 
@@ -195,14 +201,15 @@ def summarize(directory, n):
         step, layer = int(row["step"]), int(row["bin"])
         expected_rows.remove((step, layer))
         require(int(row["n"]) == n, f"{directory}: wrong profile resolution")
-        compare(float(row["time"]), float(steps[step]["time"]), f"{directory}: profile time")
+        require(float(row["time"]) == float(steps[step]["time"]), f"{directory}: profile time differs from step {step}")
         sample = profiles[step][layer]
         require(sample["particle_count"] == int(row["count"]), f"{directory}: layer count mismatch")
         compare(sample["mass_kg"], float(row["mass"]), f"{directory}: layer mass mismatch")
         if sample["particle_count"]:
             compare(sample["mean_pressure_pa"], float(row["mean_pressure"]), f"{directory}: layer pressure")
             compare(sample["mean_reference_pressure_pa"], float(row["mean_reference_pressure"]), f"{directory}: layer reference")
-    require(not expected_rows, f"{directory}: missing profiles")
+    missing_times = sorted({float(steps[step]["time"]) for step, _ in expected_rows})
+    require(not missing_times, f"{directory}/profiles.csv: missing profiles at times {missing_times}")
     crossings = summarize_crossings(directory / "crossings.csv", steps, ids, marked, n)
     initial, final = steps[0], steps[-1]
     final_particle_count = int(final["in_tank"])

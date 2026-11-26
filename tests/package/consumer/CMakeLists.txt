@@ -2,7 +2,12 @@ cmake_minimum_required(VERSION 3.25.2)
 project(NexoraConsumer LANGUAGES CXX)
 
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(expected "consumer-expected")
+set(actual "consumer-actual")
 find_package(Nexora 0.2 CONFIG REQUIRED)
+if(NOT "${expected}" STREQUAL "consumer-expected" OR NOT "${actual}" STREQUAL "consumer-actual")
+    message(FATAL_ERROR "find_package(Nexora) changed consumer variables: expected='${expected}', actual='${actual}'")
+endif()
 foreach(internal_target IN ITEMS docs internal_docs methods_reference participants_reference methods_sph
                                  participants_sph sph_fixed_csr_fixture sph_fixed_csr_tests
                                  sph_tests sph_benchmark sph_tank_trajectory kokkos_test_main)
