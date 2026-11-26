@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 #include <cmath>
 #include <limits>
+#include <numbers>
 #include <methods/sph/Pressure3D.hpp>
 
 namespace {
@@ -179,6 +180,25 @@ TEST(SphWcsphOperators, IsolatedCoincidentAndCutoffHaveZeroPressureGradient) {
         for (const real value : checked(result.pressure_acceleration(row)))
             EXPECT_EQ(value, 0);
 }
+#if NEXORA_ENABLE_DOUBLE_PRECISION
+TEST(SphWcsphOperators, PressureForceSurvivesSquaredDistanceUnderflow) {
+    const Kokkos::Serial exec;
+    const Fields fields({{{0, 0, 0}, 1, 1, 0}, {{1e-170, 0, 0}, 1, 2, 0}});
+    const auto grid = checked(sph::CellGrid::build(exec, fields.get(), 1));
+    const sph::Values rho("test.rho", 2), pressure("test.pressure", 2);
+    const sph::Acceleration3D acceleration("test.acceleration", 2);
+    Kokkos::deep_copy(exec, rho, real{2});
+    ASSERT_TRUE(sph::evaluate_pressure_3d(exec, grid.neighbors(), sph::TaitEos({1, 1e85, 1}),
+                                          rho, pressure, acceleration).ok());
+    // Each p/rho² is 1e170/4. The radial factor at this separation rounds to 3/pi.
+    for (std::size_t row = 0; row < 2; ++row) {
+        const bool left = grid.fields().ids(grid.owned_slots()(row)) == 1;
+        EXPECT_DOUBLE_EQ(acceleration(row, 0), (left ? -1.5 : 1.5) / std::numbers::pi);
+        EXPECT_EQ(acceleration(row, 1), 0);
+        EXPECT_EQ(acceleration(row, 2), 0);
+    }
+}
+#endif
 TEST(SphWcsphOperators, RejectsInvalidParameters) {
     Kokkos::Serial exec;
     Fields fields({{{0, 0, 0}, 1, 1, 0}, {{1, 0, 0}, 2, 2, 0}});
@@ -219,16 +239,14 @@ TEST(SphWcsphOperators, PressureValidatesOnlyContributingWallData) {
     const sph::Values rho("test.rho", 1), pressure("test.pressure", 1);
     const sph::Acceleration3D acceleration("test.acceleration", 1);
     const sph::WallAcceleration3D wall_acceleration("test.wall_acceleration", 2);
-    for (const real x : {real{0}, real{1}, real{2}}) {
+    for (const real x : {real{0}, std::numeric_limits<real>::min(), real{1}, real{2}}) {
         SCOPED_TRACE(x);
         const Fields fields({{{0, 0, 0}, 1, 1, 0}, {{x, 0, 0}, 1, 2, 1}});
         const auto grid = checked(sph::CellGrid::build(exec, fields.get(), 8));
         rho(0) = 1;
         const auto result = sph::evaluate_pressure_3d(exec, grid.neighbors(), sph::TaitEos({1, 1, 1}),
             rho, pressure, acceleration, wall_acceleration, {0., std::numeric_limits<double>::quiet_NaN(), 0.});
-        EXPECT_EQ(result.ok(), x != 1);
-        if (x == 1)
-            EXPECT_EQ(result.code(), StatusCode::numerical_failure);
+        EXPECT_EQ(result.code(), (x > 0 && x < 2) ? StatusCode::numerical_failure : StatusCode::success);
     }
 
     // R² rounds up, while sqrt(1² + 1²)/h rounds exactly to the zero-gradient

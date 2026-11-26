@@ -100,6 +100,17 @@ review 发现 job 级 `env` 无法引用 `runner.temp`。工作流改为在首�
 
 新增极值回归先在旧域宽实现上复现了向外舍入、越界推进成功及越界运动回调。修复后 Debug float 的相关定向 CTest 为 9/9。独立精确分数检查核对了极值域宽和 65,466 组有限差值的 binary64 残差。真实 WCSPH 的 `run` 在 `t=1` 发布终点后，以 `2^-54` 继续请求会返回 `invalid_argument` 和 `participant finite time domain is exhausted`，保留时钟、步数和壁样本。未耗尽时仍检查绝对端点能否推进。命令、日志及本轮变动的 SHA-256 清单见本地 `build/wall-review-evidence/`。
 
+## CLI 输出、固定时间量子、SPH 压力与安装包复验
+
+在 `9e8db57` 及工作树修复上，Apple M2 Pro（arm64）、macOS 27.2.1、AppleClang 21.0.0.21000401、CMake 4.4.3 和 Ninja 1.13.2 使用按构建类型匹配的本地 Kokkos 5.2.2 Serial 与 GoogleTest 1.17.0。两组 `tools/validate_serial.py verify --jobs 4 --require-network-blocked` 从 `2026-11-26T09:39:13+08:00` 开始，Release 于 `2026-11-26T09:41:06+08:00` 完成，Debug 于 `2026-11-26T09:41:36+08:00` 完成，退出码均为 0。
+
+float Debug、double Release、float Release、double Debug 各通过 180 项常规 CTest 和 1 项搬迁安装测试，跳过数均为 0。每组均通过依赖图检查和 80 位 Reference Decimal 对照，搬迁包的 3 个独立消费者均编译并执行成功。命令、依赖摘要、JUnit 与日志位于本机 `build/p2-audit-checks/final-debug/` 和 `build/p2-audit-checks/final-release/`。
+
+- 只读 stdout 下，旧 CLI 的 `validate`、`plan`、`run` 均写出 0 字节并退出 0。修复后均退出 1。源树和搬迁 CLI 的正常输出检查通过，`run` 与直接调用 Simulation 的输出逐字节相同。
+- 量子为 `3 × 2⁻⁵⁴` 时，步长 1 偏离最近整倍数 1/3 个量子，超过 1/8 上限。Simulation 先提交合法步长 0.75，再拒绝 `0x1.8000000000001p-1`，已发布状态、时钟和步数均保留。
+- 间距为 `1e-170` 的双精度等质量粒子在旧实现下两端加速度均为 0。修复后 x 分量分别通过 `-1.5/π` 和 `+1.5/π` 的 `EXPECT_DOUBLE_EQ` 检查，横向分量为 0。另测了极小间距的 ghost 输入校验、真正重合和支持半径截断。
+- 搬迁包对 `-DNEXORA_GPU_BACKEND=CUDA` 和 `-DNEXORA_GPU_BACKEND=` 均在配置时报出变量已移除。省略该变量的消费者成功导入 Nexora 0.2。
+
 ## 重跑
 
 准备官方归档。需要网络获取时在 `provision` 中显式加 `--download`。在网络隔离环境内执行 `verify`，保留 `--require-network-blocked` 以使探针失败时停止验证。以下按当前的两个归档和本机工具链演示，按 profile 使用新目录。只执行一组精度时传 `--precisions float` 或 `--precisions double`。

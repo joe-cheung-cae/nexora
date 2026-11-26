@@ -43,27 +43,29 @@ std::optional<double> ghost_source_coefficient(const NeighborView3D& grid, Local
     return coefficient;
 }
 
-bool contributes(double distance_squared, double cutoff_squared) {
-    return distance_squared > 0 && distance_squared < cutoff_squared;
+bool contributes(double d2, double cutoff_squared, double dx, double dy, double dz) {
+    // Squaring a nonzero displacement can underflow even in double.
+    return d2 < cutoff_squared && (dx != 0 || dy != 0 || dz != 0);
 }
 
 template <class Prepare>
 std::array<double, 3>
-acceleration_at_slot(const NeighborView3D& grid, LocalIndex i,
-                     const Kokkos::View<const double*, Kokkos::HostSpace>& force_coefficient,
-                     double cutoff_squared, double inverse_h5, const Prepare& prepare) {
-    const auto& position = grid.fields().position;
+acceleration_at_row(const NeighborView3D& grid, std::size_t row,
+                    const Kokkos::View<const double*, Kokkos::HostSpace>& force_coefficient,
+                    double cutoff_squared, double inverse_h5, const Prepare& prepare) {
+    const auto i = grid.owned_slots()(row);
     const auto& mass = grid.fields().mass;
     const double h = grid.smoothing_length();
     std::array<double, 3> a{};
-    grid.for_each_neighbor_of_slot(i, [&](LocalIndex j, double d2) {
-        if (!contributes(d2, cutoff_squared) || !prepare(j))
+    grid.for_each_neighbor_with_displacement(row, [&](LocalIndex j, double d2, double dx, double dy, double dz) {
+        if (!contributes(d2, cutoff_squared, dx, dy, dz) || !prepare(j))
             return;
         const double gradient = m4_negative_radial_derivative_over_q_inside_support_3d(Kokkos::sqrt(d2) / h);
         const double pair =
             (force_coefficient(i) + force_coefficient(j)) * (gradient * inverse_h5) * mass(j);
-        for (int axis = 0; axis < 3; ++axis)
-            a[axis] += pair * (double(position(i, axis)) - position(j, axis));
+        a[0] -= pair * dx;
+        a[1] -= pair * dy;
+        a[2] -= pair * dz;
     });
     return a;
 }
@@ -118,10 +120,11 @@ Status evaluate(const Kokkos::Serial& exec, const NeighborView3D& grid, const Ta
                     const auto i = rows(row);
                     if (gravity)
                         fluid_row(i) = static_cast<LocalIndex>(row);
-                    grid.for_each_neighbor_of_slot(i, [&](LocalIndex j, double d2) {
-                        if (ghost(j) && contributes(d2, cutoff_squared))
-                            needed(j) = 1;
-                    });
+                    grid.for_each_neighbor_with_displacement(row,
+                        [&](LocalIndex j, double d2, double dx, double dy, double dz) {
+                            if (ghost(j) && contributes(d2, cutoff_squared, dx, dy, dz))
+                                needed(j) = 1;
+                        });
                 });
             }
         }
@@ -179,8 +182,8 @@ Status evaluate(const Kokkos::Serial& exec, const NeighborView3D& grid, const Ta
             Kokkos::parallel_reduce(
                 "sph.pressure.acceleration", owned,
                 [&](std::size_t row, std::size_t& errors) {
-                    const auto a = acceleration_at_slot(grid, rows(row), force_coefficient,
-                                                        cutoff_squared, inverse_h5, prepare);
+                    const auto a = acceleration_at_row(grid, row, force_coefficient,
+                                                       cutoff_squared, inverse_h5, prepare);
                     for (int axis = 0; axis < 3; ++axis) {
                         if (fits_real(a[axis]))
                             acceleration(row, axis) = static_cast<real>(a[axis]);

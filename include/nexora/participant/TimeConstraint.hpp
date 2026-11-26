@@ -46,14 +46,15 @@ inline Status validate_time_step(const TimeConstraint& constraint, double step) 
         return {StatusCode::invalid_argument, "requested step violates participant bounds"};
     }
     if (constraint.fixed_quantum) {
-        const double count = step / *constraint.fixed_quantum;
-        const double nearest = std::round(count);
+        const double quantum = *constraint.fixed_quantum;
+        const double count = step / quantum;
         // Keep a strict fractional-quantum ceiling even at large counts, where
         // an uncapped relative tolerance could accept a half-quantum step.
         const double tolerance = std::min(0.125, 8.0 * std::numeric_limits<double>::epsilon() *
                                                      std::max(1.0, std::abs(count)));
-        if (nearest < 1.0 || count > 0x1p53 ||
-            std::abs(count - nearest) > tolerance) {
+        // The rounded quotient can lose its fractional part at large counts.
+        if (count < 0.5 || count > 0x1p53 ||
+            std::abs(std::remainder(step, quantum)) / quantum > tolerance) {
             return {StatusCode::invalid_argument, "requested step is not a fixed-quantum multiple"};
         }
     }

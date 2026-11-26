@@ -170,6 +170,10 @@ expect_configure_rejection(source-wrong-gtest-version "${project_source}" "versi
 
 expect_configure_rejection(source-legacy-gpu-backend "${project_source}" "NEXORA_GPU_BACKEND was removed"
     "${source_arg}" "-DKokkos_DIR=${kokkos_dir}" "-DNEXORA_GPU_BACKEND=NONE")
+expect_configure_rejection(consumer-legacy-gpu-backend "${consumer_copy}" "NEXORA_GPU_BACKEND was removed"
+    "${nexora_arg}" "-DKokkos_DIR=${kokkos_dir}" "${precision_expectation_arg}" "-DNEXORA_GPU_BACKEND=CUDA")
+expect_configure_rejection(consumer-empty-gpu-backend "${consumer_copy}" "NEXORA_GPU_BACKEND was removed"
+    "${nexora_arg}" "-DKokkos_DIR=${kokkos_dir}" "${precision_expectation_arg}" "-DNEXORA_GPU_BACKEND=")
 expect_source_and_consumer_rejection(cxx17 "Nexora requires C++20"
     "-DKokkos_DIR=${kokkos_dir}" "-DCMAKE_CXX_STANDARD=17")
 

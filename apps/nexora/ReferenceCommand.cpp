@@ -130,7 +130,7 @@ int run_reference_case(ReferenceCase input) {
         return 1;
     }
     std::cout << std::move(summary).str();
-    return std::cout ? 0 : 1;
+    return std::cout.flush() ? 0 : 1;
 }
 
 } // namespace
@@ -148,10 +148,10 @@ int reference_command(ReferenceCommand command, const char* path) try {
     switch (command) {
     case ReferenceCommand::validate:
         std::cout << "valid=true\n";
-        return std::cout ? 0 : 1;
+        return std::cout.flush() ? 0 : 1;
     case ReferenceCommand::plan:
         print_plan(input.value());
-        return std::cout ? 0 : 1;
+        return std::cout.flush() ? 0 : 1;
     case ReferenceCommand::run:
         if (!build_info::reference_validated) {
             std::cerr << "reference Serial profile requires validation evidence for this build\n";

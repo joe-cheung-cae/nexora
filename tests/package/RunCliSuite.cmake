@@ -91,6 +91,22 @@ if(NOT run_stdout STREQUAL oracle_stdout)
     message(FATAL_ERROR "CLI output differs from direct Simulation/Reference calls.\nCLI:\n${run_stdout}\nOracle:\n${oracle_stdout}")
 endif()
 
+if(UNIX)
+    foreach(command IN ITEMS validate plan run)
+        set(command_args "${command}")
+        if(command STREQUAL "run" AND NOT profile_validated)
+            list(APPEND command_args --fixture)
+        endif()
+        # Open stdout read-only so even a buffered write fails on flush.
+        execute_process(COMMAND /bin/sh -c "exec \"$@\" 1</dev/null" nexora-output-failure
+            "${cli}" ${command_args} "${valid_case}"
+            RESULT_VARIABLE result ERROR_VARIABLE stderr)
+        if(NOT result STREQUAL "1")
+            message(FATAL_ERROR "${command} did not report stdout failure with exit 1.\nexit=${result}\n${stderr}")
+        endif()
+    endforeach()
+endif()
+
 function(expect_shared_rejection fixture)
     set(case_path "${case_dir}/${fixture}")
     set(reference_diagnostic "")

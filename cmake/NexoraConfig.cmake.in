@@ -1,5 +1,9 @@
 @PACKAGE_INIT@
 
+if(DEFINED NEXORA_GPU_BACKEND)
+    message(FATAL_ERROR "NEXORA_GPU_BACKEND was removed; select a verified local Kokkos package with Kokkos_DIR. This slice supports Serial only.")
+endif()
+
 include(CMakeFindDependencyMacro)
 set(Kokkos_LAUNCH_COMPILER OFF)
 find_dependency(Kokkos 5.2.2 EXACT CONFIG)

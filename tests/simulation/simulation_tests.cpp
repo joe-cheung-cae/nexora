@@ -303,4 +303,35 @@ TEST(SimulationTest, IntegratesRequestedDurationWithRoundedEndpoint) {
     ASSERT_TRUE(rounded_time.finalize().ok());
 }
 
+TEST(SimulationTest, FixedQuantumChecksRemainderAtLargeCounts) {
+    const TimeConstraint constraint{1.0, 0.0, 0x1.8p-53};
+    // 0.75 is exactly 2^52 quanta. 1.0 is one third of a quantum from a multiple.
+    EXPECT_TRUE(validate_time_step(constraint, 0.75).ok());
+    EXPECT_EQ(validate_time_step(constraint, 1.0).code(), StatusCode::invalid_argument);
+
+    const double past_limit = std::nextafter(1.0, 2.0);
+    const TimeConstraint count_limit{past_limit, 0.0, 0x1p-53};
+    EXPECT_TRUE(validate_time_step(count_limit, 1.0).ok());
+    EXPECT_EQ(validate_time_step(count_limit, past_limit).code(), StatusCode::invalid_argument);
+}
+
+TEST(SimulationTest, RejectedFixedQuantumStepDoesNotPublish) {
+    TestParticipant participant;
+    participant.constraint = {1.0, 0.0, 0x1.8p-53};
+    Simulation simulation(participant);
+    ASSERT_TRUE(simulation.initialize().ok());
+    ASSERT_TRUE(simulation.run(0.75).ok());
+
+    const auto status = simulation.run(0x1.8000000000001p-1);
+    EXPECT_EQ(status.code(), StatusCode::invalid_argument);
+    EXPECT_EQ(status.message(), "requested step is not a fixed-quantum multiple");
+    EXPECT_EQ(participant.evaluations, 1);
+    EXPECT_EQ(participant.publications, 1);
+    EXPECT_DOUBLE_EQ(participant.time, 0.75);
+    EXPECT_DOUBLE_EQ(participant.value, 0.75);
+    EXPECT_EQ(simulation.time().accepted_steps, 1);
+    EXPECT_DOUBLE_EQ(simulation.time().accepted_time, 0.75);
+    ASSERT_TRUE(simulation.finalize().ok());
+}
+
 } // namespace

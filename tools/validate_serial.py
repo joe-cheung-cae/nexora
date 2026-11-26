@@ -530,6 +530,8 @@ def verify_precision(args, profile, precision):
         "nexora_reference_tests.Reference.StableTransferHandlesBothSignsAtRealLimit",
         "nexora_simulation_tests.SimulationTest.RunsScheduleAndPublishesEachStepOnce",
         "nexora_simulation_tests.SimulationTest.FailedStepStopsRunAndPreservesLastPublication",
+        "nexora_simulation_tests.SimulationTest.FixedQuantumChecksRemainderAtLargeCounts",
+        "nexora_simulation_tests.SimulationTest.RejectedFixedQuantumStepDoesNotPublish",
         "nexora_sph_tests.SphCellGrid.ThreeDimensionalShuffledStableIdsAndGhosts",
         "nexora_sph_tests.SphCellGrid.NeighborViewPreservesCallbackOrder",
         "nexora_sph_tests.SphCellGrid.TranslatedCellRangesKeepIntegerPrecision",
@@ -609,6 +611,7 @@ def verify_precision(args, profile, precision):
           "nexora_sph_tests.SphVerlet.PredictorRangeAppliesOnlyToConsumedVelocity"]
          if precision == "float" else
          ["nexora_sph_tests.SphVerlet.LateCflFailurePreservesPublishedFieldsAndReleasesCandidate",
+          "nexora_sph_tests.SphWcsphOperators.PressureForceSurvivesSquaredDistanceUnderflow",
           "nexora_sph_tests.SphContinuity.RoundedSubnormalSupportTieStillConsumesVelocity",
           "nexora_sph_tests.SphVerletOperators.DoubleStepRejectsKickOrDriftOverflowAtGridBoundary"]))
     test_log = build / "Testing/Temporary/LastTest.log"
