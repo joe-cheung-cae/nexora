@@ -4,7 +4,7 @@
 
 ```mermaid
 flowchart TD
-  old["已接受的 x、v、ρ、A、D 及前一层历史"] --> move["按请求时长推进流体位置，取步末壁位置"]
+  old["已接受的 x、v、ρ、A、D 及前一层历史"] --> move["推进流体位置，motion 采样调用方步末壁位姿"]
   move --> grid["更新粒子邻域与稳定 ID 行映射"]
   grid --> fields["用已接受导数推进 ρ 和 v"]
   fields --> rate["用同一时刻的速度、邻域和壁速度求 D"]
@@ -26,7 +26,11 @@ flowchart TD
 
 变步长系数与独立文献式 13 等价。对光滑解，上述 AB2 步的主局部误差与 `h³/6 + h²k/4` 成正比。端点等距时系数归为 `5h³/12`。Spitfire 的变步长算例也以一次前向欧拉建立 AB2 历史。[变步长多步法的局部误差，式 13–14](https://link.springer.com/article/10.1007/s11075-020-00900-1) · [Spitfire 的 AB2 启动与变步长公式](https://spitfire.readthedocs.io/en/latest/demo/time_integration/explicit/customized_adaptive_stepping.html#variable-step-ab2-method)
 
-历史保留一个已接受时间层的速度、密度、压力加速度和密度变化率。粒子跨格时，新行经格网排列映射到同一 ID 的旧行。同步 Serial 参与者持有相应 HostSpace 分配、读权和预算票据，重建格网或释放临时位置缓冲不丢弃历史。数值或预算失败保留先前的读权、时钟和历史。协调器按生命周期进入 failed；直接参与者在同一起点可提交较小请求。持久化重启与分布式迁移需要另外定义历史字段、行映射和再同步计数的保存协议。[状态与历史](../../src/participants/sph/WcsphStep3D.hpp) · [提交](../../src/participants/sph/WcsphParticipant3D.cpp)
+历史保留一个已接受时间层的速度、密度、压力加速度和密度变化率。粒子跨格时，新行经格网排列映射到同一 ID 的旧行。同步 Serial 参与者持有相应 HostSpace 分配、读权和预算票据，重建格网或释放临时位置缓冲不丢弃历史。数值或预算失败保留先前的读权、时钟和历史。协调器按生命周期进入 failed；直接参与者在同一起点可提交较小请求。运动壁经 `motion` 单向采样，调用方保留已接受壁运动，失败时丢弃候选并按新请求重算；SPH 不恢复外部所有者的状态。持久化重启与分布式迁移需要另外定义历史字段、行映射和再同步计数的保存协议。[状态与历史](../../src/participants/sph/WcsphStep3D.hpp) · [提交](../../src/participants/sph/WcsphParticipant3D.cpp)
+
+## 历史实测范围
+
+以下计数、误差表和执行矩阵取自 `95e7987` 收录的中心差分验收记录。调用方欧拉壁的迁移复验另有记录。[运动壁复验](velocity-driven-wall-serial.md#调用方欧拉迁移后的-serial-复验)
 
 ## 常规步的实际工作量
 
@@ -65,7 +69,7 @@ flowchart TD
 
 光滑粒子对的密度细化在 double 的两档观测阶为 2.00001、2.00000。与按稳定 ID 计算的独立全粒子扫描对照，不等质量轨迹的位置、速度、密度最大误差依次为 float 的 1.192e−7、1.788e−7、2.980e−8，以及 double 的 1.110e−16、1.110e−16、0。恒定重力下的抛物轨迹、跨格后行序翻转、释放临时工作区和运动壁时钟另有回归。字节预算失败用例在已建立历史后试算大步，随后在同一预算下缩步，与直接小步的结果逐项相等。该夹具的预算为 float 551 字节、double 871 字节。[连续性与恒加速度](../../tests/methods/sph/continuity_tests.cpp) · [重排与失败重试](../../tests/methods/sph/verlet_window_tests.cpp)
 
-后续速度驱动壁使用相同的活塞物理参考与原门槛，单列前向欧拉产生的壁位置误差。[速度驱动壁验收](velocity-driven-wall-serial.md)
+现行速度驱动算例由调用方欧拉推进，再经 `motion` 供数；沿用相同活塞参考记录流体误差并检验壁位置的一阶收敛。32 步流体绝对误差门槛用于解析位姿活塞。[速度驱动壁验收](velocity-driven-wall-serial.md)
 
 ## 执行环境与复验
 

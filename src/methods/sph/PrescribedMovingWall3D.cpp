@@ -35,21 +35,11 @@ PrescribedMovingWall3D::PrescribedMovingWall3D(ParticleView particles, Prescribe
       last_elapsed_(trajectory_.last_phase - trajectory_.initial_phase) {}
 
 Result<double> PrescribedMovingWall3D::initial_step_limit() const {
-    const auto& drive = trajectory_.velocity_driven;
-    if (static_cast<bool>(trajectory_.motion) == drive.has_value())
-        return Status{StatusCode::invalid_argument, "choose one WCSPH wall pose owner"};
-    if (drive && !drive->rates)
-        return Status{StatusCode::invalid_argument, "velocity-driven WCSPH wall requires a rates callback"};
+    if (!trajectory_.motion)
+        return Status{StatusCode::invalid_argument, "WCSPH moving wall requires a motion callback"};
     if (!(trajectory_.period >= 0 && std::isfinite(trajectory_.period)) ||
         !(trajectory_.time_resolution >= 0 && std::isfinite(trajectory_.time_resolution)))
         return Status{StatusCode::invalid_argument, "invalid WCSPH moving wall trajectory"};
-    if (drive) {
-        const auto& pose = drive->initial_pose;
-        if (!finite_vector(pose.translation) || !finite_vector(pose.center) || !std::isfinite(pose.angle) ||
-            !finite_vector(pose.axis) || pose.axis == Vector{})
-            return Status{StatusCode::invalid_argument,
-                          "velocity-driven WCSPH wall requires finite initial pose and nonzero fixed axis"};
-    }
     const auto start = initial_time();
     if (!(trajectory_.first_phase <= start.initial_phase && start.initial_phase <= trajectory_.last_phase &&
           std::isfinite(start.initial_phase)))
@@ -76,47 +66,17 @@ double PrescribedMovingWall3D::step_limit_in_domain(WallTrajectoryTime3D time) c
 }
 
 Result<SampledWallMotion3D>
-PrescribedMovingWall3D::motion_at_certified_time(WallTrajectoryTime3D time, WallMotionUse3D use,
-    const SampledWallMotion3D* accepted, real dt) const {
+PrescribedMovingWall3D::motion_at_certified_time(WallTrajectoryTime3D time, WallMotionUse3D use) const {
     double phase = time.initial_phase + time.elapsed;
     if (trajectory_.period > 0) {
         phase = std::fmod(phase, trajectory_.period);
         if (phase < 0)
             phase += trajectory_.period;
     }
-    if (!velocity_driven()) {
-        auto sampled = call_trajectory(trajectory_.motion, time, phase);
-        if (!sampled.ok())
-            return sampled.status();
-        return SampledWallMotion3D{std::move(sampled).value(), use};
-    }
-
-    const auto& drive = *trajectory_.velocity_driven;
-    const auto& initial = drive.initial_pose;
-    RigidWallMotion3D motion{.translation = initial.translation, .center = initial.center,
-                            .axis = initial.axis, .angle = initial.angle};
-    if (accepted) {
-        const auto& previous = accepted->motion;
-        for (int axis = 0; axis < 3; ++axis)
-            motion.translation[axis] = std::fma(dt, previous.velocity[axis], previous.translation[axis]);
-        motion.angle = std::fma(dt, previous.angular_speed, previous.angle);
-        if (!finite_vector(motion.translation) || !std::isfinite(motion.angle))
-            return Status{StatusCode::numerical_failure, "velocity-driven WCSPH wall pose exceeds real range"};
-    } else if (time.elapsed != 0) {
-        return Status{StatusCode::invalid_state, "velocity-driven WCSPH wall requires accepted motion"};
-    }
-
-    const auto rates = call_trajectory(drive.rates, time, phase);
-    if (!rates.ok())
-        return rates.status();
-    const auto& sampled = rates.value();
-    if (!finite_vector(sampled.velocity) || !std::isfinite(sampled.angular_speed))
-        return Status{StatusCode::numerical_failure, "velocity-driven WCSPH wall rate exceeds real range"};
-    motion.velocity = sampled.velocity;
-    motion.acceleration = sampled.acceleration;
-    motion.angular_speed = sampled.angular_speed;
-    motion.angular_acceleration = sampled.angular_acceleration;
-    return SampledWallMotion3D{motion, use};
+    auto sampled = call_trajectory(trajectory_.motion, time, phase);
+    if (!sampled.ok())
+        return sampled.status();
+    return SampledWallMotion3D{std::move(sampled).value(), use};
 }
 
 SampledWallMotion3D::SampledWallMotion3D(RigidWallMotion3D sampled, WallMotionUse3D use)

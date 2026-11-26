@@ -124,7 +124,7 @@ void WcsphStep3D::capture_groups(const std::vector<WallGroupInput3D>& inputs) {
     add_bytes(groups);
     for (const auto& input : inputs) {
         if (input.trajectory)
-            add_bytes(input.trajectory->retained_bytes());
+            add_bytes(input.trajectory->motion.retained_bytes());
     }
     wall_storage_ = require(budget_.reserve(bytes));
     walls_.reserve(inputs.size());
@@ -134,10 +134,8 @@ void WcsphStep3D::capture_groups(const std::vector<WallGroupInput3D>& inputs) {
         auto particles = require(SolidWallBoundary3D::capture_for_grid(
             exec_, input.particles, input.trajectory.has_value()));
         if (input.trajectory) {
-            PrescribedMovingWall3D moving(particles, *input.trajectory);
-            if (particles.extent(0) && moving.velocity_driven())
-                has_velocity_driven_particles_ = true;
-            walls_.push_back({input.id, moving_groups_++, std::move(moving)});
+            walls_.push_back({input.id, moving_groups_++,
+                              PrescribedMovingWall3D(std::move(particles), *input.trajectory)});
         } else {
             walls_.push_back({input.id, 0, FixedWall3D(std::move(particles))});
         }
@@ -152,8 +150,7 @@ WallPhases3D::non_const_type WcsphStep3D::phase_storage(WcsphState3D& state) {
     return allocate<WallPhases3D::non_const_type>(exec_, "sph.wall.group_phases", moving_groups_);
 }
 
-WcsphStep3D::WallMotions WcsphStep3D::sample_wall_motion(WcsphState3D& candidate, WallMotionUse3D use,
-                                                         const WcsphState3D* accepted, real dt) {
+WcsphStep3D::WallMotions WcsphStep3D::sample_wall_motion(const WcsphState3D& candidate, WallMotionUse3D use) {
     WallMotions motions;
     if (!moving_groups_)
         return motions;
@@ -166,14 +163,8 @@ WcsphStep3D::WallMotions WcsphStep3D::sample_wall_motion(WcsphState3D& candidate
         if (!moving || !moving->particles().extent(0))
             continue;
         const auto index = group.phase_index;
-        const auto* start_motion = accepted && moving->velocity_driven()
-            ? &accepted->wall_motion(index) : nullptr;
         motions.values(index) = require(moving->motion_at_certified_time(
-            candidate.wall_phases(index).time, use, start_motion, dt));
-    }
-    if (has_velocity_driven_particles_) {
-        candidate.wall_motion_storage = motions.ticket;
-        candidate.wall_motion = motions.values;
+            candidate.wall_phases(index).time, use));
     }
     return motions;
 }
@@ -380,8 +371,7 @@ WcsphStep3D::WallMotions WcsphStep3D::advance_wall_motion(const WcsphState3D& cu
     }
     candidate.wall_phases = phases;
     const bool has_fluid = current.geometry.owned_row_to_input.extent(0) != 0;
-    return sample_wall_motion(candidate, has_fluid ? WallMotionUse3D::full : WallMotionUse3D::position,
-                              &current, static_cast<real>(duration));
+    return sample_wall_motion(candidate, has_fluid ? WallMotionUse3D::full : WallMotionUse3D::position);
 }
 
 std::unique_ptr<CellGrid> WcsphStep3D::advance_positions_and_update_neighbors(

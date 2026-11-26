@@ -46,7 +46,9 @@ P1-07 的 Serial 验证夹具用 Simulation 运行固定 CSR 的一维 M₄ 密�
 
 给定三维粒子状态可直接建立或更新 `CellGrid`，以只读 `NeighborView3D` 调用密度、压力或连续性算子。格网和版本比较按实际分配前预留受控额度。四组静水初态直接运行密度和固定壁压力算子。静水箱轨迹测试用解析剖面构造初态和核对误差，推进时按粒子的实际密度求压力。[格索引](../../validation/sph/cell-begin-serial.md) · [重构验收](../../validation/sph/sph-3d-refactor-serial.md) · [水箱验收](../../validation/sph/hydrostatic-continuity-repair.md)
 
-私有 `sph::WcsphParticipant3D` 通过 `Simulation::run` 默认执行三维中心差分积分。初始化在初始几何上计算密度变化率和压力加速度。步进用已接受的导数推进粒子位置、速度和密度，更新邻域，在新几何上求步末导数并随历史一起提交。压力加速度字段只含压力项，积分时加恒定重力。首步用单步欧拉建立速度、密度历史，等步长采用中心差分；变步长以及每 39 个连续中心差分步后的重新同步采用两步 Adams–Bashforth。统一固定平滑长度 h 由 `WcsphVerletParameters::smoothing_length` 给定，格宽及支持半径为 2h。SPH 自管的刚体壁从初始位姿出发，用步初平移速度和固定轴角速度前向欧拉推进一次；外部指定绝对位姿的壁直接采样。步末导数与壁面的候选位姿一同提交。[运动壁时序与误差](../../validation/sph/velocity-driven-wall-serial.md)
+私有 `sph::WcsphParticipant3D` 通过 `Simulation::run` 默认执行三维中心差分积分。初始化在初始几何上计算密度变化率和压力加速度。步进用已接受的导数推进粒子位置、速度和密度，更新邻域，在新几何上求步末导数并随历史一起提交。压力加速度字段只含压力项，积分时加恒定重力。首步用单步欧拉建立速度、密度历史，等步长采用中心差分；变步长以及每 39 个连续中心差分步后的重新同步采用两步 Adams–Bashforth。统一固定平滑长度 h 由 `WcsphVerletParameters::smoothing_length` 给定，格宽及支持半径为 2h。所有运动壁统一通过 `PrescribedWallTrajectory3D::motion` 提供绝对位姿与物理导数。调用方拥有壁运动；速度驱动算例由调用方以步初线速度和固定轴角速度前向欧拉形成候选位姿，SPH 只采样并变换参考粒子。步末导数与采样壁几何一同提交。未来 MBD 可经同一入口单向供数，双向载荷交换与联合恢复仍属后续任务。[运动壁时序与误差](../../validation/sph/velocity-driven-wall-serial.md)
+
+应用层私有 `app::PrescribedMotion` 提供表达式运动装配，所有模式均经同一 `motion` 回调供数。`pose` 模式直接计算平移和固定轴转角及一、二阶导数；`velocity` 模式由调用方保存初始位姿，以步初速率欧拉推进并提供端点速率与加速度。表达式通过锁定的 Lepton 主机标量解释器解析和符号求导，变量 `t` 为未取模的物理时间。该 C++ 装配尚无 CLI 或场景文件入口，不安装导出。[运动装配与验证](../../validation/sph/velocity-driven-wall-serial.md)
 
 声学 CFL 与各壁组采样限制中最小的值决定下一步上限。有限轨迹的右端点可以提交，随后可用步长为零。格网可从已接受几何重建。[WCSPH 生命周期](sph-3d-refactor-plan.md) · [积分公式与 Serial 验收](../../validation/sph/central-difference-serial.md)
 

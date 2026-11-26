@@ -10,7 +10,8 @@ if(NOT "${expected}" STREQUAL "consumer-expected" OR NOT "${actual}" STREQUAL "c
 endif()
 foreach(internal_target IN ITEMS docs internal_docs methods_reference participants_reference methods_sph
                                  participants_sph sph_fixed_csr_fixture sph_fixed_csr_tests
-                                 sph_tests sph_benchmark sph_tank_trajectory kokkos_test_main)
+                                 sph_tests sph_benchmark sph_tank_trajectory kokkos_test_main
+                                 prescribed_motion lepton)
     if(TARGET "nexora_${internal_target}" OR TARGET "nexora::${internal_target}"
        OR TARGET "nexora::nexora_${internal_target}")
         message(FATAL_ERROR "Internal target is exported: ${internal_target}")

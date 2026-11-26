@@ -40,10 +40,8 @@ struct IntegrationHistory3D : FluidTimeLevel3D {
 
 struct WcsphState3D : FluidTimeLevel3D {
     DensityRate3D::const_type density_rate;
-    detail::ResourceBudget::Ticket phase_storage, wall_motion_storage, pressure_storage;
+    detail::ResourceBudget::Ticket phase_storage, pressure_storage;
     WallPhases3D wall_phases;
-    // Velocity-driven groups need their accepted pose and rates after scratch eviction.
-    Kokkos::View<const SphBoundary::SampledWallMotion3D*, Kokkos::HostSpace> wall_motion;
     Geometry3D geometry;
     FieldStamp stamp;
     double maximum_step{};
@@ -101,11 +99,9 @@ class WcsphStep3D {
     using WallMotions = Buffer<Kokkos::View<SphBoundary::SampledWallMotion3D*, Kokkos::HostSpace>>;
     std::vector<WallGroup> walls_;
     std::size_t wall_count_{}, moving_groups_{};
-    bool has_velocity_driven_particles_{};
     void capture_groups(const std::vector<SphBoundary::WallGroupInput3D>&);
     WallPhases3D::non_const_type phase_storage(WcsphState3D&);
-    WallMotions sample_wall_motion(WcsphState3D& candidate, SphBoundary::WallMotionUse3D,
-                                   const WcsphState3D* accepted = nullptr, real dt = 0);
+    WallMotions sample_wall_motion(const WcsphState3D& candidate, SphBoundary::WallMotionUse3D);
     void set_next_step(WcsphState3D&, real largest_speed_squared) const;
     struct MovingWallParticle {
         std::size_t phase_index;

@@ -31,6 +31,8 @@ ALLOWED_LINKS = {
     "nexora_participants_reference": {
         "nexora_participant_api", "nexora_methods_reference", "nexora_data"},
     "nexora_methods_sph": {"nexora_core", "Kokkos::kokkos"},
+    "nexora_lepton": set(),
+    "nexora_prescribed_motion": {"nexora_methods_sph", "nexora_lepton"},
     "nexora_participants_sph": {
         "nexora_participant_api", "nexora_methods_sph", "nexora_data", "Kokkos::kokkos"},
     FIXED_CSR_TARGET: {"nexora_participant_api", "nexora_data", "Kokkos::kokkos"},
@@ -39,7 +41,8 @@ ALLOWED_LINKS = {
                "Kokkos::kokkos", "MPI::MPI_C"},
 }
 TEST_LINKS = set(ALLOWED_LINKS) - {"nexora", "nexora_build_options", "nexora_methods_sph",
-                                   "nexora_participants_sph", FIXED_CSR_TARGET, "nexora_sph_benchmark"}
+                                   "nexora_participants_sph", "nexora_lepton", "nexora_prescribed_motion",
+                                   FIXED_CSR_TARGET, "nexora_sph_benchmark"}
 REQUIRED_LINKS = {
     "nexora_data_schema": {"nexora_core"},
     "nexora_data": {"nexora_data_schema", "Kokkos::kokkos"},
@@ -48,6 +51,7 @@ REQUIRED_LINKS = {
     "nexora_participants_reference": {
         "nexora_participant_api", "nexora_methods_reference", "nexora_data"},
     "nexora_methods_sph": ALLOWED_LINKS["nexora_methods_sph"],
+    "nexora_prescribed_motion": ALLOWED_LINKS["nexora_prescribed_motion"],
     "nexora_participants_sph": ALLOWED_LINKS["nexora_participants_sph"],
     FIXED_CSR_TARGET: ALLOWED_LINKS[FIXED_CSR_TARGET],
     "nexora_sph_benchmark": FIXED_CSR_LINKS,
@@ -71,7 +75,7 @@ SPECIAL_TEST_LINKS = {
     "nexora_kokkos_tests": {KOKKOS_TEST_MAIN, "nexora_data"},
     "nexora_reference_tests": {KOKKOS_TEST_MAIN, *REFERENCE_TEST_LINKS},
     "nexora_reference_resource_tests": {KOKKOS_TEST_MAIN, *REFERENCE_TEST_LINKS},
-    "nexora_sph_tests": {KOKKOS_TEST_MAIN, *SPH_LEAF_LINKS},
+    "nexora_sph_tests": {KOKKOS_TEST_MAIN, *SPH_LEAF_LINKS, "nexora_prescribed_motion"},
     "nexora_sph_fixed_csr_tests": {KOKKOS_TEST_MAIN, *FIXED_CSR_LINKS},
     "nexora_sph_tank_trajectory": SPH_LEAF_LINKS,
     "nexora_transport_tests": {KOKKOS_TEST_MAIN, "nexora_data"},
@@ -137,7 +141,9 @@ SPH_ADAMI_CONSUMERS = {
 SPH_PRESSURE_TEST = SPH_CELL_GRID_TEST.with_name("pressure_3d_tests.cpp")
 SPH_VERLET_TEST = SPH_CELL_GRID_TEST.with_name("verlet_window_tests.cpp")
 SPH_MOVING_WALL_HEADER = "methods/sph/PrescribedMovingWall3D.hpp"
+PRESCRIBED_MOTION_HEADER = Path("apps/prescribed_motion/PrescribedMotion.hpp")
 SPH_MOVING_WALL_CONSUMERS = {
+    PRESCRIBED_MOTION_HEADER,
     Path("src") / SPH_MOVING_WALL_HEADER,
     (Path("src") / SPH_MOVING_WALL_HEADER).with_suffix(".cpp"),
     Path(*SPH_PARTICIPANT_DIR) / "WcsphStep3D.hpp",
@@ -275,6 +281,11 @@ def check_internal_include(relative: Path, scope: str, header: str,
         return []
     location = relative.parts
     target_name = "/".join(parts)
+    if ("lepton" in (part.lower() for part in parts) or parts[-1].lower() == "lepton.h") and (
+            relative != PRESCRIBED_MOTION_HEADER.with_suffix(".cpp")):
+        return [f"{relative}: {header} belongs in the prescribed-motion implementation"]
+    if parts[-1] == PRESCRIBED_MOTION_HEADER.name and scope != "apps" and relative != SPH_VERLET_TEST:
+        return [f"{relative}: {header} belongs in application assembly and its SPH integration test"]
     if ({"gtest", "gmock"}.intersection(parts) or parts[-1].startswith(("gtest", "gmock"))) and (
             scope != "tests" or location[:2] == ("tests", "package") or relative in STANDALONE_TEST_SOURCES):
         return [f"{relative}: {header} is private to GoogleTest unit targets"]
@@ -699,6 +710,9 @@ def policy_self_test() -> list[str]:
     for path in SPH_MOVING_WALL_CONSUMERS:
         if check_internal_include(path, path.parts[0], SPH_MOVING_WALL_HEADER):
             failures.append(f"checker self-test failed to allow prescribed wall motion in {path}")
+    for path in (PRESCRIBED_MOTION_HEADER, sph_method, sph_participant, SPH_VERLET_TEST, package_consumer):
+        if not check_internal_include(path, path.parts[0], "lepton/Parser.h"):
+            failures.append(f"checker self-test failed to keep Lepton out of {path}")
     for path in (SPH_CELL_GRID_TEST, SPH_PRESSURE_TEST, SPH_GRID_ORACLE, SPH_ADAMI_TEST,
                  REFERENCE_COMMAND_SOURCE, package_consumer, *FIXED_CSR_CONSUMERS.values(),
                  Path("include/nexora/core/Types.hpp")):

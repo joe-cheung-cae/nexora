@@ -19,6 +19,7 @@ Reference and SPH use `real` for physical state, material parameters, geometry, 
 | --- | --- | --- |
 | Kokkos | **5.2.2**, commit **`8e15454876298832f013ebcaf08d53825b5bda40`** | [Official release](https://github.com/kokkos/kokkos/releases/tag/5.2.2), [release commit](https://github.com/kokkos/kokkos/commit/8e15454876298832f013ebcaf08d53825b5bda40); release date shown as 2026-09-10; exact seconds/timezone were not obtained from the release summary |
 | GoogleTest | **1.17.0**, required when `BUILD_TESTING=ON` | Exact local config package with compiler-matched libraries. [Source, digest and license](../../third_party/README.md#googletest-provenance-record) · [Test development plan](googletest-development-plan.md) |
+| Lepton | Vendored host scalar subset from OpenMM **8.6.1**, commit **`b399af4725573963b46d6c1083fdcf7a37615857`** | Private prescribed-motion expression parsing and symbolic differentiation; MIT notices, fixed archive digest, file manifest and scalar-only patch in [provenance](../../third_party/lepton/README.md). No JIT, vector evaluator, thread runtime or build-time download |
 | C++ | **20**, consistent for Kokkos, Nexora and downstream consumers | Pinned [standard selection](https://github.com/kokkos/kokkos/blob/8e15454876298832f013ebcaf08d53825b5bda40/cmake/kokkos_pick_cxx_std.cmake) and [standard validation](https://github.com/kokkos/kokkos/blob/8e15454876298832f013ebcaf08d53825b5bda40/cmake/kokkos_test_cxx_std.cmake) |
 | CMake | **3.25.2+** for every Nexora target configuration | Kokkos's [top-level minimum is 3.22](https://github.com/kokkos/kokkos/blob/8e15454876298832f013ebcaf08d53825b5bda40/CMakeLists.txt), but [CUDA as a CMake language requires 3.25.2](https://github.com/kokkos/kokkos/blob/8e15454876298832f013ebcaf08d53825b5bda40/cmake/kokkos_enable_options.cmake); use one stricter project floor |
 | Generator / architecture | Ninja; 64-bit target; record exact Ninja version | Reproducible runner profile; Kokkos's pinned top-level source treats 32-bit as experimental |
@@ -28,6 +29,10 @@ Reference and SPH use `real` for physical state, material parameters, geometry, 
 The official release archive SHA-256 is `d6557aaef39302282a15f9c770433d1fcdf4e961dfd6d9ed726b9d0d0f546b9f`, verified against its official manifest; the annotated tag resolves to the locked commit. See [provenance](../../third_party/README.md). `latest`, `develop`, a moving branch, and a version range are not acceptable dependency locks.
 
 The live [requirements page](https://kokkos.org/kokkos-core-wiki/get-started/requirements.html) and [configuration guide](https://kokkos.org/kokkos-core-wiki/get-started/configuration-guide.html) are useful references, but the exact commit's source takes precedence where a general documentation minimum differs. In particular, a generic CMake 3.16 claim must not override the pinned source requirements above.
+
+## Prescribed-motion expression dependency
+
+The internal `nexora_lepton` static target is built from the checked-in scalar interpreter sources with C++20 and upstream Windows static-library macros. It is not installed or exported and does not provide numerical storage, execution policies or device kernels. Kokkos remains the required execution/storage foundation for Nexora numerical work. Prescribed-motion expressions and their symbolic derivatives are evaluated on the host; motion ownership and failure handling follow the existing `motion` boundary. Numerical validation and supported inputs are recorded in [motion validation](../../validation/sph/velocity-driven-wall-serial.md); historical tables retain their original source and toolchain scope.
 
 ## Compiler baseline versus Nexora validation
 

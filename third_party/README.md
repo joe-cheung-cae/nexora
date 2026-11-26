@@ -118,3 +118,18 @@ binary and source package versions, APT package metadata, distribution
 changelog, copyright and license notices, `dot -V` output, executable SHA-256, and downloaded archive digests
 when CI supplies the package. The isolated validation rechecks the executable
 digest before building the internal reference.
+
+## Lepton provenance record
+
+Lepton is a private host scalar expression parser for prescribed-motion input,
+not a numerical execution/storage foundation. The vendored small source subset
+comes from OpenMM 8.6.1, commit
+`b399af4725573963b46d6c1083fdcf7a37615857`. The fixed commit archive SHA-256 is
+`ed6496c2a9a351529e573fbb568483266588066695249eb01a2cf74ecc79ea7a`.
+MIT source notices and the upstream license collection are preserved. No archive,
+binary, JIT/asmjit, vector evaluator, thread runtime or OpenMM engine is vendored.
+The internal `nexora_lepton` STATIC target uses C++20 and upstream Windows
+static-library macros, with no install/export or configure/build download.
+See [the subset record](lepton/README.md) for exact copied paths and original
+digests, the complete scalar-only/numeric-token patch, source retrieval and
+verification steps, API scope and build evidence.

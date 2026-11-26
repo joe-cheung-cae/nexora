@@ -1,7 +1,8 @@
 nexora_add_test(nexora_sph_fixed_csr_tests sph_tests.cpp KOKKOS
     nexora_sph_fixed_csr_fixture nexora::simulation)
 
-nexora_add_test(nexora_sph_tests cell_grid_tests.cpp KOKKOS nexora_participants_sph nexora::simulation)
+nexora_add_test(nexora_sph_tests cell_grid_tests.cpp KOKKOS
+    nexora_participants_sph nexora::simulation nexora_prescribed_motion)
 target_sources(nexora_sph_tests PRIVATE
     pressure_3d_tests.cpp verlet_window_tests.cpp adami_wall_tests.cpp hydrostatic_initial_tests.cpp
     continuity_tests.cpp)

@@ -9,6 +9,7 @@
 #include <nexora/simulation/Simulation.hpp>
 #include <participants/sph/WcsphParticipant3D.hpp>
 #include <participants/sph/WcsphStep3D.hpp>
+#include <prescribed_motion/PrescribedMotion.hpp>
 #include <numbers>
 #include <sstream>
 #include <stdexcept>
@@ -2014,7 +2015,7 @@ sph::WcsphParticipant3D piston_participant(const TrajectoryInput& trajectory) {
     return {fluid.get(), 64, parameters, velocity, density, WallGroups{{21, wall_fields(particles), trajectory}}};
 }
 
-TEST(SphVerlet, RoundTripPistonResolvesTransientContact) {
+void check_round_trip_piston(bool expression) {
     constexpr int reference_steps = 16384;
     const auto reference = integrate_piston_reference(reference_steps);
     const auto half_resolution = integrate_piston_reference(reference_steps / 2);
@@ -2043,9 +2044,29 @@ TEST(SphVerlet, RoundTripPistonResolvesTransientContact) {
             auto trajectory = stationary_motion(piston_limit);
             trajectory.initial_phase = 0;
             trajectory.period = 1;
+            std::unique_ptr<app::PrescribedMotion> owner;
+            if (expression) {
+                app::MotionConfig config{.mode = app::MotionMode::pose};
+                config.expressions[0] = "2*(t*(1-t))^4";
+                owner = checked(app::PrescribedMotion::create(config));
+                trajectory = owner->trajectory(piston_limit);
+                trajectory.period = 1;
+            }
+            const auto expression_motion = trajectory.motion;
             trajectory.motion = [&](WallTime time, double phase) -> Result<WallMotion> {
                 calls.push_back({time, phase});
                 const auto [x, v, a] = piston_signal(phase);
+                if (expression) {
+                    const auto sampled = expression_motion(time, phase);
+                    if (sampled.ok()) {
+                        const auto& value = sampled.value();
+                        const auto tolerance = 4 * std::numeric_limits<real>::epsilon();
+                        EXPECT_NEAR(value.translation[0], x, tolerance);
+                        EXPECT_NEAR(value.velocity[0], v, tolerance);
+                        EXPECT_NEAR(value.acceleration[0], a, tolerance);
+                    }
+                    return sampled;
+                }
                 WallMotion motion;
                 motion.translation[0] = x;
                 motion.velocity[0] = v;
@@ -2061,8 +2082,12 @@ TEST(SphVerlet, RoundTripPistonResolvesTransientContact) {
             double time{};
             for (int step = 1; step <= steps; ++step) {
                 const double dt = (unequal ? (step % 2 ? 1.5 : .5) : 1.) / steps;
+                if (owner)
+                    ASSERT_TRUE(owner->prepare(dt).ok());
                 const auto status = simulation.run(dt);
                 ASSERT_TRUE(status.ok()) << status.message();
+                if (owner)
+                    owner->commit();
                 time += dt;
                 EXPECT_DOUBLE_EQ(participant.time_constraint().maximum_step, piston_limit);
 
@@ -2150,24 +2175,69 @@ TEST(SphVerlet, RoundTripPistonResolvesTransientContact) {
     }
 }
 
+TEST(SphVerlet, RoundTripPistonResolvesTransientContact) {
+    check_round_trip_piston(false);
+}
 
-TEST(SphVerlet, VelocityDrivenPistonSeparatesWallPositionAndFluidErrors) {
+TEST(SphLeptonWall, DisplacementPistonResolvesTransientContact) {
+    check_round_trip_piston(true);
+}
+
+struct CallerEulerWall {
+    WallMotion accepted, candidate;
+    double accepted_time{}, candidate_time{};
+
+    void stage(double end, double dt, WallMotion endpoint) {
+        candidate_time = end;
+        endpoint.center = accepted.center;
+        endpoint.axis = accepted.axis;
+        for (int axis = 0; axis < 3; ++axis)
+            endpoint.translation[axis] = std::fma(static_cast<real>(dt), accepted.velocity[axis],
+                                                 accepted.translation[axis]);
+        endpoint.angle = std::fma(static_cast<real>(dt), accepted.angular_speed, accepted.angle);
+        candidate = endpoint;
+    }
+
+    Result<WallMotion> sample(WallTime time) const {
+        if (time.elapsed != accepted_time && time.elapsed != candidate_time)
+            return Status{StatusCode::invalid_state, "caller has no staged wall motion at this time"};
+        const auto& motion = time.elapsed == accepted_time ? accepted : candidate;
+        // The caller needs these rates for its next Euler step, even for a wall-only run.
+        if (!std::isfinite(motion.angular_speed) ||
+            !std::all_of(motion.velocity.begin(), motion.velocity.end(), [](real v) { return std::isfinite(v); }))
+            return Status{StatusCode::numerical_failure, "nonfinite caller Euler rate"};
+        return motion;
+    }
+
+    void publish() {
+        accepted = candidate;
+        accepted_time = candidate_time;
+    }
+};
+
+void check_euler_piston(bool expression) {
     constexpr int reference_steps = 16384;
     const auto reference = integrate_piston_reference(reference_steps);
-    TrajectoryInput trajectory;
-    trajectory.period = 1;
-    trajectory.sample_step_limit = piston_limit;
-    trajectory.velocity_driven.emplace().rates = [](WallTime, double phase) -> Result<wall::WallMotionRates3D> {
-        const auto signal = piston_signal(phase);
-        wall::WallMotionRates3D rates;
-        rates.velocity[0] = static_cast<real>(signal[1]);
-        rates.acceleration[0] = static_cast<real>(signal[2]);
-        return rates;
+    const auto endpoint = [](double time) {
+        const auto signal = piston_signal(time);
+        return WallMotion{.velocity = {static_cast<real>(signal[1]), 0, 0},
+                          .acceleration = {static_cast<real>(signal[2]), 0, 0}};
     };
     double previous_wall_error{};
     for (int steps : {32, 64, 128, 256}) {
         SCOPED_TRACE(steps);
         const double dt = 1. / steps;
+        CallerEulerWall owner{.accepted = endpoint(0)};
+        auto trajectory = stationary_motion(piston_limit);
+        trajectory.motion = [&](WallTime time, double) { return owner.sample(time); };
+        std::unique_ptr<app::PrescribedMotion> expression_owner;
+        if (expression) {
+            app::MotionConfig config{.mode = app::MotionMode::velocity};
+            config.expressions[0] = "8*(t*(1-t))^3*(1-2*t)";
+            expression_owner = checked(app::PrescribedMotion::create(config));
+            trajectory = expression_owner->trajectory(piston_limit);
+        }
+        trajectory.period = 1;
         auto participant = piston_participant(trajectory);
         Simulation simulation(participant);
         ASSERT_TRUE(simulation.initialize().ok());
@@ -2175,17 +2245,29 @@ TEST(SphVerlet, VelocityDrivenPistonSeparatesWallPositionAndFluidErrors) {
         double euler_translation{};
         for (int step = 1; step <= steps; ++step) {
             euler_translation += dt * piston_signal((step - 1) * dt)[1];
-            ASSERT_TRUE(simulation.run(dt).ok());
             const double time = step * dt;
+            if (expression_owner)
+                ASSERT_TRUE(expression_owner->prepare(dt).ok());
+            else
+                owner.stage(time, dt, endpoint(time));
+            const auto [translation, wall_velocity, wall_acceleration] = piston_signal(time);
+            const double epsilon = std::numeric_limits<real>::epsilon();
+            // Check the group's endpoint rates even while the wall is outside kernel support.
+            const auto trial_motion = checked(trajectory.motion({0, time}, std::fmod(time, trajectory.period)));
+            EXPECT_NEAR(trial_motion.velocity[0], wall_velocity, 4 * epsilon);
+            EXPECT_NEAR(trial_motion.acceleration[0], wall_acceleration, 4 * epsilon);
+            ASSERT_TRUE(simulation.run(dt).ok());
+            if (expression_owner)
+                expression_owner->commit();
+            else
+                owner.publish();
             const auto wall_value = checked(participant.read_committed_wall(29));
             const auto state = committed(participant);
             ASSERT_EQ(state.rows.size(), 1u);
             const auto& particle = state.rows.front();
             EXPECT_EQ(wall_value.stamp.time.physical_time, time);
             EXPECT_EQ(state.stamp.time.physical_time, time);
-            const double epsilon = std::numeric_limits<real>::epsilon();
             EXPECT_NEAR(wall_value.position[0], piston_reference_position + euler_translation, 4 * epsilon);
-            const auto [translation, wall_velocity, wall_acceleration] = piston_signal(time);
             maximum_wall_error = std::max(maximum_wall_error,
                 std::abs(wall_value.position[0] - (piston_reference_position + translation)));
 
@@ -2215,7 +2297,7 @@ TEST(SphVerlet, VelocityDrivenPistonSeparatesWallPositionAndFluidErrors) {
         const auto record = [&](const char* field, double error) {
             std::ostringstream text;
             text << std::scientific << std::setprecision(16) << error;
-            RecordProperty(std::string(field) + "_" + std::to_string(steps), text.str());
+            ::testing::Test::RecordProperty(std::string(field) + "_" + std::to_string(steps), text.str());
         };
         record("max_wall_position_error", maximum_wall_error);
         record("sampled_fluid_speed_error", sampled_speed_error);
@@ -2224,11 +2306,15 @@ TEST(SphVerlet, VelocityDrivenPistonSeparatesWallPositionAndFluidErrors) {
             EXPECT_NEAR(previous_wall_error / maximum_wall_error, 2., .05);
         previous_wall_error = maximum_wall_error;
         ASSERT_TRUE(simulation.finalize().ok());
-        if (steps == 32) {
-            EXPECT_LE(sampled_speed_error, 2.e-6);
-            EXPECT_LE(sampled_density_error, 3.e-6);
-        }
     }
+}
+
+TEST(SphVerlet, CallerEulerPistonSeparatesWallPositionAndFluidErrors) {
+    check_euler_piston(false);
+}
+
+TEST(SphLeptonWall, VelocityPistonSeparatesWallPositionAndFluidErrors) {
+    check_euler_piston(true);
 }
 
 void expect_wall_vector(const std::array<real, 3>& value, const std::array<double, 3>& expected) {
@@ -2236,36 +2322,48 @@ void expect_wall_vector(const std::array<real, 3>& value, const std::array<doubl
         EXPECT_NEAR(value[axis], expected[axis], 16 * std::numeric_limits<real>::epsilon());
 }
 
-TEST(SphVelocityDrivenWall, ConstantTranslationAndRotationPreserveRigidGeometry) {
+TEST(SphCallerEulerWall, ConstantTranslationAndRotationPreserveRigidGeometry) {
     const Fields empty({}), body({{{2, -1, .5}, 1, 41, 1}, {{3, -1, .5}, 1, 42, 1},
                                    {{2, 1, .5}, 1, 43, 1}}),
         prescribed({{{5, 0, 0}, 1, 51, 1}});
-    TrajectoryInput motion;
-    motion.sample_step_limit = .5;
+    const WallMotion initial{.translation = {-1, .5, .25}, .velocity = {.5, -.25, .125},
+                             .center = {2, -1, .5}, .axis = {0, 0, 1},
+                             .angle = .25, .angular_speed = .75};
+    CallerEulerWall owner{.accepted = initial};
+    auto motion = stationary_motion(.5);
     std::vector<double> sampled;
-    motion.velocity_driven = wall::VelocityDrivenWall3D{
-        .initial_pose = {.translation = {-1, .5, .25}, .center = {2, -1, .5},
-                         .axis = {0, 0, 1}, .angle = .25},
-        .rates = [&](WallTime time, double) -> Result<wall::WallMotionRates3D> {
-            sampled.push_back(time.elapsed);
-            return wall::WallMotionRates3D{.velocity = {.5, -.25, .125}, .angular_speed = .75};
-        }};
-    auto legacy = stationary_motion(.5);
-    legacy.motion = [](WallTime time, double) -> Result<WallMotion> {
+    motion.motion = [&](WallTime time, double) {
+        sampled.push_back(time.elapsed);
+        return owner.sample(time);
+    };
+    auto analytic = stationary_motion(.5);
+    analytic.motion = [](WallTime time, double) -> Result<WallMotion> {
         WallMotion result;
-        // The legacy owner supplies its absolute pose; no rates are needed by this wall-only case.
         result.translation[2] = time.elapsed * time.elapsed;
+        result.velocity[2] = 2 * time.elapsed;
+        result.acceleration[2] = 2;
         return result;
     };
     // Register the prescribed group first to exercise the group-to-sample mapping.
-    const WallGroups groups{{7, wall_fields(prescribed), legacy}, {3, wall_fields(body), motion}};
+    const WallGroups groups{{7, wall_fields(prescribed), analytic}, {3, wall_fields(body), motion}};
     sph::WcsphParticipant3D participant(empty.get(), 128, {{1, 1, 1}, 1}, {}, {}, groups);
     Simulation simulation(participant, 8);
     ASSERT_TRUE(simulation.initialize().ok());
     std::vector<double> expected_samples{0};
     for (const double time : {0., .125, .375, .4375}) {
         if (time > 0) {
-            ASSERT_TRUE(simulation.run(time - expected_samples.back()).ok());
+            const double dt = time - expected_samples.back();
+            owner.stage(time, dt, initial);
+            const WallTime request{0, time};
+            const auto first = checked(motion.motion(request, time));
+            const auto second = checked(motion.motion(request, time));
+            EXPECT_EQ(first.translation, second.translation);
+            EXPECT_EQ(first.angle, second.angle);
+            EXPECT_EQ(first.velocity, second.velocity);
+            EXPECT_EQ(first.angular_speed, second.angular_speed);
+            expected_samples.insert(expected_samples.end(), 2, time);
+            ASSERT_TRUE(simulation.run(dt).ok());
+            owner.publish();
             expected_samples.push_back(time);
         }
         EXPECT_EQ(sampled, expected_samples);
@@ -2285,24 +2383,24 @@ TEST(SphVelocityDrivenWall, ConstantTranslationAndRotationPreserveRigidGeometry)
     ASSERT_TRUE(simulation.finalize().ok());
 }
 
-TEST(SphVelocityDrivenWall, LinearVelocityAndAngularSpeedConvergeAtFirstOrder) {
+TEST(SphLeptonWall, LinearVelocityAndAngularSpeedConvergeAtFirstOrder) {
     const Fields empty({}), walls({{{0, 0, 0}, 1, 41, 1}, {{1, 0, 0}, 1, 42, 1}});
-    TrajectoryInput motion;
-    motion.sample_step_limit = .25;
-    motion.velocity_driven = wall::VelocityDrivenWall3D{
-        .initial_pose = {.axis = {0, 0, 1}},
-        .rates = [](WallTime time, double) -> Result<wall::WallMotionRates3D> {
-            const real t = static_cast<real>(time.elapsed);
-            return wall::WallMotionRates3D{.velocity = {1 + t, 0, 0}, .acceleration = {1, 0, 0},
-                                           .angular_speed = real{.5} + t, .angular_acceleration = 1};
-        }};
-    const WallGroups groups{{3, wall_fields(walls), motion}};
+    app::MotionConfig config{.mode = app::MotionMode::velocity};
+    config.expressions = {"1+t", "0", "0", "0.5+t"};
+    config.axis = {0, 0, 1};
     double previous_x_error{}, previous_angle_error{};
     for (const int steps : {4, 8, 16}) {
+        const auto owner = checked(app::PrescribedMotion::create(config));
+        const WallGroups groups{{3, wall_fields(walls), owner->trajectory(.25)}};
         sph::WcsphParticipant3D participant(empty.get(), 128, {{1, 1, 1}, 1}, {}, {}, groups);
         Simulation simulation(participant);
         ASSERT_TRUE(simulation.initialize().ok());
-        ASSERT_TRUE(simulation.run(1. / steps, steps).ok());
+        const double dt = 1. / steps;
+        for (int step = 1; step <= steps; ++step) {
+            ASSERT_TRUE(owner->prepare(dt).ok());
+            ASSERT_TRUE(simulation.run(dt).ok());
+            owner->commit();
+        }
         const auto center = checked(participant.read_committed_wall(41)).position;
         const auto arm = checked(participant.read_committed_wall(42)).position;
         const double angle = std::atan2(double(arm[1]) - center[1], double(arm[0]) - center[0]);
@@ -2314,70 +2412,153 @@ TEST(SphVelocityDrivenWall, LinearVelocityAndAngularSpeedConvergeAtFirstOrder) {
             EXPECT_EQ(previous_x_error / x_error, 2.);
             EXPECT_NEAR(previous_angle_error / angle_error, 2., 2.e-5);
         }
-        RecordProperty("translation_error_" + std::to_string(steps), std::to_string(x_error));
-        RecordProperty("angle_error_" + std::to_string(steps), std::to_string(angle_error));
+        ::testing::Test::RecordProperty("translation_error_" + std::to_string(steps), std::to_string(x_error));
+        ::testing::Test::RecordProperty("angle_error_" + std::to_string(steps), std::to_string(angle_error));
         previous_x_error = x_error;
         previous_angle_error = angle_error;
         ASSERT_TRUE(simulation.finalize().ok());
     }
 }
 
-TEST(SphVelocityDrivenWall, FailedAdamiEndpointPreservesPoseAndRatesForShorterRetry) {
+TEST(SphLeptonWall, FailedAdamiEndpointPreservesPoseAndRatesForShorterRetry) {
     const Fields fluid({{{0, 0, 0}, .125, 11, 0}}), body({{{1, 0, 0}, .125, 41, 1}});
     const sph::Velocity3D velocity("test.retry_velocity", 1);
     sph::Values density("test.retry_density", 1);
     density(0) = 1;
-    const auto trajectory = [](std::vector<double>& samples) {
-        TrajectoryInput motion;
-        motion.sample_step_limit = .5;
-        motion.velocity_driven = wall::VelocityDrivenWall3D{
-            .rates = [&](WallTime time, double) -> Result<wall::WallMotionRates3D> {
-                samples.push_back(time.elapsed);
-                const real t = static_cast<real>(time.elapsed);
-                return wall::WallMotionRates3D{.velocity = {real{.125} + 4 * t * t, 0, 0},
-                                                .acceleration = {8 * t, 0, 0}};
-            }};
-        return motion;
-    };
-    std::vector<double> samples, reference_samples;
+    app::MotionConfig config{.mode = app::MotionMode::velocity};
+    config.expressions[0] = "0.125+4*t^2";
+    const auto owner = checked(app::PrescribedMotion::create(config));
+    const auto reference_owner = checked(app::PrescribedMotion::create(config));
+    const auto motion = owner->trajectory(.5);
     const sph::WcsphVerletParameters parameters{{1, 1, 1}, 1};
     sph::WcsphParticipant3D participant(fluid.get(), 32, parameters, velocity, density,
-                                        WallGroups{{7, wall_fields(body), trajectory(samples)}});
+                                        WallGroups{{7, wall_fields(body), motion}});
     sph::WcsphParticipant3D reference(fluid.get(), 32, parameters, velocity, density,
-                                      WallGroups{{7, wall_fields(body), trajectory(reference_samples)}});
+                                      WallGroups{{7, wall_fields(body), reference_owner->trajectory(.5)}});
     ASSERT_TRUE(participant.initialize(0).ok());
     ASSERT_TRUE(reference.initialize(0).ok());
     constexpr double first = 1. / 16, large = .25, small = 1. / 64;
-    ASSERT_TRUE(participant.step({0, first, first}).ok());
-    ASSERT_TRUE(reference.step({0, first, first}).ok());
+    const auto step = [](sph::WcsphParticipant3D& solver, app::PrescribedMotion& driver,
+                         double start, double dt) {
+        if (const auto status = driver.prepare(dt); !status.ok())
+            return status;
+        const auto status = solver.step({start, start + dt, dt});
+        if (status.ok())
+            driver.commit();
+        else
+            driver.discard();
+        return status;
+    };
+    ASSERT_TRUE(step(participant, *owner, 0, first).ok());
+    ASSERT_TRUE(step(reference, *reference_owner, 0, first).ok());
     const auto identity = WcsphTestAccess::accepted_identity(participant);
     const auto before = committed(participant);
     const auto before_wall = checked(participant.read_committed_wall(41));
     const auto before_rates = WcsphTestAccess::rates(participant);
+    const auto before_motion = checked(motion.motion({0, first}, first));
     // At t=5/16, the wall's positive acceleration gives a negative inverse-EOS
-    // density. The endpoint motion has already been sampled and its pose advanced.
-    const auto failure = participant.step({first, first + large, large});
+    // density after SPH samples the staged endpoint.
+    const auto failure = step(participant, *owner, first, large);
     ASSERT_EQ(failure.code(), StatusCode::numerical_failure) << failure.message();
     EXPECT_EQ(failure.message(), "invalid Adami wall pressure or inverse Tait density");
-    EXPECT_EQ(samples, (std::vector<double>{0, first, first + large}));
+    EXPECT_FALSE(motion.motion({0, first + large}, first + large).ok());
+    const auto restored = checked(motion.motion({0, first}, first));
+    EXPECT_EQ(restored.translation, before_motion.translation);
+    EXPECT_EQ(restored.velocity, before_motion.velocity);
+    EXPECT_EQ(restored.acceleration, before_motion.acceleration);
     EXPECT_EQ(WcsphTestAccess::accepted_identity(participant), identity);
     EXPECT_EQ(WcsphTestAccess::rates(participant), before_rates);
     expect_same_rows(committed(participant), before);
     expect_same_wall(checked(participant.read_committed_wall(41)), before_wall);
     ASSERT_TRUE(participant.release_workspace().ok());
     for (const double start : {first, first + small}) {
-        ASSERT_TRUE(reference.step({start, start + small, small}).ok());
-        const auto retry = participant.step({start, start + small, small});
+        ASSERT_TRUE(step(reference, *reference_owner, start, small).ok());
+        const auto retry = step(participant, *owner, start, small);
         ASSERT_TRUE(retry.ok()) << retry.message();
         expect_same_rows(committed(participant), committed(reference));
         expect_same_wall(checked(participant.read_committed_wall(41)),
                          checked(reference.read_committed_wall(41)));
         EXPECT_EQ(WcsphTestAccess::rates(participant), WcsphTestAccess::rates(reference));
     }
-    EXPECT_EQ(samples, (std::vector<double>{0, first, first + large, first + small, first + 2 * small}));
-    EXPECT_EQ(reference_samples, (std::vector<double>{0, first, first + small, first + 2 * small}));
     ASSERT_TRUE(participant.finalize().ok());
     ASSERT_TRUE(reference.finalize().ok());
+}
+
+TEST(SphLeptonWall, RejectsInvalidExpressionAndUnknownVariable) {
+    app::MotionConfig config{.mode = app::MotionMode::pose};
+    for (const char* input : {"sin(", "t+unknown", "1e999"}) {
+        SCOPED_TRACE(input);
+        config.expressions[0] = input;
+        const auto result = app::PrescribedMotion::create(config);
+        ASSERT_FALSE(result.ok());
+        EXPECT_EQ(result.status().code(), StatusCode::invalid_argument);
+    }
+}
+
+TEST(SphLeptonWall, SamplesAngularDerivativesAtPhysicalTime) {
+    app::MotionConfig config{.mode = app::MotionMode::pose};
+    config.initial_time = 2;
+    config.axis = {0, 0, 1};
+    config.expressions[3] = "t^3";
+    const auto owner = checked(app::PrescribedMotion::create(config));
+    const auto trajectory = owner->trajectory(.5);
+    const auto initial = checked(trajectory.motion({0, 0}, 0));
+    EXPECT_EQ(initial.angle, 8);
+    ASSERT_TRUE(owner->prepare(.5).ok());
+    for (int sample = 0; sample < 2; ++sample) {
+        const auto motion = checked(trajectory.motion({0, .5}, .5));
+        EXPECT_EQ(motion.angle, 15.625);
+        EXPECT_EQ(motion.angular_speed, 18.75);
+        EXPECT_EQ(motion.angular_acceleration, 15);
+        EXPECT_EQ(motion.axis, (std::array<real, 3>{0, 0, 1}));
+        EXPECT_EQ(checked(trajectory.motion({0, 0}, 0)).angle, initial.angle);
+    }
+    owner->commit();
+    EXPECT_FALSE(trajectory.motion({0, 0}, 0).ok());
+    EXPECT_EQ(checked(trajectory.motion({0, .5}, .5)).angle, 15.625);
+}
+
+TEST(SphLeptonWall, MatchesAcceptedPhysicalClockAtLargeOrigin) {
+    app::MotionConfig config{.mode = app::MotionMode::pose};
+    config.initial_time = 0x1p52;
+    config.expressions[0] = "t-4503599627370496";
+    const auto owner = checked(app::PrescribedMotion::create(config));
+    const auto motion = owner->trajectory(1).motion;
+    double physical_time = config.initial_time;
+    for (int step = 1; step <= 3; ++step) {
+        constexpr double dt = .75;
+        physical_time += dt;
+        ASSERT_TRUE(owner->prepare(dt).ok());
+        owner->commit();
+        const double elapsed = step * dt;
+        EXPECT_EQ(checked(motion({0, elapsed}, elapsed)).translation[0], physical_time - config.initial_time);
+        EXPECT_EQ(physical_time - config.initial_time, step);
+    }
+}
+
+TEST(SphLeptonWall, FailedPrepareDiscardsCandidateAndPreservesInitialPose) {
+    app::MotionConfig config{.mode = app::MotionMode::velocity};
+    config.expressions = {"0.5", "1/(1-t)", "-2", "2"};
+    config.initial_pose = {1, 2, 3, .125};
+    const auto owner = checked(app::PrescribedMotion::create(config));
+    const auto motion = owner->trajectory(1).motion;
+    const auto initial = checked(motion({0, 0}, 0));
+    EXPECT_EQ(initial.translation, (std::array<real, 3>{1, 2, 3}));
+    EXPECT_EQ(initial.angle, .125);
+    ASSERT_TRUE(owner->prepare(.5).ok());
+    EXPECT_EQ(checked(motion({0, .5}, .5)).translation, (std::array<real, 3>{1.25, 2.5, 2}));
+    EXPECT_EQ(owner->prepare(1).code(), StatusCode::numerical_failure);
+    owner->commit();
+    EXPECT_FALSE(motion({0, .5}, .5).ok());
+    EXPECT_FALSE(motion({0, 1}, 1).ok());
+    EXPECT_EQ(checked(motion({0, 0}, 0)).translation, initial.translation);
+    ASSERT_TRUE(owner->prepare(.25).ok());
+    owner->commit();
+    const auto shorter = checked(motion({0, .25}, .25));
+    EXPECT_EQ(shorter.translation, (std::array<real, 3>{1.125, 2.25, 2.5}));
+    EXPECT_EQ(shorter.angle, .625);
+    EXPECT_EQ(shorter.velocity, (std::array<real, 3>{.5, static_cast<real>(4. / 3), -2}));
+    EXPECT_EQ(shorter.angular_speed, 2);
 }
 
 TEST(SphVerlet, MovingWallsSampleTranslationAndRotationAtGroupPhase) {
@@ -2455,13 +2636,11 @@ TEST(SphVerlet, MovingWallRejectsInvalidGroupsAndSamples) {
     const sph::Velocity3D velocity("test.velocity", 1);
     sph::Values density("test.density", 1);
     density(0) = 1;
-    const auto rejects = [&](WallGroups groups, std::optional<StatusCode> expected = {}) {
+    const auto rejects = [&](WallGroups groups) {
         sph::WcsphParticipant3D participant(fluid.get(), 64, parameters, velocity, density, groups);
         Simulation simulation(participant);
         const auto result = simulation.initialize();
         EXPECT_FALSE(result.ok());
-        if (expected)
-            EXPECT_EQ(result.code(), *expected);
         EXPECT_FALSE(participant.read_committed_wall(21).ok());
         EXPECT_EQ(participant.resource_usage().controlled_bytes, 0u);
         EXPECT_TRUE(simulation.finalize().ok());
@@ -2481,18 +2660,6 @@ TEST(SphVerlet, MovingWallRejectsInvalidGroupsAndSamples) {
     invalid.motion = {};
     rejects({{1, wall_fields(wall_a), invalid}});
     std::size_t samples = 0;
-    auto drive = legal;
-    drive.velocity_driven = wall::VelocityDrivenWall3D{
-        .rates = [&](WallTime, double) -> Result<wall::WallMotionRates3D> {
-            ++samples;
-            return wall::WallMotionRates3D{};
-        }};
-    rejects({{1, wall_fields(wall_a), drive}}, StatusCode::invalid_argument); // Both pose owners.
-    drive.motion = {};
-    drive.velocity_driven->initial_pose.axis = {};
-    rejects({{1, wall_fields(wall_a), drive}}, StatusCode::invalid_argument);
-    drive.velocity_driven = wall::VelocityDrivenWall3D{};
-    rejects({{1, wall_fields(wall_a), drive}}, StatusCode::invalid_argument); // Missing rate source.
     for (const double limit : {0., -.25, std::numeric_limits<double>::infinity(),
                               std::numeric_limits<double>::quiet_NaN()}) {
         SCOPED_TRACE(limit);
@@ -2506,36 +2673,40 @@ TEST(SphVerlet, MovingWallRejectsInvalidGroupsAndSamples) {
     EXPECT_EQ(samples, 0u);
 }
 
-TEST(SphVelocityDrivenWall, RequiresFiniteEndpointRatesEvenWithoutFluidNeighbors) {
+TEST(SphCallerEulerWall, InvalidEndpointRatesPreserveWallForShorterRetry) {
     const Fields empty({}), boundary({{{0, 0, 0}, 1, 21, 1}});
+    const WallMotion uniform{.velocity = {.5, 0, 0}};
+    CallerEulerWall owner{.accepted = uniform};
+    auto motion = stationary_motion(.25);
+    motion.motion = [&](WallTime time, double) { return owner.sample(time); };
+    sph::WcsphParticipant3D participant(empty.get(), 16, {{1, 1, 1}, 1}, {}, {},
+                                        WallGroups{{1, wall_fields(boundary), motion}});
+    ASSERT_TRUE(participant.initialize(0).ok());
+    owner.stage(.125, .125, uniform);
+    ASSERT_TRUE(participant.step({0, .125, .125}).ok());
+    owner.publish();
+    const auto before = checked(participant.read_committed_wall(21));
+
     for (bool invalid_spin : {false, true}) {
         SCOPED_TRACE(invalid_spin);
-        TrajectoryInput motion;
-        motion.sample_step_limit = .25;
-        motion.velocity_driven = wall::VelocityDrivenWall3D{
-            .rates = [invalid_spin](WallTime time, double) -> Result<wall::WallMotionRates3D> {
-                wall::WallMotionRates3D rates{.velocity = {.5, 0, 0}};
-                if (time.elapsed == .25) {
-                    const auto invalid = std::numeric_limits<real>::infinity();
-                    if (invalid_spin)
-                        rates.angular_speed = invalid;
-                    else
-                        rates.velocity[0] = invalid;
-                }
-                return rates;
-            }};
-        sph::WcsphParticipant3D participant(empty.get(), 16, {{1, 1, 1}, 1}, {}, {},
-            WallGroups{{1, wall_fields(boundary), motion}});
-        Simulation simulation(participant);
-        ASSERT_TRUE(simulation.initialize().ok());
-        ASSERT_TRUE(simulation.run(.125).ok());
-        const auto accepted = checked(participant.read_committed_wall(21));
-        ASSERT_EQ(simulation.run(.125).code(), StatusCode::numerical_failure);
-        EXPECT_EQ(checked(participant.read_committed_wall(21)), accepted);
-        ASSERT_TRUE(participant.step({.125, .1875, .0625}).ok());
-        EXPECT_EQ(checked(participant.read_committed_wall(21)).position[0], .5 * .1875);
-        EXPECT_TRUE(simulation.finalize().ok());
+        auto invalid = uniform;
+        const auto infinity = std::numeric_limits<real>::infinity();
+        if (invalid_spin)
+            invalid.angular_speed = infinity;
+        else
+            invalid.velocity[0] = infinity;
+        owner.stage(.25, .125, invalid);
+        const auto status = participant.step({.125, .25, .125});
+        EXPECT_EQ(status.code(), StatusCode::numerical_failure);
+        EXPECT_EQ(status.message(), "nonfinite caller Euler rate");
+        EXPECT_EQ(checked(participant.read_committed_wall(21)), before);
+        EXPECT_EQ(owner.accepted_time, .125);
     }
+    owner.stage(.1875, .0625, uniform);
+    ASSERT_TRUE(participant.step({.125, .1875, .0625}).ok());
+    owner.publish();
+    EXPECT_EQ(checked(participant.read_committed_wall(21)).position[0], .5 * .1875);
+    EXPECT_TRUE(participant.finalize().ok());
 }
 
 TEST(SphVerlet, UnusedMovingWallKinematicsDoNotRejectTheStep) {
@@ -3208,59 +3379,42 @@ TEST(SphVerlet, MovingWallRejectsReentrantSimulationMutation) {
 
 TEST(SphVerlet, MovingWallTrajectoryStorageIsAdmittedBeforeCapture) {
     const Fields empty({}), moving_wall({{{.25, 0, 0}, 1, 82, 1}});
+    const auto compact = stationary_motion(.5);
+    auto large = compact;
     std::array<double, 1024> displacement{};
     displacement.back() = .125;
+    large.motion = [displacement](WallTime, double) -> Result<WallMotion> {
+        WallMotion motion;
+        motion.translation[0] = displacement.back();
+        return motion;
+    };
+    const auto captured_bytes = large.motion.retained_bytes() - compact.motion.retained_bytes();
+    ASSERT_GT(captured_bytes, 8000u);
+
     const sph::WcsphVerletParameters parameters{{1, .25, 1}, .5};
     const auto make = [&](const TrajectoryInput& trajectory,
                           sph::WcsphParticipant3D::ResourceLimits limits = {}) {
         return sph::WcsphParticipant3D(empty.get(), 1, parameters, {}, {},
             WallGroups{{81, wall_fields(moving_wall), trajectory}}, ParticipantId{1}, limits);
     };
-    for (bool velocity_driven : {false, true}) {
-        SCOPED_TRACE(velocity_driven);
-        auto compact = stationary_motion(.5);
-        if (velocity_driven) {
-            compact.motion = {};
-            compact.velocity_driven = wall::VelocityDrivenWall3D{
-                .initial_pose = {.translation = {.125, 0, 0}},
-                .rates = [](WallTime, double) -> Result<wall::WallMotionRates3D> {
-                    return wall::WallMotionRates3D{};
-                }};
-        }
-        auto large = compact;
-        if (velocity_driven) {
-            large.velocity_driven->rates = [displacement](WallTime, double) -> Result<wall::WallMotionRates3D> {
-                return wall::WallMotionRates3D{.velocity = {static_cast<real>(displacement.back()), 0, 0}};
-            };
-        } else {
-            large.motion = [displacement](WallTime, double) -> Result<WallMotion> {
-                WallMotion motion;
-                motion.translation[0] = displacement.back();
-                return motion;
-            };
-        }
-        const auto captured_bytes = large.retained_bytes() - compact.retained_bytes();
-        ASSERT_GT(captured_bytes, 8000u);
+    auto baseline = make(compact);
+    ASSERT_TRUE(baseline.initialize(0).ok());
+    const auto compact_bytes = baseline.resource_usage().controlled_bytes;
+    EXPECT_TRUE(baseline.finalize().ok());
 
-        auto baseline = make(compact);
-        ASSERT_TRUE(baseline.initialize(0).ok());
-        const auto compact_bytes = baseline.resource_usage().controlled_bytes;
-        EXPECT_TRUE(baseline.finalize().ok());
+    auto accepted = make(large);
+    ASSERT_TRUE(accepted.initialize(0).ok());
+    EXPECT_EQ(accepted.resource_usage().controlled_bytes, compact_bytes + captured_bytes);
+    EXPECT_EQ(checked(accepted.read_committed_wall(82)).position[0], .375);
+    EXPECT_TRUE(accepted.finalize().ok());
+    EXPECT_EQ(accepted.resource_usage().controlled_bytes, 0u);
 
-        auto accepted = make(large);
-        ASSERT_TRUE(accepted.initialize(0).ok());
-        EXPECT_EQ(accepted.resource_usage().controlled_bytes, compact_bytes + captured_bytes);
-        EXPECT_EQ(checked(accepted.read_committed_wall(82)).position[0], .375);
-        EXPECT_TRUE(accepted.finalize().ok());
-        EXPECT_EQ(accepted.resource_usage().controlled_bytes, 0u);
-
-        auto refused = make(large, {32, 2048});
-        StepAllocations events(refused);
-        EXPECT_EQ(refused.initialize(0).code(), StatusCode::resource_exhausted);
-        EXPECT_EQ(events.count(0, "sph.wall.particles", true), 0u);
-        EXPECT_EQ(refused.resource_usage().controlled_bytes, 0u);
-        EXPECT_TRUE(refused.finalize().ok());
-    }
+    auto refused = make(large, {32, 2048});
+    StepAllocations events(refused);
+    EXPECT_EQ(refused.initialize(0).code(), StatusCode::resource_exhausted);
+    EXPECT_EQ(events.count(0, "sph.wall.particles", true), 0u);
+    EXPECT_EQ(refused.resource_usage().controlled_bytes, 0u);
+    EXPECT_TRUE(refused.finalize().ok());
 }
 
 } // namespace

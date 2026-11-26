@@ -1,0 +1,3 @@
+add_library(nexora_prescribed_motion STATIC PrescribedMotion.cpp PrescribedMotion.hpp)
+target_include_directories(nexora_prescribed_motion PUBLIC "${PROJECT_SOURCE_DIR}/apps")
+target_link_libraries(nexora_prescribed_motion PUBLIC nexora_methods_sph PRIVATE nexora_lepton)
