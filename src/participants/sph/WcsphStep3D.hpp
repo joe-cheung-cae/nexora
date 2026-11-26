@@ -22,15 +22,33 @@ struct WallPhase3D {
 };
 using WallPhases3D = Kokkos::View<const WallPhase3D*, Kokkos::HostSpace>;
 
-struct WcsphState3D {
-    detail::ResourceBudget::Ticket phase_storage;
+/// Owns the fluid read leases and storage reservations transferred to history on commit.
+struct FluidTimeLevel3D {
+    detail::ResourceBudget::Ticket density_storage, velocity_storage, acceleration_storage, rate_storage;
+    std::optional<ReadField<Values::const_type>> density;
+    std::optional<ReadField<Velocity3D::const_type>> velocity, acceleration;
+};
+
+/// One preceding accepted time level. Its row map follows stable IDs across grid reordering.
+struct IntegrationHistory3D : FluidTimeLevel3D {
+    DensityRate3D::const_type density_rate;
+    detail::ResourceBudget::Ticket row_storage;
+    Geometry3D::Indices previous_row; // Current owned row -> same ID at the preceding level; empty = identity.
+    double step_duration{};
+    unsigned centered_steps{};
+};
+
+struct WcsphState3D : FluidTimeLevel3D {
+    DensityRate3D::const_type density_rate;
+    detail::ResourceBudget::Ticket phase_storage, wall_motion_storage, pressure_storage;
     WallPhases3D wall_phases;
+    // Velocity-driven groups need their accepted pose and rates after scratch eviction.
+    Kokkos::View<const SphBoundary::SampledWallMotion3D*, Kokkos::HostSpace> wall_motion;
     Geometry3D geometry;
     FieldStamp stamp;
     double maximum_step{};
-    std::array<detail::ResourceBudget::Ticket, 3> field_storage;
-    std::optional<ReadField<Values::const_type>> density, pressure;
-    std::optional<ReadField<Acceleration3D::const_type>> acceleration, velocity;
+    std::optional<ReadField<Values::const_type>> pressure;
+    IntegrationHistory3D history;
 };
 
 enum class FieldGroup3D { density, pressure, velocity };
@@ -63,15 +81,11 @@ class WcsphStep3D {
         Ticket ticket;
         V values;
     };
-    struct Workspace {
-        std::optional<Buffer<Velocity3D>> half, stage;
-        std::optional<Buffer<Geometry3D::Indices::non_const_type>> old_row;
-        std::optional<Buffer<DensityRate3D>> rate_n, rate_star;
-        std::optional<Buffer<Values>> corrected;
+    /// Reusable position storage. A reordered candidate may take ownership until its geometry is released.
+    std::optional<Buffer<Velocity3D>> trial_positions_;
+    bool release_position_buffer() noexcept;
+    Result<Ticket> reserve_storage(std::size_t bytes);
 
-        bool release_rates() noexcept;
-        bool release_continuity() noexcept;
-    };
     const Kokkos::Serial& exec_;
     const detail::ResourceBudget& budget_;
     std::size_t max_cells_;
@@ -87,19 +101,29 @@ class WcsphStep3D {
     using WallMotions = Buffer<Kokkos::View<SphBoundary::SampledWallMotion3D*, Kokkos::HostSpace>>;
     std::vector<WallGroup> walls_;
     std::size_t wall_count_{}, moving_groups_{};
+    bool has_velocity_driven_particles_{};
     void capture_groups(const std::vector<SphBoundary::WallGroupInput3D>&);
-    Ticket reserve_wall_stage(std::size_t bytes);
     WallPhases3D::non_const_type phase_storage(WcsphState3D&);
-    WallMotions sample_groups(const WallPhases3D&, SphBoundary::WallMotionUse3D);
+    WallMotions sample_wall_motion(WcsphState3D& candidate, SphBoundary::WallMotionUse3D,
+                                   const WcsphState3D* accepted = nullptr, real dt = 0);
     void set_next_step(WcsphState3D&, real largest_speed_squared) const;
-    bool write_wall_slot(const ParticleFields3D&, const WallMotions&, const Velocity3D& output,
-                         LocalIndex slot, bool positions) const;
+    struct MovingWallParticle {
+        std::size_t phase_index;
+        const std::array<real, 3>& reference_position;
+    };
+    std::optional<MovingWallParticle> moving_wall_particle(std::uint64_t particle_id) const;
     void write_wall_positions(const ParticleFields3D&, const WallMotions&, const Velocity3D& output) const;
     SphBoundary::WallTrajectoryTime3D committed_wall_time(std::uint64_t particle_id, const WallPhases3D&) const;
 
     std::unique_ptr<CellGrid> committed_grid_;
-    Workspace workspace_;
 
-    void evaluate_pressure(WcsphState3D&, const CellGrid&, const BindFields3D&, Workspace*, const WallMotions&);
+    WallMotions advance_wall_motion(const WcsphState3D&, double duration, WcsphState3D&);
+    std::unique_ptr<CellGrid> advance_positions_and_update_neighbors(
+        const WcsphState3D&, real dt, const WallMotions&, WcsphState3D&);
+    real advance_density_and_velocity(const WcsphState3D&, double duration, WcsphState3D&, const BindFields3D&);
+    Buffer<Geometry3D::Indices::non_const_type> fluid_rows_by_slot(const CellGrid&);
+    void evaluate_density_rate(WcsphState3D&, const CellGrid&, const WallMotions&);
+    void evaluate_pressure_acceleration(WcsphState3D&, const CellGrid&, const BindFields3D&, const WallMotions&,
+                                        bool initial_density = false);
 };
 } // namespace nexora::sph

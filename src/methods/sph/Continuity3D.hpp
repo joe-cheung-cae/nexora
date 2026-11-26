@@ -7,55 +7,15 @@ namespace nexora::sph {
 
 using DensityRate3D = Kokkos::View<real*, Kokkos::HostSpace>;
 
-// Velocity follows sorted source slots, including wall slots.
-// Output rates follow owned rows.
-// The WCSPH workspace provides disjoint, correctly sized views. Its checked trapezoidal
-// correction consumes every rate before any density is published.
-void stage_continuity_rate_3d(const Kokkos::Serial&, const NeighborView3D&,
-                              const Velocity3D::const_type& velocity, const DensityRate3D& rate);
-
 using StageVelocityReady3D = Kokkos::View<std::uint8_t*, Kokkos::HostSpace>;
 using WriteWallVelocity3D = std::function<bool(LocalIndex)>;
-Status stage_wall_continuity_rate_3d(const Kokkos::Serial&, const NeighborView3D&, const Velocity3D&,
-                                    const DensityRate3D&, const StageVelocityReady3D&,
-                                    const WriteWallVelocity3D&);
 
-struct ContinuityPredictor3D {
-    const Velocity3D::const_type& velocity;
-    const Acceleration3D::const_type& acceleration;
-    real dt;
-    const std::array<real, 3>& gravity;
-
-    void write(std::size_t row, LocalIndex slot, const Velocity3D& output) const {
-        for (int axis = 0; axis < 3; ++axis) {
-            const real value = Kokkos::fma(dt, acceleration(row, axis) + gravity[axis],
-                                             velocity(row, axis));
-            // A consumed nonfinite real component poisons the pair's dot
-            // product. Density correction rejects it before publication.
-            output(slot, axis) = value;
-        }
-    }
-};
-
-// Stage scratch and readiness follow next sorted source slots. Each scratch
-// value is produced only upon its first nonzero geometric contribution.
-Status stage_predicted_continuity_rate_3d(const Kokkos::Serial&, const NeighborView3D&,
-    const Velocity3D&, const DensityRate3D&, const StageVelocityReady3D&,
-    const ContinuityPredictor3D&, const NeighborView3D::Indices& new_to_old_slot,
-    const NeighborView3D::Indices& old_row, const WriteWallVelocity3D& write_wall);
-// With no walls, the correction buffer has one entry per sorted slot. This
-// overload uses it for readiness until the subsequent correction overwrites it.
-Status stage_predicted_continuity_rate_3d(const Kokkos::Serial&, const NeighborView3D&,
-    const Velocity3D&, const DensityRate3D&, const Values& correction_scratch,
-    const ContinuityPredictor3D&, const NeighborView3D::Indices& new_to_old_slot,
-    const NeighborView3D::Indices& old_row);
-
-// The new grid input followed the old sorted slots. Both old fields have owned-row order.
-// old_row maps old owned slots to their respective rows.
-Status correct_density_3d(const Kokkos::Serial&, const NeighborView3D::Indices& new_owned,
-                          const NeighborView3D::Indices& new_to_old_slot,
-                          const NeighborView3D::Indices& old_row, const Values::const_type& density,
-                          const DensityRate3D& rate_n, const DensityRate3D& rate_star,
-                          real dt, const Values& corrected);
+// The WCSPH step provides disjoint views at the grid's time. Fluid velocity and rates
+// follow owned rows. The slot map can be empty when there are no walls.
+// Missing wall callback gives zero velocity. The callback fills sorted wall slots on demand.
+Status evaluate_density_rate_3d(const Kokkos::Serial&, const NeighborView3D&,
+    const Velocity3D::const_type& owned_velocity, const NeighborView3D::Indices& slot_to_owned_row,
+    const DensityRate3D&, const Velocity3D& wall_velocity = {},
+    const StageVelocityReady3D& wall_ready = {}, const WriteWallVelocity3D& write_wall = {});
 
 } // namespace nexora::sph

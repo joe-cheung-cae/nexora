@@ -381,7 +381,7 @@ TEST(SphCellGrid, PairMirrorsAndRelativeVelocityReversalMatchAnalyticRatesAndFor
             velocity(s, 0) = mirror * (1 + relative * (query.fields().ids(s) == 11 ? 2 : -1));
         const auto rho = density_values(exec, query);
         sph::DensityRate3D rate("test.rate", 2);
-        sph::stage_continuity_rate_3d(exec, query, velocity, rate);
+        ASSERT_TRUE(sph::evaluate_density_rate_3d(exec, query, velocity, {}, rate).ok());
         sph::Values pressure("test.pressure", 2);
         sph::Acceleration3D acceleration("test.acceleration", 2);
         const sph::WcsphParameters parameters{.25, 2, 1};

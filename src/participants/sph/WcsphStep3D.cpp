@@ -7,7 +7,6 @@
 #include <memory>
 #include <new>
 #include <string>
-#include <type_traits>
 #include <utility>
 
 namespace nexora::sph {
@@ -85,34 +84,23 @@ InitialInput capture_input(const Kokkos::Serial& exec, const Budget& budget,
     return {std::move(ticket), {position, mass, ids, ghost}};
 }
 
-// Budget admission can release scratch whose access has finished or has yet to begin.
-template <class Reserve, class Trim>
-auto reserve_with_eviction(const Reserve& reserve, const Trim& trim) {
-    auto result = reserve();
-    if (!result.ok() && result.status().code() == StatusCode::resource_exhausted && trim()) {
-        return reserve();
-    }
-    return result;
-}
-
 } // namespace
 
 WcsphStep3D::WcsphStep3D(const Kokkos::Serial& exec, const Budget& budget,
                          std::size_t max_cells, WcsphVerletParameters parameters)
     : exec_(exec), budget_(budget), max_cells_(max_cells), parameters_(parameters) {}
 
-bool WcsphStep3D::Workspace::release_rates() noexcept {
-    const bool released = old_row || rate_n || rate_star;
-    old_row.reset();
-    rate_n.reset();
-    rate_star.reset();
+bool WcsphStep3D::release_position_buffer() noexcept {
+    const bool released = trial_positions_.has_value();
+    trial_positions_.reset();
     return released;
 }
-bool WcsphStep3D::Workspace::release_continuity() noexcept {
-    const bool released = release_rates() || corrected || stage;
-    corrected.reset();
-    stage.reset();
-    return released;
+
+Result<WcsphStep3D::Ticket> WcsphStep3D::reserve_storage(std::size_t bytes) {
+    auto reservation = budget_.reserve(bytes);
+    if (!reservation.ok() && reservation.status().code() == StatusCode::resource_exhausted && release_position_buffer())
+        return budget_.reserve(bytes);
+    return reservation;
 }
 
 const SolidWallBoundary3D& WcsphStep3D::WallGroup::source() const {
@@ -136,7 +124,7 @@ void WcsphStep3D::capture_groups(const std::vector<WallGroupInput3D>& inputs) {
     add_bytes(groups);
     for (const auto& input : inputs) {
         if (input.trajectory)
-            add_bytes(input.trajectory->motion.retained_bytes());
+            add_bytes(input.trajectory->retained_bytes());
     }
     wall_storage_ = require(budget_.reserve(bytes));
     walls_.reserve(inputs.size());
@@ -147,6 +135,8 @@ void WcsphStep3D::capture_groups(const std::vector<WallGroupInput3D>& inputs) {
             exec_, input.particles, input.trajectory.has_value()));
         if (input.trajectory) {
             PrescribedMovingWall3D moving(particles, *input.trajectory);
+            if (particles.extent(0) && moving.velocity_driven())
+                has_velocity_driven_particles_ = true;
             walls_.push_back({input.id, moving_groups_++, std::move(moving)});
         } else {
             walls_.push_back({input.id, 0, FixedWall3D(std::move(particles))});
@@ -154,76 +144,55 @@ void WcsphStep3D::capture_groups(const std::vector<WallGroupInput3D>& inputs) {
     }
 }
 
-WcsphStep3D::Ticket WcsphStep3D::reserve_wall_stage(std::size_t bytes) {
-    // Wall clocks and samples are created before the first half kick. Any work
-    // buffers left by a previous step are disposable here.
-    auto reserved = budget_.reserve(bytes);
-    if (!reserved.ok()) {
-        const bool released = workspace_.release_continuity() || workspace_.half;
-        workspace_.half.reset();
-        if (released)
-            reserved = budget_.reserve(bytes);
-    }
-    return require(std::move(reserved));
-}
-
 WallPhases3D::non_const_type WcsphStep3D::phase_storage(WcsphState3D& state) {
     if (!moving_groups_)
         return {};
-    state.phase_storage = reserve_wall_stage(require(detail::checked_array_bytes(moving_groups_, sizeof(WallPhase3D))));
+    const auto bytes = require(detail::checked_array_bytes(moving_groups_, sizeof(WallPhase3D)));
+    state.phase_storage = require(reserve_storage(bytes));
     return allocate<WallPhases3D::non_const_type>(exec_, "sph.wall.group_phases", moving_groups_);
 }
 
-WcsphStep3D::WallMotions WcsphStep3D::sample_groups(const WallPhases3D& phases, WallMotionUse3D use) {
+WcsphStep3D::WallMotions WcsphStep3D::sample_wall_motion(WcsphState3D& candidate, WallMotionUse3D use,
+                                                         const WcsphState3D* accepted, real dt) {
     WallMotions motions;
     if (!moving_groups_)
         return motions;
     const auto bytes = require(detail::checked_array_bytes(moving_groups_, sizeof(SampledWallMotion3D)));
-    motions.ticket = reserve_wall_stage(bytes);
+    motions.ticket = require(reserve_storage(bytes));
     motions.values = decltype(motions.values)(
         Kokkos::view_alloc(exec_, "sph.wall.stage_motions"), moving_groups_);
     for (const auto& group : walls_) {
         const auto* moving = group.moving();
-        if (moving && moving->particles().extent(0))
-            motions.values(group.phase_index) = require(
-                moving->motion_at_certified_time(phases(group.phase_index).time, use));
+        if (!moving || !moving->particles().extent(0))
+            continue;
+        const auto index = group.phase_index;
+        const auto* start_motion = accepted && moving->velocity_driven()
+            ? &accepted->wall_motion(index) : nullptr;
+        motions.values(index) = require(moving->motion_at_certified_time(
+            candidate.wall_phases(index).time, use, start_motion, dt));
+    }
+    if (has_velocity_driven_particles_) {
+        candidate.wall_motion_storage = motions.ticket;
+        candidate.wall_motion = motions.values;
     }
     return motions;
 }
 
 void WcsphStep3D::set_next_step(WcsphState3D& candidate, real largest_speed_squared) const {
-    candidate.maximum_step = require(verlet_step::acoustic_step(largest_speed_squared,
+    candidate.maximum_step = require(central_difference_step::acoustic_step(largest_speed_squared,
         parameters_.eos.sound_speed, parameters_.cfl, parameters_.smoothing_length));
     for (std::size_t g = 0; g < candidate.wall_phases.extent(0); ++g)
         candidate.maximum_step = std::min(candidate.maximum_step, candidate.wall_phases(g).maximum_step);
 }
 
-bool WcsphStep3D::write_wall_slot(const ParticleFields3D& fields, const WallMotions& motions,
-                                 const Velocity3D& output, LocalIndex slot, bool positions) const {
+std::optional<WcsphStep3D::MovingWallParticle> WcsphStep3D::moving_wall_particle(std::uint64_t particle_id) const {
     for (const auto& group : walls_) {
-        const auto* moving = group.moving();
-        if (!moving)
-            continue;
-        const auto* particle = moving->find(fields.ids(slot));
-        if (!particle)
-            continue;
-        auto& motion = motions.values(group.phase_index);
-        if (positions) {
-            const auto position = motion.position(particle->reference_position);
-            for (int k = 0; k < 3; ++k)
-                output(slot, k) = position[k];
-            return true;
+        if (const auto* moving = group.moving()) {
+            if (const auto* particle = moving->find(particle_id))
+                return MovingWallParticle{group.phase_index, particle->reference_position};
         }
-        const auto sampled = motion.velocity(particle->reference_position);
-        if (!sampled)
-            return false;
-        for (int k = 0; k < 3; ++k)
-            output(slot, k) = (*sampled)[k];
-        return true;
     }
-    for (int k = 0; k < 3; ++k)
-        output(slot, k) = positions ? fields.position(slot, k) : real{0};
-    return true;
+    return std::nullopt;
 }
 
 void WcsphStep3D::write_wall_positions(const ParticleFields3D& fields, const WallMotions& motions,
@@ -243,46 +212,49 @@ void WcsphStep3D::write_wall_positions(const ParticleFields3D& fields, const Wal
     // update_positions checks every drifted coordinate before converting it to an index.
     Kokkos::parallel_for("sph.wall.drift_position", Policy(exec_, 0, fields.ids.extent(0)),
         [&](std::size_t slot) {
-            if (fields.ghost(slot))
-                write_wall_slot(fields, motions, output, static_cast<LocalIndex>(slot), true);
+            if (!fields.ghost(slot))
+                return;
+            if (const auto particle = moving_wall_particle(fields.ids(slot))) {
+                const auto position = motions.values(particle->phase_index).position(particle->reference_position);
+                for (int k = 0; k < 3; ++k)
+                    output(slot, k) = position[k];
+            } else {
+                for (int k = 0; k < 3; ++k)
+                    output(slot, k) = fields.position(slot, k);
+            }
         });
 }
 
 WallTrajectoryTime3D WcsphStep3D::committed_wall_time(std::uint64_t particle_id, const WallPhases3D& phases) const {
-    for (const auto& group : walls_)
-        if (const auto* moving = group.moving(); moving && moving->find(particle_id))
-            return phases(group.phase_index).time;
+    if (const auto particle = moving_wall_particle(particle_id))
+        return phases(particle->phase_index).time;
     return {}; // A committed ghost outside the moving groups belongs to a fixed wall.
 }
 
-void WcsphStep3D::evaluate_pressure(WcsphState3D& state, const CellGrid& grid,
-                                     const BindFields3D& bind, Workspace* work, const WallMotions& motions) {
+void WcsphStep3D::evaluate_pressure_acceleration(WcsphState3D& state, const CellGrid& grid,
+    const BindFields3D& bind, const WallMotions& motions, bool initial_density) {
     const auto& q = grid.neighbors();
     const auto& sources = q.fields();
     const auto n = sources.ids.extent(0), rows = q.owned_slots().extent(0);
-    const auto trim = [&] { return work && work->release_continuity(); };
+    const auto trim = [&] { return release_position_buffer(); };
     const auto write = [&](const StepOutputs3D& out) -> Status {
         Ticket scratch;
         if (rows) {
             const auto stride = step_pressure_workspace_bytes_per_source(n != rows);
             const auto bytes = n * stride;
-            auto reserved = reserve_with_eviction([&] { return budget_.reserve(bytes); }, trim);
+            auto reserved = reserve_storage(bytes);
             if (!reserved.ok())
                 return reserved.status();
             scratch = std::move(reserved).value();
         }
         const auto acceleration_at = [&](LocalIndex slot) {
-            for (const auto& group : walls_) {
-                if (const auto* moving = group.moving()) {
-                    if (const auto* particle = moving->find(sources.ids(slot)))
-                        return motions.values(group.phase_index).acceleration(particle->reference_position);
-                }
-            }
+            if (const auto particle = moving_wall_particle(sources.ids(slot)))
+                return motions.values(particle->phase_index).acceleration(particle->reference_position);
             return std::array<real, 3>{};
         };
         const TaitEos eos(parameters_.eos);
         return evaluate_step_pressure_3d(exec_, q, eos, state.density->view(), out.pressure,
-                                         out.acceleration, std::cref(acceleration_at), parameters_.gravity, work == nullptr);
+                                         out.acceleration, std::cref(acceleration_at), parameters_.gravity, initial_density);
     };
     require(bind(FieldGroup3D::pressure, write, trim));
 }
@@ -320,7 +292,7 @@ Status WcsphStep3D::initialize_state(const ParticleFields3D& fluid,
                 phases(group.phase_index) = {group.id, time, require(moving->initial_step_limit())};
             }
         candidate.wall_phases = phases;
-        const auto samples = sample_groups(phases, nf ? WallMotionUse3D::full : WallMotionUse3D::position);
+        const auto samples = sample_wall_motion(candidate, nf ? WallMotionUse3D::full : WallMotionUse3D::position);
         const auto capture_walls = [&](const auto& position, const auto& mass,
                                        const auto& ids, const auto& ghost) {
             std::size_t offset = nf;
@@ -383,214 +355,212 @@ Status WcsphStep3D::initialize_state(const ParticleFields3D& fluid,
         real largest_speed_squared{};
         require(bind(FieldGroup3D::velocity,
             [&](const StepOutputs3D& out) -> Status {
-                const auto speed = verlet_step::capture_velocity(exec_, map, velocity, out.velocity);
+                const auto speed = central_difference_step::capture_velocity(exec_, map, velocity, out.velocity);
                 if (speed.ok())
                     largest_speed_squared = speed.value();
                 return speed.status();
             }, {}));
-        evaluate_pressure(candidate, *committed_grid_, bind, nullptr, samples);
+        evaluate_density_rate(candidate, *committed_grid_, samples);
+        evaluate_pressure_acceleration(candidate, *committed_grid_, bind, samples, true);
         set_next_step(candidate, largest_speed_squared);
     });
+}
+
+WcsphStep3D::WallMotions WcsphStep3D::advance_wall_motion(const WcsphState3D& current,
+                                                          double duration, WcsphState3D& candidate) {
+    const auto phases = phase_storage(candidate);
+    for (const auto& group : walls_) {
+        if (const auto* moving = group.moving()) {
+            const auto index = group.phase_index;
+            const auto& phase = current.wall_phases(index);
+            const auto [time, limit] = require(
+                moving->advance_certified_time(phase.time, duration, phase.maximum_step));
+            phases(index) = {phase.group_id, time, limit};
+        }
+    }
+    candidate.wall_phases = phases;
+    const bool has_fluid = current.geometry.owned_row_to_input.extent(0) != 0;
+    return sample_wall_motion(candidate, has_fluid ? WallMotionUse3D::full : WallMotionUse3D::position,
+                              &current, static_cast<real>(duration));
+}
+
+std::unique_ptr<CellGrid> WcsphStep3D::advance_positions_and_update_neighbors(
+    const WcsphState3D& current, real dt, const WallMotions& wall_motion, WcsphState3D& candidate) {
+    const auto admit_grid = [&](CellGrid::StorageGroup, std::size_t bytes) { return reserve_storage(bytes); };
+    const auto fluid_count = current.geometry.owned_row_to_input.extent(0);
+    std::optional<CellGrid> rebuilt;
+    if (!committed_grid_)
+        rebuilt.emplace(require(CellGrid::rebuild_committed(exec_, current.geometry.fields(),
+            fluid_count, max_cells_, admit_grid, parameters_.smoothing_length)));
+    const auto& old_grid = committed_grid_ ? *committed_grid_ : *rebuilt;
+    const auto& sources = old_grid.fields();
+    const auto count = sources.ids.extent(0);
+    // Keep positions outside the evictable workspace while the grid consumes them.
+    auto positions = std::exchange(trial_positions_, std::nullopt);
+    if (!positions) {
+        auto ticket = require(budget_.reserve(count * 3 * sizeof(real)));
+        positions.emplace(std::move(ticket), allocate<Velocity3D>(exec_, "sph.central_difference.position", count));
+    }
+    central_difference_step::drift_positions(exec_, old_grid, current.velocity->view(),
+        current.acceleration->view(), dt, positions->values, parameters_.gravity);
+    write_wall_positions(sources, wall_motion, positions->values);
+    auto updated = old_grid.update_positions(exec_, positions->values, max_cells_, admit_grid);
+    if (updated.status().code() == StatusCode::invalid_argument)
+        throw Failure{{StatusCode::numerical_failure, "invalid drifted WCSPH position"}};
+    auto next_grid = std::make_unique<CellGrid>(require(std::move(updated)));
+    auto& geometry = candidate.geometry;
+    if (next_grid->input_is_sorted()) {
+        geometry.particle_storage = next_grid->field_storage();
+        geometry.input = next_grid->fields();
+        trial_positions_ = std::move(positions);
+    } else {
+        geometry.particle_storage = {positions->ticket, old_grid.field_storage()[1], old_grid.field_storage()[2]};
+        geometry.input = {positions->values, sources.mass, sources.ids, sources.ghost};
+    }
+    const bool layout_changed = !old_grid.input_is_sorted() || !next_grid->input_is_sorted();
+    if (layout_changed) {
+        require(establish_owned_rows(exec_, geometry, next_grid->owned_slots(), next_grid->sorted_to_input(),
+                                     [&](std::size_t bytes) { return reserve_storage(bytes); }));
+    } else {
+        geometry.row_storage = current.geometry.row_storage;
+        geometry.owned_row_to_input = current.geometry.owned_row_to_input;
+    }
+    geometry.topology = current.geometry.topology;
+    geometry.geometry = next_grid->positions_changed_
+        ? require(detail::checked_next_version(current.geometry.geometry)) : current.geometry.geometry;
+    geometry.layout = layout_changed ? require(detail::checked_next_version(current.geometry.layout))
+                                     : current.geometry.layout;
+    stamp_geometry(candidate);
+
+    // The grid input is in old sorted-slot order. Compose the two row maps
+    // only when reordering could change the owned row for a stable particle ID.
+    if (!next_grid->input_is_sorted() && fluid_count) {
+        auto& history = candidate.history;
+        if (wall_count_ == 0) {
+            history.row_storage = geometry.row_storage;
+            history.previous_row = geometry.owned_row_to_input;
+        } else {
+            const auto previous_rows = fluid_rows_by_slot(old_grid);
+            history.row_storage = require(reserve_storage(fluid_count * sizeof(LocalIndex)));
+            auto previous_row = allocate<Geometry3D::Indices::non_const_type>(
+                exec_, "sph.central_difference.previous_row", fluid_count);
+            Kokkos::parallel_for("sph.central_difference.match_history", Policy(exec_, 0, fluid_count),
+                [&](std::size_t row) { previous_row(row) = previous_rows.values(geometry.owned_row_to_input(row)); });
+            history.previous_row = previous_row;
+        }
+    }
+    return next_grid;
+}
+
+real WcsphStep3D::advance_density_and_velocity(const WcsphState3D& current, double duration,
+                                               WcsphState3D& candidate, const BindFields3D& bind) {
+    using namespace central_difference_step;
+    const auto& previous = current.history;
+    auto& history = candidate.history;
+    history.step_duration = duration;
+    auto scheme = TimeScheme3D::startup;
+    if (previous.step_duration > 0) {
+        // After 39 centered advances, one AB2 step couples the two time levels again.
+        if (duration == previous.step_duration && previous.centered_steps < 39) {
+            scheme = TimeScheme3D::centered;
+            history.centered_steps = previous.centered_steps + 1;
+        } else {
+            scheme = TimeScheme3D::adams_bashforth;
+        }
+    }
+    const TimeWeights3D weights{scheme, static_cast<real>(duration), static_cast<real>(previous.step_duration)};
+    const auto trim = [&] { return release_position_buffer(); };
+    require(bind(FieldGroup3D::density, [&](const StepOutputs3D& out) {
+        return advance_density(exec_, history.previous_row, previous.previous_row,
+            current.density->view(), current.density_rate,
+            previous.density ? previous.density->view() : Values::const_type{}, previous.density_rate,
+            weights, out.density);
+    }, trim));
+    real largest_speed_squared{};
+    require(bind(FieldGroup3D::velocity, [&](const StepOutputs3D& out) -> Status {
+        auto speed = advance_velocity(exec_, history.previous_row, previous.previous_row,
+            current.velocity->view(), current.acceleration->view(),
+            previous.velocity ? previous.velocity->view() : Velocity3D::const_type{},
+            previous.acceleration ? previous.acceleration->view() : Acceleration3D::const_type{},
+            weights, out.velocity, parameters_.gravity);
+        if (speed.ok())
+            largest_speed_squared = speed.value();
+        return speed.status();
+    }, trim));
+    return largest_speed_squared;
+}
+
+WcsphStep3D::Buffer<Geometry3D::Indices::non_const_type> WcsphStep3D::fluid_rows_by_slot(const CellGrid& grid) {
+    const auto count = grid.fields().ids.extent(0);
+    auto ticket = require(reserve_storage(count * sizeof(LocalIndex)));
+    auto fluid_row = allocate<Geometry3D::Indices::non_const_type>(exec_, "sph.continuity.fluid_row", count);
+    const auto& owned = grid.owned_slots();
+    Kokkos::parallel_for("sph.continuity.map_fluid_rows", Policy(exec_, 0, owned.extent(0)),
+        [&](std::size_t row) { fluid_row(owned(row)) = static_cast<LocalIndex>(row); });
+    return {std::move(ticket), std::move(fluid_row)};
+}
+
+void WcsphStep3D::evaluate_density_rate(WcsphState3D& state, const CellGrid& grid,
+                                        const WallMotions& wall_motion) {
+    const auto rows = grid.owned_slots().extent(0);
+    state.rate_storage = require(reserve_storage(rows * sizeof(real)));
+    auto rate = allocate<DensityRate3D>(exec_, "sph.continuity.density_rate", rows);
+    if (rows && wall_count_) {
+        const auto fluid_row = fluid_rows_by_slot(grid);
+        if (moving_groups_) {
+            const auto count = grid.fields().ids.extent(0);
+            const auto ticket = require(reserve_storage(count * (3 * sizeof(real) + sizeof(std::uint8_t))));
+            const auto velocity = allocate<Velocity3D>(exec_, "sph.continuity.wall_velocity", count);
+            const auto ready = allocate<StageVelocityReady3D>(exec_, "sph.continuity.wall_velocity_ready", count);
+            const auto write_wall_velocity = [&](LocalIndex slot) {
+                std::array<real, 3> wall_velocity{};
+                if (const auto particle = moving_wall_particle(grid.fields().ids(slot))) {
+                    const auto sampled = wall_motion.values(particle->phase_index).velocity(particle->reference_position);
+                    if (!sampled)
+                        return false;
+                    wall_velocity = *sampled;
+                }
+                for (int axis = 0; axis < 3; ++axis)
+                    velocity(slot, axis) = wall_velocity[axis];
+                return true;
+            };
+            require(evaluate_density_rate_3d(exec_, grid.neighbors(), state.velocity->view(), fluid_row.values,
+                                             rate, velocity, ready, std::cref(write_wall_velocity)));
+        } else {
+            require(evaluate_density_rate_3d(exec_, grid.neighbors(), state.velocity->view(), fluid_row.values, rate));
+        }
+    } else {
+        require(evaluate_density_rate_3d(exec_, grid.neighbors(), state.velocity->view(), {}, rate));
+    }
+    state.density_rate = rate;
 }
 
 Status WcsphStep3D::try_step(const TimeInterval& interval, const WcsphState3D& current,
                              WcsphState3D& candidate, const BindFields3D& bind) {
-    const double requested_step = interval.duration();
-    const real dt = static_cast<real>(requested_step);
+    const double duration = interval.duration();
+    const real dt = static_cast<real>(duration);
     if (!(dt > 0))
         return {StatusCode::invalid_argument, "WCSPH step rounds to zero in real precision"};
 
     const auto status = guarded([&] {
-        const auto phases = phase_storage(candidate);
-        // Validate every group's unwrapped interval before asking any trajectory for an endpoint.
-        for (const auto& group : walls_) {
-            if (const auto* moving = group.moving()) {
-                const auto index = group.phase_index;
-                const auto& phase = current.wall_phases(index);
-                const auto [time, limit] = require(
-                    moving->advance_certified_time(phase.time, requested_step, phase.maximum_step));
-                phases(index) = {phase.group_id, time, limit};
-            }
-        }
-        const bool use_stage_velocity = current.geometry.owned_row_to_input.extent(0);
-        auto start_samples = use_stage_velocity ? sample_groups(current.wall_phases, WallMotionUse3D::velocity) : WallMotions{};
-        auto end_samples = sample_groups(phases, use_stage_velocity ? WallMotionUse3D::full : WallMotionUse3D::position);
-        candidate.wall_phases = phases;
-        auto& work = workspace_;
-        // These hot buffers have no live contents until after the drifted grid is ready.
-        const auto trim_drift = [&] {
-            const bool released = work.release_rates() || work.corrected;
-            work.corrected.reset();
-            return released;
-        };
-        const auto reserve_geometry = [&](std::size_t bytes) {
-            return reserve_with_eviction([&] { return budget_.reserve(bytes); }, trim_drift);
-        };
-        const auto admit_grid = [&](CellGrid::StorageGroup, std::size_t bytes) {
-            return reserve_geometry(bytes);
-        };
-        std::optional<CellGrid> rebuilt_grid;
-        if (!committed_grid_) {
-            // Accepted geometry owns a read-only snapshot from a successful grid
-            // build/update. Recreate its derived index without certifying the same
-            // values or checking the sort/gather algorithm's own mappings again.
-            rebuilt_grid.emplace(require(CellGrid::rebuild_committed(
-                exec_, current.geometry.fields(), current.geometry.owned_row_to_input.extent(0),
-                max_cells_, admit_grid, parameters_.smoothing_length)));
-        }
-        const auto& old = committed_grid_ ? *committed_grid_ : *rebuilt_grid;
-        const auto& old_fields = old.fields();
-        const auto& old_owned = old.owned_slots();
-        const auto n = old_fields.ids.extent(0), nf = old_owned.extent(0);
-        const auto ensure = [&](auto& buffer, std::size_t count, std::size_t stride,
-                                const char* label, const auto& trim) {
-            if (!buffer) {
-                using V = std::remove_cvref_t<decltype(buffer->values)>;
-                const auto bytes = count * stride;
-                auto ticket = require(reserve_with_eviction([&] { return budget_.reserve(bytes); }, trim));
-                buffer.emplace(std::move(ticket), allocate<V>(exec_, label, count));
-            }
-        };
-        const auto ensure_stage = [&] {
-            ensure(work.stage, n, 3 * sizeof(real), "sph.verlet.stage", trim_drift);
-        };
-        ensure(work.half, n, 3 * sizeof(real), "sph.verlet.half_velocity", trim_drift);
-        ensure_stage();
-        const auto& half = work.half->values;
-        const auto& v = current.velocity->view();
-        const auto& a = current.acceleration->view();
-        auto& geometry = candidate.geometry;
-        std::unique_ptr<CellGrid> next_grid;
-        {
-            const auto& drift = work.stage->values;
-            verlet_step::kick_drift(exec_, old, v, a, dt, drift, half, parameters_.gravity);
-            write_wall_positions(old_fields, end_samples, drift);
-            const ParticleFields3D input{drift, old_fields.mass, old_fields.ids, old_fields.ghost};
-            auto updated = old.update_positions(exec_, drift, max_cells_, admit_grid);
-            if (updated.status().code() == StatusCode::invalid_argument)
-                throw Failure{{StatusCode::numerical_failure, "invalid drifted WCSPH position"}};
-            next_grid = std::make_unique<CellGrid>(require(std::move(updated)));
-            const auto& next = *next_grid;
-            if (next.input_is_sorted()) {
-                geometry.particle_storage = next.field_storage();
-                geometry.input = next.fields();
-            } else {
-                // The new grid's input was in old sorted order. Retain this exact position
-                // allocation and the old co-ordered immutable fields before recycling stage.
-                geometry.particle_storage = {work.stage->ticket, old.field_storage()[1], old.field_storage()[2]};
-                geometry.input = input;
-                work.stage.reset();
-            }
-        }
-        const auto& next = *next_grid;
-        // The new grid input follows old sorted slots and preserves their IDs and
-        // ownership. A nonidentity new permutation moves distinct IDs; otherwise
-        // the layout changes only if the previous input permutation was nonidentity.
-        const bool layout_changed = !old.input_is_sorted() || !next.input_is_sorted();
-        if (layout_changed) {
-            require(establish_owned_rows(exec_, geometry, next.owned_slots(), next.sorted_to_input(),
-                                         reserve_geometry));
-        } else {
-            geometry.row_storage = current.geometry.row_storage;
-            geometry.owned_row_to_input = current.geometry.owned_row_to_input;
-        }
-        const auto next_geometry = next.positions_changed_
-            ? require(detail::checked_next_version(current.geometry.geometry)) : current.geometry.geometry;
-        const auto next_layout = layout_changed ? require(detail::checked_next_version(current.geometry.layout))
-                                                : current.geometry.layout;
-        geometry.topology = current.geometry.topology;
-        geometry.geometry = next_geometry;
-        geometry.layout = next_layout;
-        stamp_geometry(candidate);
-        ensure_stage();
-        const auto no_trim = [] { return false; };
-        ensure(work.old_row, n, sizeof(LocalIndex), "sph.continuity.old_row", no_trim);
-        ensure(work.rate_n, nf, sizeof(real), "sph.continuity.accepted_rate", no_trim);
-        const Policy rows(exec_, 0, nf);
-        {
-            const auto& stage = work.stage->values;
-            const auto& old_row = work.old_row->values;
-            Kokkos::parallel_for("sph.continuity.accepted_velocity", rows, [&](std::size_t r) {
-                const auto s0 = old_owned(r);
-                old_row(s0) = static_cast<LocalIndex>(r);
-                for (int k = 0; k < 3; ++k)
-                    stage(s0, k) = v(r, k);
-            });
-            const auto write_wall = [&](const ParticleFields3D& fields, const WallMotions& motions,
-                                        LocalIndex slot) {
-                return write_wall_slot(fields, motions, stage, slot, false);
-            };
-            std::optional<Buffer<StageVelocityReady3D>> ready;
-            const bool use_lazy_prediction = nf && n > 1;
-            if (use_lazy_prediction && wall_count_)
-                ensure(ready, n, sizeof(std::uint8_t), "sph.continuity.velocity_ready", no_trim);
-            if (ready && !moving_groups_) {
-                Kokkos::parallel_for("sph.wall.fixed_stage", Policy(exec_, 0, n), [&](std::size_t slot) {
-                    if (old_fields.ghost(slot))
-                        for (int k = 0; k < 3; ++k)
-                            stage(slot, k) = real{0};
-                });
-            }
-            if (ready && moving_groups_) {
-                const auto write = [&](LocalIndex slot) { return write_wall(old_fields, start_samples, slot); };
-                require(stage_wall_continuity_rate_3d(exec_, old.neighbors(), stage, work.rate_n->values,
-                    ready->values, std::cref(write)));
-            } else {
-                stage_continuity_rate_3d(exec_, old.neighbors(), stage, work.rate_n->values);
-            }
-            start_samples = {};
-
-            const ContinuityPredictor3D predictor{v, a, dt, parameters_.gravity};
-            ensure(work.rate_star, nf, sizeof(real), "sph.continuity.predicted_rate", no_trim);
-            if (ready) {
-                const auto write = [&](LocalIndex slot) { return write_wall(next.fields(), end_samples, slot); };
-                require(stage_predicted_continuity_rate_3d(exec_, next.neighbors(), stage, work.rate_star->values,
-                    ready->values, predictor, next.sorted_to_input(), old_row, std::cref(write)));
-                ready.reset();
-            } else if (use_lazy_prediction) {
-                // No wall slots. The correction buffer can track prediction
-                // readiness until the Serial rate kernel returns.
-                ensure(work.corrected, nf, sizeof(real), "sph.continuity.density", no_trim);
-                require(stage_predicted_continuity_rate_3d(exec_, next.neighbors(), stage, work.rate_star->values,
-                    work.corrected->values, predictor, next.sorted_to_input(), old_row));
-            } else {
-                stage_continuity_rate_3d(exec_, next.neighbors(), stage, work.rate_star->values);
-            }
-            ensure(work.corrected, nf, sizeof(real), "sph.continuity.density", no_trim);
-            require(correct_density_3d(exec_, next.owned_slots(), next.sorted_to_input(), old_row,
-                               current.density->view(), work.rate_n->values, work.rate_star->values,
-                               dt, work.corrected->values));
-        }
-        require(bind(FieldGroup3D::density, [&](const StepOutputs3D& out) -> Status {
-            Kokkos::deep_copy(exec_, out.density, work.corrected->values);
-            exec_.fence("sph.continuity.trial_density_ready");
-            return {};
-        }, [&] {
-            const bool released = work.release_rates() || work.stage;
-            work.stage.reset();
-            return released;
-        }));
-        evaluate_pressure(candidate, next, bind, &work, end_samples);
-        end_samples.values = {};
-        end_samples.ticket.reset();
-        real largest_speed_squared{};
-        require(bind(FieldGroup3D::velocity, [&](const StepOutputs3D& out) -> Status {
-            const auto speed = verlet_step::finish_kick(exec_, next, half, candidate.acceleration->view(),
-                                                        dt, out.velocity, parameters_.gravity);
-            if (speed.ok())
-                largest_speed_squared = speed.value();
-            return speed.status();
-        }, [&] { return work.release_continuity(); }));
+        // The accepted continuity rate and pressure force already include the wall at t_n.
+        // Build the endpoint grid first to write fluid values in t_{n+1} owned-row order.
+        const auto end_wall_motion = advance_wall_motion(current, duration, candidate);
+        auto end_grid = advance_positions_and_update_neighbors(current, dt, end_wall_motion, candidate);
+        const real largest_speed_squared = advance_density_and_velocity(current, duration, candidate, bind);
+        evaluate_density_rate(candidate, *end_grid, end_wall_motion);
+        evaluate_pressure_acceleration(candidate, *end_grid, bind, end_wall_motion);
         set_next_step(candidate, largest_speed_squared);
-        committed_grid_ = std::move(next_grid);
+        candidate.history.density_rate = current.density_rate;
+        committed_grid_ = std::move(end_grid);
     });
     if (!status.ok())
-        workspace_ = {};
+        release_position_buffer();
     return status;
 }
 
 void WcsphStep3D::release_workspace() noexcept {
-    workspace_ = {};
+    release_position_buffer();
     committed_grid_.reset();
 }
 } // namespace nexora::sph

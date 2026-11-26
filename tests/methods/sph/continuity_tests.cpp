@@ -79,21 +79,21 @@ TEST(SphVerletOperators, KickDriftWritesOwnedSlotsAndPreservesHalfStepFormula) {
     acceleration(0, 2) = -2;
     constexpr std::array<real, 3> expected_half{2.5, -.75, .25};
     constexpr std::array<real, 3> expected_position{1.625, .3125, .3125};
-    for (const bool standalone : {true, false}) {
-        Kokkos::deep_copy(exec, position, real{-19});
-        Kokkos::deep_copy(exec, half, real{-17});
-        if (standalone) {
-            const auto result = sph::kick_drift_3d(exec, grid, velocity, acceleration, .25, position, half);
-            ASSERT_TRUE(result.ok()) << result.message();
-        } else {
-            sph::verlet_step::kick_drift(exec, grid, velocity, acceleration, .25, position, half, {});
-        }
-        for (int axis = 0; axis < 3; ++axis) {
-            EXPECT_EQ(half(0, axis), expected_half[axis]);
-            EXPECT_EQ(position(0, axis), expected_position[axis]);
-            EXPECT_EQ(half(1, axis), real{-17});
-            EXPECT_EQ(position(1, axis), real{-19});
-        }
+    Kokkos::deep_copy(exec, position, real{-19});
+    Kokkos::deep_copy(exec, half, real{-17});
+    const auto result = sph::kick_drift_3d(exec, grid, velocity, acceleration, .25, position, half);
+    ASSERT_TRUE(result.ok()) << result.message();
+    for (int axis = 0; axis < 3; ++axis) {
+        EXPECT_EQ(half(0, axis), expected_half[axis]);
+        EXPECT_EQ(position(0, axis), expected_position[axis]);
+        EXPECT_EQ(half(1, axis), real{-17});
+        EXPECT_EQ(position(1, axis), real{-19});
+    }
+    Kokkos::deep_copy(exec, position, real{-19});
+    sph::central_difference_step::drift_positions(exec, grid, velocity, acceleration, .25, position, {});
+    for (int axis = 0; axis < 3; ++axis) {
+        EXPECT_EQ(position(0, axis), expected_position[axis]);
+        EXPECT_EQ(position(1, axis), real{-19});
     }
 }
 
@@ -116,21 +116,20 @@ TEST(SphVerletOperators, StandaloneKickDriftRejectsOverflowWithoutGridAdmission)
     }
 }
 
-TEST(SphVerletOperators, StepRejectsKickOrDriftOverflowAtGridBoundary) {
+TEST(SphVerletOperators, StepRejectsPositionOverflowAtGridBoundary) {
     const Kokkos::Serial exec;
     const Fields fields({{{0, 0, 0}, 1, 11, 0}});
     const auto grid = checked(sph::CellGrid::build(exec, fields.get(), 1));
     sph::Velocity3D velocity("test.kick.velocity", 1), acceleration("test.kick.acceleration", 1);
-    sph::Velocity3D position("test.kick.position", 1), half("test.kick.half", 1);
+    sph::Velocity3D position("test.kick.position", 1);
     for (const bool overflow_half : {true, false}) {
         Kokkos::deep_copy(exec, velocity, real{0});
         Kokkos::deep_copy(exec, acceleration, real{0});
         velocity(0, 0) = overflow_half ? 0 : std::numeric_limits<real>::max() / 4;
         acceleration(0, 0) = overflow_half ? std::numeric_limits<real>::max() : 0;
         const double dt = overflow_half ? 4 : 8;
-        sph::verlet_step::kick_drift(exec, grid, velocity, acceleration, dt, position, half, {});
+        sph::central_difference_step::drift_positions(exec, grid, velocity, acceleration, dt, position, {});
         EXPECT_FALSE(std::isfinite(position(0, 0)));
-        EXPECT_EQ(std::isfinite(half(0, 0)), !overflow_half);
         EXPECT_EQ(grid.update_positions(exec, position, 1).status().code(),
                   StatusCode::invalid_argument);
         EXPECT_EQ(grid.fields().position(0, 0), 0);
@@ -158,7 +157,7 @@ TEST(SphVerlet, UniformAccelerationMatchesBallisticTrajectory) {
     EXPECT_TRUE(sim.finalize().ok());
 }
 
-TEST(SphVerlet, HalfKickOverflowPreservesRowsAndAllowsRetry) {
+TEST(SphVerlet, PositionOverflowPreservesRowsAndAllowsShorterRetry) {
     const Fields fields({{{0, 0, 0}, 1, 11, 0}});
     const sph::Velocity3D velocity("test.velocity", 1);
     constexpr real gravity = std::numeric_limits<real>::max();
@@ -200,29 +199,19 @@ TEST(SphVerlet, NonfiniteVelocityAmongFiniteRowsRejectsInitialization) {
     EXPECT_TRUE(sim.finalize().ok());
 }
 
-TEST(SphContinuity, BothStagesRejectNonfiniteRateAtDensityCorrection) {
+TEST(SphContinuity, NonfiniteDensityRateRejectsCandidate) {
     Kokkos::Serial exec;
-    Fields fields({{{0, 0, 0}, 1, 31, 0}, {{1, 0, 0}, 1, 42, 0}});
+    Fields fields({{{0, 0, 0}, std::numeric_limits<real>::max(), 31, 0}, {{1, 0, 0}, 1, 42, 0}});
     const auto grid = checked(sph::CellGrid::build(exec, fields.get(), 2));
-    const auto& query = grid.neighbors();
-    sph::DensityRate3D start("test.start_rate", 2), end("test.end_rate", 2);
+    sph::DensityRate3D rate("test.density_rate", 2);
     sph::Velocity3D velocity("test.velocity", 2);
-    const auto density = initial_density({1, 1});
-    sph::Values corrected("test.corrected", 2);
-    velocity(0, 0) = std::numeric_limits<real>::quiet_NaN();
-    for (const bool at_start : {true, false}) {
-        auto& invalid = at_start ? start : end;
-        auto& valid = at_start ? end : start;
-        Kokkos::deep_copy(exec, valid, 0.);
-        sph::stage_continuity_rate_3d(exec, query, velocity, invalid);
-        // Both rows and both slot permutations are the identity for this grid.
-        const auto status = sph::correct_density_3d(exec, grid.owned_slots(), grid.sorted_to_input(),
-            grid.input_to_sorted(), density, start, end, .25, corrected);
-        EXPECT_EQ(status.code(), StatusCode::numerical_failure);
-    }
+    velocity(0, 0) = 8;
+    const auto status = sph::evaluate_density_rate_3d(exec, grid.neighbors(), velocity, {}, rate);
+    EXPECT_EQ(status.code(), StatusCode::numerical_failure);
+    EXPECT_EQ(status.message(), "WCSPH density rate exceeds real range");
 }
 
-TEST(SphContinuity, PredictionReadsOnlyActualGeometricContributors) {
+TEST(SphContinuity, CurrentRateSamplesOnlyContributingWalls) {
     Kokkos::Serial exec;
     const real tiny = std::numeric_limits<real>::denorm_min();
     Fields fields({{{0, 0, 0}, 1, 10, 0}, {{0, 0, 0}, 1, 11, 1}, {{2, 0, 0}, 1, 12, 1},
@@ -232,50 +221,63 @@ TEST(SphContinuity, PredictionReadsOnlyActualGeometricContributors) {
     const auto& query = grid.neighbors();
     const auto& ids = query.fields().ids;
     const auto& owned = query.owned_slots();
-    sph::Velocity3D velocity("test.predicted_velocity", ids.extent(0));
-    Kokkos::deep_copy(exec, velocity, real{77});
-    sph::Velocity3D accepted("test.accepted_velocity", owned.extent(0));
-    sph::Acceleration3D acceleration("test.accepted_acceleration", owned.extent(0));
-    sph::NeighborView3D::Indices::non_const_type old_row("test.old_rows", ids.extent(0));
+    sph::Velocity3D wall_velocity("test.wall_velocity", ids.extent(0));
+    Kokkos::deep_copy(exec, wall_velocity, real{77});
+    sph::Velocity3D velocity("test.owned_velocity", owned.extent(0));
+    sph::NeighborView3D::Indices::non_const_type slot_to_row("test.slot_to_row", ids.extent(0));
     for (std::size_t row = 0; row < owned.extent(0); ++row) {
         const auto slot = owned(row);
-        const auto id = ids(slot);
-        old_row(grid.sorted_to_input()(slot)) = static_cast<LocalIndex>(row);
-        accepted(row, 0) = id == 20 ? real{1} : real{0};
-        if (id == 10 || id == 30 || id == 40)
-            accepted(row, 0) = std::numeric_limits<real>::quiet_NaN();
+        slot_to_row(slot) = static_cast<LocalIndex>(row);
+        velocity(row, 0) = ids(slot) == 20 ? real{1} : real{0};
     }
-    const sph::Velocity3D::const_type read_velocity = accepted;
-    const sph::Acceleration3D::const_type read_acceleration = acceleration;
-    const std::array<real, 3> gravity{};
-    const sph::ContinuityPredictor3D predictor{read_velocity, read_acceleration, .25, gravity};
-    sph::StageVelocityReady3D ready("test.predicted_velocity_ready", ids.extent(0));
-    sph::DensityRate3D rate("test.predicted_rate", owned.extent(0));
+    sph::StageVelocityReady3D ready("test.wall_velocity_ready", ids.extent(0));
+    sph::DensityRate3D rate("test.density_rate", owned.extent(0));
     std::vector<std::uint64_t> read_walls;
     const auto write = [&](LocalIndex slot) {
         const auto id = ids(slot);
         read_walls.push_back(id);
         if (id != 22)
             return false;
-        velocity(slot, 0) = velocity(slot, 1) = velocity(slot, 2) = real{0};
+        wall_velocity(slot, 0) = real{-.5};
+        wall_velocity(slot, 1) = wall_velocity(slot, 2) = real{0};
         return true;
     };
-    ASSERT_TRUE(sph::stage_predicted_continuity_rate_3d(exec, query, velocity, rate, ready,
-        predictor, grid.sorted_to_input(), old_row, std::cref(write)).ok());
-    // The last displacement squares to zero. Only the contributing wall is sampled.
+    ASSERT_TRUE(sph::evaluate_density_rate_3d(exec, query, velocity, slot_to_row, rate,
+                                             wall_velocity, ready, std::cref(write)).ok());
+    // The displacement of wall 41 squares to zero. Both contributing fluid rows reuse wall 22.
     EXPECT_EQ(read_walls, (std::vector<std::uint64_t>{22}));
+    for (std::size_t slot = 0; slot < ids.extent(0); ++slot)
+        EXPECT_EQ(wall_velocity(slot, 0), ids(slot) == 22 ? real{-.5} : real{77});
     for (std::size_t row = 0; row < rate.extent(0); ++row) {
-        const auto slot = owned(row);
-        const auto id = ids(slot);
-        if (id == 10 || id == 30 || id == 40)
-            EXPECT_EQ(velocity(slot, 0), 77);
-        else
-            EXPECT_EQ(velocity(slot, 0), id == 20 ? 1 : 0);
-        if (id == 20 || id == 21)
-            EXPECT_GT(rate(row), 0);
-        else
-            EXPECT_EQ(rate(row), 0);
+        const auto id = ids(owned(row));
+        const double expected = (id == 20 ? 2.0625 : id == 21 ? 1.40625 : 0.) / std::numbers::pi;
+        EXPECT_NEAR(rate(row), expected, 4 * std::numeric_limits<real>::epsilon() * expected) << id;
     }
+}
+
+TEST(SphCentralDifferenceOperators, ExtremeStepRatiosPreserveRepresentableDensityIncrements) {
+    using sph::central_difference_step::TimeScheme3D;
+    const Kokkos::Serial exec;
+    const auto density = initial_density({1});
+    sph::Values rate("test.density_rate", 1), previous_rate("test.previous_rate", 1);
+    sph::Values next_density("test.next_density", 1);
+    const auto advance = [&](real dt, real previous_dt) {
+        return sph::central_difference_step::advance_density(exec, {}, {}, density, rate, {}, previous_rate,
+            {TimeScheme3D::adams_bashforth, dt, previous_dt}, next_density);
+    };
+
+    const real tiny = std::numeric_limits<real>::denorm_min();
+    rate(0) = tiny;
+    previous_rate(0) = 0;
+    ASSERT_TRUE(advance(.5, 2 * tiny).ok());
+    EXPECT_EQ(next_density(0), real{1.0625});
+
+    const real dt = std::ldexp(real{1}, 8 - std::numeric_limits<real>::max_exponent);
+    rate(0) = -1 / dt;
+    previous_rate(0) = 2 * rate(0);
+    // The Euler contribution cancels density, and the remaining increment is dt.
+    ASSERT_TRUE(advance(dt, .5).ok());
+    EXPECT_EQ(next_density(0), dt);
 }
 
 TEST(SphContinuity, StationaryUniformDensityIsIndependentOfKernelMassSum) {
@@ -301,7 +303,7 @@ TEST(SphContinuity, StationaryUniformDensityIsIndependentOfKernelMassSum) {
 
 TEST(SphContinuity, FixedWallCompressionAndExpansionFollowAnalyticRelativeVelocityGradient) {
     // h=2 keeps both endpoints on the interior branch of the M4 spline.
-    // Zero initial pressure and gravity give an exactly ballistic predictor.
+    // Startup uses the initial relative velocity and the initial kernel gradient.
     Fields fluid({{{.5, 0, 0}, 2, 42, 0}}), wall({{{1.5, 0, 0}, 3, 15, 1}});
     constexpr double h = 2, dt = .25;
     const sph::WcsphVerletParameters parameters{{2, 1, 1}, 1, {}, h};
@@ -321,7 +323,7 @@ TEST(SphContinuity, FixedWallCompressionAndExpansionFollowAnalyticRelativeVeloci
         };
         const auto rows = committed_rows(participant);
         ASSERT_EQ(rows.size(), 1u);
-        const double change = dt * .5 * (rate(1) + rate(1 - speed * dt));
+        const double change = dt * rate(1);
         EXPECT_NEAR(rows[0].density, 2 + change, 4 * std::numeric_limits<real>::epsilon());
         if (speed != 0)
             EXPECT_GT((rows[0].density - 2) * speed, 0);
@@ -401,9 +403,10 @@ TEST(SphContinuity, CrossingParticlesPreserveUnequalMassAndDensityById) {
     for (const auto& row : after) {
         const bool first = row.id == 73;
         EXPECT_EQ(row.mass, first ? 2 : 5);
-        // Endpoints are mirrored around the crossing in the ballistic limit,
-        // so the endpoint rates cancel to within the small pressure correction.
-        EXPECT_NEAR(row.density, first ? 2 : 8, 1.e-5);
+        // Both particles approach with relative speed 2 at separation 1/2.
+        const double gradient = (.5 * 3 - .25 * 2.25) / std::numbers::pi;
+        const double increment = .5 * 2 * (first ? 5 : 2) * gradient;
+        EXPECT_NEAR(row.density, (first ? 2 : 8) + increment, 1.e-6);
     }
     EXPECT_TRUE(sim.finalize().ok());
 }

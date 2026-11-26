@@ -15,9 +15,19 @@ struct RigidWallMotion3D {
     real angle{}, angular_speed{}, angular_acceleration{};
 };
 
+struct RigidWallPose3D {
+    std::array<real, 3> translation{}, center{}, axis{1, 0, 0};
+    real angle{};
+};
+
+struct WallMotionRates3D {
+    std::array<real, 3> velocity{}, acceleration{};
+    real angular_speed{}, angular_acceleration{};
+};
+
 // A trajectory callback is sampled once per group. Geometry and time derivatives
 // are evaluated separately at the particle that consumes each quantity.
-enum class WallMotionUse3D { position, velocity, full };
+enum class WallMotionUse3D { position, full };
 
 class SampledWallMotion3D {
   public:
@@ -28,6 +38,7 @@ class SampledWallMotion3D {
     std::array<real, 3> acceleration(const std::array<real, 3>& reference) const;
 
   private:
+    friend class PrescribedMovingWall3D;
     RigidWallMotion3D motion;
     real sine{}, one_minus_cosine{};
     bool checked_translation_velocity_{};
@@ -78,15 +89,30 @@ template <class R, class... Args> class WallTrajectoryFunction {
     R operator()(Args... args) const { return target_->call(args...); }
 };
 
+/// SPH owns the pose. The owner supplies physical rates at each integer time level.
+/// Translation and angle advance using the accepted linear velocity and angular speed.
+/// Center and axis stay fixed in reference coordinates.
+struct VelocityDrivenWall3D {
+    RigidWallPose3D initial_pose;
+    WallTrajectoryFunction<Result<WallMotionRates3D>, WallTrajectoryTime3D, double> rates;
+};
+
 struct PrescribedWallTrajectory3D {
     double initial_phase{}, period{};
     double first_phase = -std::numeric_limits<double>::infinity();
     double last_phase = std::numeric_limits<double>::infinity();
     double time_resolution{};
     // Only the motion phase is reduced modulo period. Motion also receives the original clock.
+    /// Owner-supplied absolute pose and physical rates, sampled directly at the requested phase.
     WallTrajectoryFunction<Result<RigidWallMotion3D>, WallTrajectoryTime3D, double> motion;
     // Required finite positive physical bound valid throughout the supplied trajectory.
     double sample_step_limit{};
+    // Select exactly one of absolute motion and velocity-driven pose.
+    std::optional<VelocityDrivenWall3D> velocity_driven{};
+
+    std::size_t retained_bytes() const {
+        return motion.retained_bytes() + (velocity_driven ? velocity_driven->rates.retained_bytes() : 0);
+    }
 };
 struct WallGroupInput3D {
     std::uint64_t id;
@@ -97,14 +123,17 @@ struct WallGroupInput3D {
 class PrescribedMovingWall3D final : public SolidWallBoundary3D {
   public:
     PrescribedMovingWall3D(ParticleView particles, PrescribedWallTrajectory3D trajectory);
+    bool velocity_driven() const { return trajectory_.velocity_driven.has_value(); }
     WallTrajectoryTime3D initial_time() const { return {trajectory_.initial_phase, 0}; }
     Result<double> initial_step_limit() const;
     // The time and limit must come from this trajectory's initialized or
     // previously certified state. The stepper retains them as a pair.
     Result<std::pair<WallTrajectoryTime3D, double>> advance_certified_time(
         WallTrajectoryTime3D start, double dt, double limit) const;
-    Result<SampledWallMotion3D> motion_at_certified_time(WallTrajectoryTime3D time,
-                                                          WallMotionUse3D use) const;
+    // After initialization, a velocity-driven wall takes the accepted sample from
+    // this group and the admitted step duration that advances its pose.
+    Result<SampledWallMotion3D> motion_at_certified_time(WallTrajectoryTime3D time, WallMotionUse3D use,
+        const SampledWallMotion3D* accepted = nullptr, real dt = 0) const;
 
   private:
     PrescribedWallTrajectory3D trajectory_;

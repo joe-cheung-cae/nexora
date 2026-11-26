@@ -5,6 +5,7 @@
 #include <data/FieldIssuer.hpp>
 #include <new>
 #include <string>
+#include <type_traits>
 #include <utility>
 
 namespace nexora::sph {
@@ -167,12 +168,13 @@ BindFields3D WcsphParticipant3D::bind_fields(WcsphState3D& candidate) const {
                 }
                 auto field = read_field(Values::const_type(values), density_field(FieldAccess::read),
                                         stamp);
-                candidate.field_storage[0] = std::move(storage);
+                candidate.density_storage = std::move(storage);
                 candidate.density.emplace(std::move(field));
                 return {};
             }
             case FieldGroup3D::pressure: {
-                auto storage = reserve(4);
+                auto pressure_storage = reserve(1);
+                auto acceleration_storage = reserve(3);
                 const auto values = allocate<Values>(*exec_, "sph.participant3d.pressure", rows);
                 const auto force =
                     allocate<Acceleration3D>(*exec_, "sph.participant3d.pressure_acceleration", rows);
@@ -190,7 +192,8 @@ BindFields3D WcsphParticipant3D::bind_fields(WcsphState3D& candidate) const {
                                            pressure_field(FieldAccess::read), stamp);
                 auto acceleration = read_field(Acceleration3D::const_type(force),
                                                acceleration_field(FieldAccess::read), stamp);
-                candidate.field_storage[1] = std::move(storage);
+                candidate.pressure_storage = std::move(pressure_storage);
+                candidate.acceleration_storage = std::move(acceleration_storage);
                 candidate.pressure.emplace(std::move(pressure));
                 candidate.acceleration.emplace(std::move(acceleration));
                 return {};
@@ -208,7 +211,7 @@ BindFields3D WcsphParticipant3D::bind_fields(WcsphState3D& candidate) const {
             }
             auto velocity = read_field(Velocity3D::const_type(values),
                                        velocity_field(FieldAccess::read), stamp);
-            candidate.field_storage[2] = std::move(storage);
+            candidate.velocity_storage = std::move(storage);
             candidate.velocity.emplace(std::move(velocity));
             return {};
         });
@@ -274,6 +277,9 @@ Status WcsphParticipant3D::do_step(const TimeInterval& interval) {
         if (auto status = step_->try_step(interval, *accepted_, *candidate, bind_fields(*candidate));
             !status.ok())
             return status;
+        // Transfer the old read leases with their allocations only after every trial operation succeeds.
+        static_assert(std::is_nothrow_move_assignable_v<FluidTimeLevel3D>);
+        static_cast<FluidTimeLevel3D&>(candidate->history) = std::move(*accepted_);
         accepted_ = std::move(candidate);
         return {};
     });

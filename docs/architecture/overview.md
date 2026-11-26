@@ -1,6 +1,6 @@
 # Nexora 当前架构入口
 
-修订日期 `2026-11-26`。**这是唯一有效的架构入口。Kokkos Serial CPU 已实现参考状态生命周期、P1-04 字段访问与本地传输、P1-07 SPH 代表性切片，以及三维 WCSPH 的密度、压力、Velocity Verlet、恒定重力与 Adami 固定壁。完整 Phase 1 仍开放。**
+修订日期 `2026-11-26`。**这是唯一有效的架构入口。Kokkos Serial CPU 已实现参考状态生命周期、P1-04 字段访问与本地传输、P1-07 SPH 代表性切片，以及三维 WCSPH 的密度、压力、中心差分时间积分、恒定重力与 Adami 壁面。完整 Phase 1 仍开放。**
 
 ## 1. 决策与文档效力
 
@@ -46,7 +46,9 @@ P1-07 的 Serial 验证夹具用 Simulation 运行固定 CSR 的一维 M₄ 密�
 
 给定三维粒子状态可直接建立或更新 `CellGrid`，以只读 `NeighborView3D` 调用密度、压力或连续性算子。格网和版本比较按实际分配前预留受控额度。四组静水初态直接运行密度和固定壁压力算子。静水箱轨迹测试用解析剖面构造初态和核对误差，推进时按粒子的实际密度求压力。[格索引](../../validation/sph/cell-begin-serial.md) · [重构验收](../../validation/sph/sph-3d-refactor-serial.md) · [水箱验收](../../validation/sph/hydrostatic-continuity-repair.md)
 
-私有 `sph::WcsphParticipant3D` 拥有输入槽几何、owned 行表及显式初始化的四个流体字段，在一次同步步中验证并发布状态。`WcsphStep3D` 持有零至多组固定壁或规定轨迹壁、派生格网缓存和六个积分缓冲。统一固定平滑长度 h 由 `WcsphVerletParameters::smoothing_length` 给定，格宽及支持半径为 2h。两端连续性经稳定 ID 对齐后作梯形校正，压力用 Tait EOS 和 Adami 外推计算，Velocity Verlet 在两次半踢使用压力加速度和重力。本步准入使用已接受速度的声学 CFL 与各运动壁组显式限制的最小值。步末计算并发布下一步的上限。有限轨迹允许在有效的右端点发布，将可用步长设为零。轨迹回调只用于实际运动学取样。同步逐行及逐壁读取使用已提交几何和行表，驱逐格网后仍可读。步内失败释放临时资源并保留已提交的数值、行序、版本、物理时钟和上限。[WCSPH 当前生命周期](sph-3d-refactor-plan.md) · [固定壁历史对照](../../validation/sph/hydrostatic-continuity-repair.md#solver-cleanup-trajectory)
+私有 `sph::WcsphParticipant3D` 通过 `Simulation::run` 默认执行三维中心差分积分。初始化在初始几何上计算密度变化率和压力加速度。步进用已接受的导数推进粒子位置、速度和密度，更新邻域，在新几何上求步末导数并随历史一起提交。压力加速度字段只含压力项，积分时加恒定重力。首步用单步欧拉建立速度、密度历史，等步长采用中心差分；变步长以及每 39 个连续中心差分步后的重新同步采用两步 Adams–Bashforth。统一固定平滑长度 h 由 `WcsphVerletParameters::smoothing_length` 给定，格宽及支持半径为 2h。SPH 自管的刚体壁从初始位姿出发，用步初平移速度和固定轴角速度前向欧拉推进一次；外部指定绝对位姿的壁直接采样。步末导数与壁面的候选位姿一同提交。[运动壁时序与误差](../../validation/sph/velocity-driven-wall-serial.md)
+
+声学 CFL 与各壁组采样限制中最小的值决定下一步上限。有限轨迹的右端点可以提交，随后可用步长为零。格网可从已接受几何重建。[WCSPH 生命周期](sph-3d-refactor-plan.md) · [积分公式与 Serial 验收](../../validation/sph/central-difference-serial.md)
 
 CLI 的 `validate`、`plan` 和 `run` 共用版本化 Reference case 预检。`run` 装配现有 `Simulation` 与内部 Reference participant，并发布可核对的 accepted 数值摘要。 [case 格式与验证](reference-case.md)
 

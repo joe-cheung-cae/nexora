@@ -85,6 +85,60 @@ real speed_squared(const Velocity3D& velocity, std::size_t row) {
     return x * x + y * y + z * z;
 }
 
+std::size_t mapped_row(const NeighborView3D::Indices& rows, std::size_t row) {
+    return rows.extent(0) ? rows(row) : row;
+}
+
+real slope_increment(real dt, real previous_dt, real rate_change) {
+    // The slope coefficient alone can overflow or underflow before multiplication by a rate.
+    if (!std::isfinite(rate_change))
+        return rate_change;
+    int dt_exponent, previous_exponent, rate_exponent;
+    const real fraction = std::frexp(dt, &dt_exponent);
+    const real previous = std::frexp(previous_dt, &previous_exponent);
+    const real change = std::frexp(rate_change, &rate_exponent);
+    return std::ldexp(fraction * fraction * change / previous,
+                      2 * dt_exponent - previous_exponent + rate_exponent - 1);
+}
+
+struct IntegrateQuantity3D {
+    using TimeScheme = central_difference_step::TimeScheme3D;
+
+    explicit IntegrateQuantity3D(central_difference_step::TimeWeights3D time)
+        : scheme(time.scheme), dt(time.dt), previous_dt(time.previous_dt),
+          centered_duration(scheme == TimeScheme::centered ? time.dt + time.dt : real{0}),
+          slope_weight(scheme == TimeScheme::adams_bashforth
+                           ? dt * (real{.5} * (dt / time.previous_dt)) : real{0}) {}
+
+    template <class PreviousValue, class PreviousRate>
+    real operator()(real value, real rate, const PreviousValue& previous_value,
+                    const PreviousRate& previous_rate, real constant_rate = 0) const {
+        const real total_rate = rate + constant_rate;
+        if (scheme == TimeScheme::centered) {
+            if (Kokkos::isfinite(centered_duration))
+                return Kokkos::fma(centered_duration, total_rate, previous_value());
+            return Kokkos::fma(dt, total_rate, Kokkos::fma(dt, total_rate, previous_value()));
+        }
+        const real euler = Kokkos::fma(dt, total_rate, value);
+        if (scheme == TimeScheme::adams_bashforth) {
+            const real rate_change = rate - previous_rate();
+            // A constant derivative needs no extrapolation, even after extreme step growth.
+            if (rate_change != 0) {
+                if (Kokkos::isfinite(slope_weight) && slope_weight >= std::numeric_limits<real>::min())
+                    return Kokkos::fma(slope_weight, rate_change, euler);
+                return euler + slope_increment(dt, previous_dt, rate_change);
+            }
+        }
+        return euler;
+    }
+
+    TimeScheme scheme;
+    real dt;
+    real previous_dt;
+    real centered_duration;
+    real slope_weight;
+};
+
 } // namespace
 
 Status WcsphVerletParameters::validate() const {
@@ -119,62 +173,80 @@ Status kick_drift_3d(const Kokkos::Serial& exec, const CellGrid& accepted,
                                     half_velocity, gravity);
 }
 
-void verlet_step::kick_drift(const Kokkos::Serial& exec, const CellGrid& accepted,
-                             const Velocity3D::const_type& velocity,
-                             const Acceleration3D::const_type& acceleration, real dt,
-                             const Velocity3D& staged_position, const Velocity3D& half_velocity,
-                             const std::array<real, 3>& gravity) {
+void central_difference_step::drift_positions(const Kokkos::Serial& exec, const CellGrid& accepted,
+    const Velocity3D::const_type& velocity, const Acceleration3D::const_type& pressure_acceleration,
+    real dt, const Velocity3D& staged_position, const std::array<real, 3>& gravity) {
     const auto& position = accepted.fields().position;
     const auto owned = accepted.owned_slots();
-    // Grid admission rejects nonfinite drift before using either staged output.
-    Kokkos::parallel_for("sph.verlet.kick_drift", Policy(exec, 0, owned.extent(0)),
+    Kokkos::parallel_for("sph.central_difference.drift_positions", Policy(exec, 0, owned.extent(0)),
         [&](std::size_t row) {
             const auto slot = owned(row);
             for (int axis = 0; axis < 3; ++axis) {
-                const real half = Kokkos::fma(real{.5} * dt, acceleration(row, axis) + gravity[axis],
-                                              velocity(row, axis));
-                half_velocity(slot, axis) = half;
-                staged_position(slot, axis) = Kokkos::fma(dt, half, position(slot, axis));
+                const real acceleration = pressure_acceleration(row, axis) + gravity[axis];
+                const real midpoint_velocity = Kokkos::fma(real{.5} * dt, acceleration, velocity(row, axis));
+                staged_position(slot, axis) = Kokkos::fma(dt, midpoint_velocity, position(slot, axis));
             }
         });
 }
 
-Result<real> verlet_step::finish_kick(const Kokkos::Serial& exec, const CellGrid& refreshed,
-                                     const Velocity3D::const_type& half_velocity,
-                                     const Acceleration3D::const_type& acceleration, real dt,
-                                     const Velocity3D& velocity, const std::array<real, 3>& gravity) {
-    const auto& to_input = refreshed.sorted_to_input();
-    const auto& owned = refreshed.owned_slots();
-    if (!owned.extent(0))
+Result<real> central_difference_step::advance_velocity(const Kokkos::Serial& exec,
+    const NeighborView3D::Indices& next_to_current, const NeighborView3D::Indices& current_to_previous,
+    const Velocity3D::const_type& velocity, const Acceleration3D::const_type& pressure_acceleration,
+    const Velocity3D::const_type& previous_velocity,
+    const Acceleration3D::const_type& previous_pressure_acceleration,
+    TimeWeights3D time, const Velocity3D& next_velocity, const std::array<real, 3>& gravity) {
+    if (!next_velocity.extent(0))
         return real{0};
-    std::size_t invalid{};
+    const IntegrateQuantity3D integrate(time);
     real largest_square{};
-    Kokkos::parallel_reduce("sph.verlet.finish_kick", Policy(exec, 0, owned.extent(0)),
-        [&](std::size_t row, real& maximum, std::size_t& errors) {
-            const auto slot = to_input(owned(row));
+    std::size_t invalid{};
+    Kokkos::parallel_reduce("sph.central_difference.advance_velocity", Policy(exec, 0, next_velocity.extent(0)),
+        [&](std::size_t next, real& maximum, std::size_t& errors) {
+            const auto current = mapped_row(next_to_current, next);
+            const auto previous = mapped_row(current_to_previous, current);
             for (int axis = 0; axis < 3; ++axis) {
-                velocity(row, axis) =
-                    Kokkos::fma(real{.5} * dt, acceleration(row, axis) + gravity[axis],
-                                half_velocity(slot, axis));
+                next_velocity(next, axis) = integrate(velocity(current, axis), pressure_acceleration(current, axis),
+                    [&] { return previous_velocity(previous, axis); },
+                    [&] { return previous_pressure_acceleration(previous, axis); }, gravity[axis]);
             }
-            const real square = speed_squared(velocity, row);
+            const real square = speed_squared(next_velocity, next);
             if (Kokkos::isfinite(square))
                 maximum = std::max(maximum, square);
             else
                 ++errors;
         }, Kokkos::Max<real>(largest_square), Kokkos::Sum<std::size_t>(invalid));
     if (invalid)
-        return Status{StatusCode::numerical_failure, "Verlet final squared speed must be finite"};
+        return Status{StatusCode::numerical_failure, "WCSPH final squared speed must be finite"};
     return largest_square;
 }
 
-Result<real> verlet_step::capture_velocity(const Kokkos::Serial& exec, const NeighborView3D::Indices& rows,
-                                             const Velocity3D::const_type& input, const Velocity3D& output) {
+Status central_difference_step::advance_density(const Kokkos::Serial& exec,
+    const NeighborView3D::Indices& next_to_current, const NeighborView3D::Indices& current_to_previous,
+    const Values::const_type& density, const Values::const_type& density_rate,
+    const Values::const_type& previous_density, const Values::const_type& previous_density_rate,
+    TimeWeights3D time, const Values& next_density) {
+    const IntegrateQuantity3D integrate(time);
+    std::size_t invalid{};
+    Kokkos::parallel_reduce("sph.central_difference.advance_density", Policy(exec, 0, next_density.extent(0)),
+        [&](std::size_t next, std::size_t& errors) {
+            const auto current = mapped_row(next_to_current, next);
+            const auto previous = mapped_row(current_to_previous, current);
+            const real value = integrate(density(current), density_rate(current),
+                [&] { return previous_density(previous); }, [&] { return previous_density_rate(previous); });
+            errors += !store_positive_density(value, next_density(next));
+        }, invalid);
+    if (invalid)
+        return {StatusCode::numerical_failure, "advanced owned WCSPH density is outside positive real range"};
+    return {};
+}
+
+Result<real> central_difference_step::capture_velocity(const Kokkos::Serial& exec,
+    const NeighborView3D::Indices& rows, const Velocity3D::const_type& input, const Velocity3D& output) {
     if (!rows.extent(0))
         return real{0};
     real largest_square{};
     std::size_t invalid{};
-    Kokkos::parallel_reduce("sph.verlet.initial_velocity", Policy(exec, 0, rows.extent(0)),
+    Kokkos::parallel_reduce("sph.central_difference.initial_velocity", Policy(exec, 0, rows.extent(0)),
         [&](std::size_t row, real& maximum, std::size_t& errors) {
             const auto slot = rows(row);
             for (int axis = 0; axis < 3; ++axis)
@@ -190,8 +262,8 @@ Result<real> verlet_step::capture_velocity(const Kokkos::Serial& exec, const Nei
     return largest_square;
 }
 
-Result<double> verlet_step::acoustic_step(real largest_square, real sound_speed,
-                                          real cfl_coefficient, real smoothing_length) {
+Result<double> central_difference_step::acoustic_step(real largest_square, real sound_speed,
+                                                       real cfl_coefficient, real smoothing_length) {
     const real vmax = Kokkos::sqrt(largest_square);
     double step = double(cfl_coefficient) * smoothing_length / (double(sound_speed) + vmax);
     constexpr auto invalid_step = "invalid WCSPH CFL step";
