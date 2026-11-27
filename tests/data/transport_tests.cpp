@@ -80,9 +80,10 @@ FieldStamp trial_stamp() {
 }
 
 TEST(Transport, ExternalValidation) {
-    auto storage = std::make_shared<real[]>(6);
+    constexpr std::size_t segment_size = 6;
+    auto storage = std::make_shared<real[]>(2 * segment_size);
     auto* base = storage.get();
-    const auto bytes = 6 * sizeof(real);
+    const auto bytes = segment_size * sizeof(real);
     const std::shared_ptr<const void> owner(storage, base);
     using External = ExternalField<real>;
     ASSERT_FALSE(External::create(base, 3, 2, bytes, {}, trial_stamp()).ok());
@@ -117,9 +118,10 @@ TEST(Transport, ExternalValidation) {
     auto imported = take(External::create(base, 3, 2, bytes, owner, trial_stamp()));
     ASSERT_TRUE(External::create(base, 3, 2, bytes, owner, trial_stamp()).status().code() ==
            StatusCode::already_exists);
-    const std::shared_ptr<const void> overlapping(storage, base + 1);
-    ASSERT_TRUE(!External::create(base + 1, 3, 1, bytes - sizeof(real), overlapping, trial_stamp())
-                .ok());
+    auto* const adjacent = base + segment_size;
+    const std::shared_ptr<const void> same_owner(storage, adjacent);
+    EXPECT_EQ(External::create(adjacent, 3, 1, bytes, same_owner, trial_stamp()).status().code(),
+              StatusCode::already_exists);
     auto retaining_owner = std::make_shared<decltype(storage)>(storage);
     const std::shared_ptr<const void> independent_owner(retaining_owner, base + 1);
     ASSERT_TRUE(owner.owner_before(independent_owner) || independent_owner.owner_before(owner));

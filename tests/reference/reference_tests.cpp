@@ -91,12 +91,6 @@ void check_snapshot(const Snapshot& state, const std::vector<std::uint64_t>& ids
     ASSERT_EQ(stamp.valid_until, state.time);
 }
 
-void check_same_accepted_storage(const Snapshot& before, const Snapshot& after) {
-    ASSERT_EQ(before.ids.data(), after.ids.data());
-    ASSERT_EQ(before.x.data(), after.x.data());
-    ASSERT_EQ(before.q.data(), after.q.data());
-}
-
 TEST(Reference, SuccessfulStepsPublishOnceAndRetainSnapshots) {
     const Config config{{17, 3, 42}, {1.0, 2.0, -4.0}, {0.0, 1.0, 5.0}, 2.0};
     Participant participant(config);

@@ -73,20 +73,17 @@ template <class View>
 TransportView<real> pack(const Kokkos::Serial& exec, TransportPurpose purpose, const View& values,
                            FieldDescriptor descriptor, std::span<const FieldAxis> axes,
                            const Ids& ids, FieldStamp stamp) {
-    // Each test snapshot owns grants for its independently stamped fixture.
-    const auto value_storage = Kokkos::create_mirror(values);
-    const auto id_storage = Kokkos::create_mirror(ids);
-    Kokkos::deep_copy(value_storage, values);
-    Kokkos::deep_copy(id_storage, ids);
-    auto value_issuer = take(FieldIssuer::create_at_validated_time(value_storage, stamp));
-    auto id_issuer = take(FieldIssuer::create_at_validated_time(id_storage, stamp));
-    const std::array id_axes{FieldAxis{id_storage.extent(0)}};
-    auto read_values = take(value_issuer.read(value_storage, descriptor, value_issuer.stamp(),
+    auto value_issuer = take(FieldIssuer::create_at_validated_time(values, stamp));
+    auto id_issuer = take(FieldIssuer::create_at_validated_time(ids, stamp));
+    const std::array id_axes{FieldAxis{ids.extent(0)}};
+    auto read_values = take(value_issuer.read(values, descriptor, value_issuer.stamp(),
                                               {descriptor.association, descriptor.units, axes}));
-    auto read_ids = take(id_issuer.read(id_storage, id_field(), id_issuer.stamp(),
+    auto read_ids = take(id_issuer.read(ids, id_field(), id_issuer.stamp(),
                                        {Association::particle, "1", id_axes}));
+    // Release grants after packing so another snapshot can stamp the same input Views.
     return take(TransportBuilder::prepare(exec, purpose, std::move(read_values),
-                                          std::move(read_ids)));
+                                          std::move(read_ids),
+                                          TransportBuilder::SourceLifetime::until_packed));
 }
 
 TEST(TransportReceive, ValidationAndRetry) {

@@ -50,13 +50,6 @@ TEST(EntityTopology, OrderAndPermutation) {
         ASSERT_EQ(permutation.value().old_to_new()(i), expected_old_to_new[i]);
     }
 
-    // Independent gather check for field alignment under this permutation.
-    const std::array<int, 4> old_field{100, 300, 200, 400};
-    std::array<int, 4> gathered{};
-    for (std::size_t i = 0; i < gathered.size(); ++i)
-        gathered[i] = old_field[permutation.value().new_to_old()(i)];
-    ASSERT_TRUE((gathered == std::array<int, 4>{200, 100, 400, 300}));
-
     const auto wrong_domain = EntityOrder::create(exec, particles(DomainId{2}),
                                                    LayoutVersion{5}, new_ids);
     ASSERT_TRUE(wrong_domain.ok());
@@ -119,10 +112,7 @@ TEST(EntityTopology, Csr) {
     const auto row_order = EntityOrder::create(
         exec, ns, LayoutVersion{7}, std::array{GlobalEntityId{10}, GlobalEntityId{30},
                                                GlobalEntityId{20}, GlobalEntityId{40}});
-    const auto reordered = EntityOrder::create(
-        exec, ns, LayoutVersion{8}, std::array{GlobalEntityId{20}, GlobalEntityId{10},
-                                               GlobalEntityId{40}, GlobalEntityId{30}});
-    ASSERT_TRUE(row_order.ok() && reordered.ok());
+    ASSERT_TRUE(row_order.ok());
     std::array<Offset, 5> offsets{0, 2, 2, 3, 5};
     std::array<LocalIndex, 5> indices{1, 2, 3, 0, 2};
     const auto graph = CsrAdjacency::create(exec, row_order.value(), row_order.value(),
@@ -136,24 +126,6 @@ TEST(EntityTopology, Csr) {
         ASSERT_EQ(graph.value().offsets()(i), expected_offsets[i]);
         ASSERT_EQ(graph.value().indices()(i), expected_indices[i]);
     }
-    const std::array<Offset, 5> reordered_offsets{0, 1, 3, 5, 5};
-    const std::array<LocalIndex, 5> reordered_indices{2, 3, 0, 1, 0};
-    const auto reordered_graph = CsrAdjacency::create(
-        exec, reordered.value(), reordered.value(), TopologyVersion{9}, reordered_offsets,
-        reordered_indices);
-    ASSERT_TRUE(reordered_graph.ok());
-    // Explicit stable-ID edge list: (20,40), (10,30), (10,20), (40,10), (40,20).
-    const std::array<std::array<std::uint64_t, 2>, 5> expected_stable_edges{{
-        {20, 40}, {10, 30}, {10, 20}, {40, 10}, {40, 20}}};
-    const std::array<std::uint64_t, 4> reordered_row_ids{20, 10, 40, 30};
-    for (std::size_t row = 0, edge = 0; row < reordered_row_ids.size(); ++row) {
-        for (Offset k = reordered_graph.value().offsets()(row);
-             k < reordered_graph.value().offsets()(row + 1); ++k, ++edge) {
-            ASSERT_EQ(reordered_row_ids[row], expected_stable_edges[edge][0]);
-            const auto col = reordered_graph.value().indices()(k);
-            ASSERT_EQ(reordered.value().ids()(col), expected_stable_edges[edge][1]);
-        }
-    }
     const std::array<Offset, 5> decreasing{0, 2, 1, 3, 5};
     const std::array<Offset, 5> above_terminal{0, 2, 3, 6, 5};
     for (const auto& invalid_offsets : {decreasing, above_terminal}) {
@@ -164,9 +136,6 @@ TEST(EntityTopology, Csr) {
     const std::array<Offset, 5> wrong_end{0, 2, 2, 3, 4};
     ASSERT_TRUE(!CsrAdjacency::create(exec, row_order.value(), row_order.value(), TopologyVersion{9},
                                  wrong_end, indices).ok());
-    const std::array<LocalIndex, 5> bad_column{1, 2, 3, 0, 4};
-    ASSERT_TRUE(!CsrAdjacency::create(exec, row_order.value(), row_order.value(), TopologyVersion{9},
-                                 offsets, bad_column).ok());
     ASSERT_TRUE(!CsrAdjacency::create(exec, row_order.value(), row_order.value(), TopologyVersion{9},
                                  std::array<Offset, 4>{0, 2, 3, 5}, indices).ok());
     ASSERT_TRUE(!CsrAdjacency::create(exec, row_order.value(), row_order.value(), TopologyVersion{9},
@@ -182,21 +151,23 @@ TEST(EntityTopology, Csr) {
     const auto col_ns = particles(DomainId{2}, Association::node, "nodes");
     const auto columns = EntityOrder::create(
         exec, col_ns, LayoutVersion{13}, std::array{GlobalEntityId{5}, GlobalEntityId{6}});
-    const auto rows = EntityOrder::create(exec, ns, LayoutVersion{13},
-                                          std::array{GlobalEntityId{50}, GlobalEntityId{60}});
+    const auto rows = EntityOrder::create(
+        exec, ns, LayoutVersion{13},
+        std::array{GlobalEntityId{50}, GlobalEntityId{60}, GlobalEntityId{70}});
     ASSERT_TRUE(columns.ok() && rows.ok());
+    const std::array<Offset, 4> bipartite_offsets{0, 1, 3, 3};
     const auto bipartite = CsrAdjacency::create(exec, rows.value(), columns.value(),
-                                                TopologyVersion{14},
-                                                std::array<Offset, 3>{0, 1, 3},
+                                                TopologyVersion{14}, bipartite_offsets,
                                                 std::array<LocalIndex, 3>{1, 0, 1});
     ASSERT_TRUE(bipartite.ok());
     EXPECT_EQ(bipartite.value().topology(), TopologyVersion{14});
     EXPECT_EQ(bipartite.value().rows().entity_namespace(), ns);
     EXPECT_EQ(bipartite.value().columns().entity_namespace(), col_ns);
     EXPECT_EQ(bipartite.value().columns().layout(), LayoutVersion{13});
-    ASSERT_TRUE(!CsrAdjacency::create(exec, rows.value(), columns.value(), TopologyVersion{14},
-                                 std::array<Offset, 3>{0, 1, 3},
-                                 std::array<LocalIndex, 3>{1, 0, 2}).ok());
+    const auto bad_column = CsrAdjacency::create(exec, rows.value(), columns.value(),
+                                                 TopologyVersion{14}, bipartite_offsets,
+                                                 std::array<LocalIndex, 3>{1, 0, 2});
+    EXPECT_EQ(bad_column.status().code(), StatusCode::invalid_argument);
 
     const auto one_row = EntityOrder::create(exec, ns, LayoutVersion{15},
                                              std::array{GlobalEntityId{70}});

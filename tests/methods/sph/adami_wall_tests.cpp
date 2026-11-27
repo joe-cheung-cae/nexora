@@ -57,34 +57,6 @@ TEST(SphAdamiWall, InitialAdamiFieldsAndAcousticBoundScaleWithSmoothingLength) {
     }
 }
 
-TEST(SphAdamiWall, GravityOnlyMatchesFreeFall) {
-    Fields fluid({{{0, 0, 0}, 1, 41, 0}});
-    sph::Velocity3D velocity("wall_test.initial_velocity", 1);
-    const std::array<real, 3> gravity{1, -2, -4};
-    const std::array<real, 3> initial_velocity{2, 1, -1};
-    for (int axis = 0; axis < 3; ++axis)
-        velocity(0, axis) = static_cast<real>(initial_velocity[axis]);
-    sph::WcsphParticipant3D participant(fluid.get(), 512, {{1, 2, 2}, .8, gravity}, velocity, fluid.mass);
-    Simulation simulation(participant);
-    ASSERT_TRUE(simulation.initialize().ok());
-
-    for (int step = 1; step <= 16; ++step) {
-        constexpr double dt = 1. / 32;
-        ASSERT_TRUE(simulation.run(dt, 1).ok());
-        const double t = step * dt;
-        const auto rows = committed_rows(participant);
-        ASSERT_EQ(rows.size(), 1u);
-        const auto& x = rows.front().position;
-        const auto& v = rows.front().velocity;
-        EXPECT_EQ(rows.front().pressure_acceleration, (std::array<real, 3>{}));
-        for (int axis = 0; axis < 3; ++axis) {
-            EXPECT_EQ(v[axis], initial_velocity[axis] + gravity[axis] * t);
-            EXPECT_EQ(x[axis], initial_velocity[axis] * t + .5 * gravity[axis] * t * t);
-        }
-    }
-    EXPECT_TRUE(simulation.finalize().ok());
-}
-
 struct WallForceReference {
     std::map<std::uint64_t, real> fluid_pressure;
     std::map<std::uint64_t, long double> wall_pressure;

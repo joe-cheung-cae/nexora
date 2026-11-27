@@ -8,6 +8,7 @@
 #include <optional>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace {
 using namespace nexora;
@@ -37,19 +38,24 @@ Snapshot snapshot(const Participant& participant) {
 Config fixture() {
     return {{17, 3, 42}, {real{1}, real{2}, real{-4}}, {real{0}, real{1}, real{5}}, real{2}};
 }
-void check_same(const Snapshot& expected, const Snapshot& actual) {
+template <class View, class T> void check_values(const View& actual, const std::vector<T>& expected) {
+    ASSERT_EQ(actual.extent(0), expected.size());
+    for (std::size_t i = 0; i < expected.size(); ++i)
+        ASSERT_EQ(actual(i), expected[i]) << "index " << i;
+}
+void check_same(const Snapshot& expected, const Config& values, const Snapshot& actual) {
     ASSERT_EQ(actual.stamp(), expected.stamp());
+    ASSERT_EQ(actual.ids.data(), expected.ids.data());
     ASSERT_EQ(actual.x.data(), expected.x.data());
     ASSERT_EQ(actual.q.data(), expected.q.data());
     ASSERT_EQ(actual.history.data(), expected.history.data());
     ASSERT_EQ(actual.control, expected.control);
     ASSERT_EQ(actual.diagnostic, expected.diagnostic);
-    ASSERT_EQ(actual.history(0), expected.history(0));
-    for (std::size_t i = 0; i < expected.ids.extent(0); ++i) {
-        ASSERT_EQ(actual.ids(i), expected.ids(i));
-        ASSERT_EQ(actual.x(i), expected.x(i));
-        ASSERT_EQ(actual.q(i), expected.q(i));
-    }
+    ASSERT_NO_FATAL_FAILURE(check_values(actual.ids, values.ids));
+    ASSERT_NO_FATAL_FAILURE(check_values(actual.x, values.x));
+    ASSERT_NO_FATAL_FAILURE(check_values(actual.q, values.q));
+    ASSERT_EQ(actual.history.extent(0), 1);
+    ASSERT_EQ(actual.history(0), values.history_seed);
 }
 
 TEST(ReferenceResource, HistoryAndControlPublishWithNumericalFields) {
@@ -111,11 +117,15 @@ TEST(ReferenceResource, RetainedBankBudgetRejectsBeforeAllocation) {
     ASSERT_TRUE(participant.step({0, step, step}).ok());
     ASSERT_EQ(participant.resource_usage().controlled_bytes, initial_bytes + bank_bytes);
     const auto accepted = snapshot(participant);
+    auto values = fixture();
+    values.x = {real{0.75}, real{1.5}, real{-3}};
+    values.q = {real{0.25}, real{1.5}, real{4}};
+    values.history_seed = 1;
     for (int holder = 0; holder < 2; ++holder) {
         const AllocationCounter counter;
         ASSERT_EQ(participant.step({step, 2 * step, step}).code(), StatusCode::resource_exhausted);
         ASSERT_EQ(kokkos_allocations, 0);
-        ASSERT_NO_FATAL_FAILURE(check_same(accepted, snapshot(participant)));
+        ASSERT_NO_FATAL_FAILURE(check_same(accepted, values, snapshot(participant)));
         old.reset();
     }
     copy.reset();
@@ -128,14 +138,15 @@ TEST(ReferenceResource, RetainedBankBudgetRejectsBeforeAllocation) {
 
 TEST(ReferenceResource, NumericalFailureReleasesTemporaryBank) {
     const real large = std::numeric_limits<real>::max();
-    Participant participant(Config{{12}, {large}, {large / real{2}}, real{1}});
+    const Config input{{12}, {large}, {large / real{2}}, real{1}};
+    Participant participant(input);
     ASSERT_TRUE(participant.initialize(0).ok());
     const auto before = snapshot(participant);
     const auto usage = participant.resource_usage();
     ASSERT_EQ(participant.step({0, 1, 1}).code(), StatusCode::numerical_failure);
     ASSERT_EQ(participant.resource_usage().controlled_bytes, usage.controlled_bytes);
     ASSERT_EQ(participant.resource_usage().snapshot_records, usage.snapshot_records);
-    ASSERT_NO_FATAL_FAILURE(check_same(before, snapshot(participant)));
+    ASSERT_NO_FATAL_FAILURE(check_same(before, input, snapshot(participant)));
     ASSERT_TRUE(participant.finalize().ok());
 }
 
@@ -150,7 +161,7 @@ TEST(ReferenceResource, ControlCounterExhaustionPrecedesAllocation) {
         ASSERT_EQ(participant.step({0, step, step}).code(), StatusCode::resource_exhausted);
         ASSERT_EQ(kokkos_allocations, 0);
     }
-    ASSERT_NO_FATAL_FAILURE(check_same(before, snapshot(participant)));
+    ASSERT_NO_FATAL_FAILURE(check_same(before, input, snapshot(participant)));
     ASSERT_TRUE(participant.finalize().ok());
 }
 

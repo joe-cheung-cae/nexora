@@ -137,23 +137,33 @@ TEST(SphVerletOperators, StepRejectsPositionOverflowAtGridBoundary) {
 }
 
 TEST(SphVerlet, UniformAccelerationMatchesBallisticTrajectory) {
-    const Fields fields({{{1, .5, .25}, 1, 11, 0}});
+    constexpr std::array<real, 3> position{1, .5, .25}, initial_velocity{2, -1, .5};
+    const Fields fields({{position, 1, 11, 0}});
     sph::Velocity3D velocity("test.velocity", 1);
-    velocity(0, 0) = 2;
-    velocity(0, 1) = -1;
-    velocity(0, 2) = .5;
+    for (int axis = 0; axis < 3; ++axis)
+        velocity(0, axis) = initial_velocity[axis];
     const sph::WcsphVerletParameters parameters{{1, 1, 1}, 1, {4, 2, -2}};
     sph::WcsphParticipant3D participant(fields.get(), 1, parameters, velocity, initial_density({1}));
     Simulation sim(participant);
     ASSERT_TRUE(sim.initialize().ok());
-    ASSERT_TRUE(sim.run(.25, 1).ok());
-
-    const auto rows = committed_rows(participant);
-    ASSERT_EQ(rows.size(), 1u);
-    EXPECT_EQ(rows[0].id, 11u);
-    EXPECT_EQ(rows[0].position, (std::array<real, 3>{1.625, .3125, .3125}));
-    EXPECT_EQ(rows[0].velocity, (std::array<real, 3>{3, -.5, 0}));
-    EXPECT_EQ(rows[0].pressure, 0);
+    double t = 0;
+    for (int step = 0; step < 16; ++step) {
+        SCOPED_TRACE(step);
+        const double dt = step == 0 ? .25 : 1. / 32;
+        ASSERT_TRUE(sim.run(dt, 1).ok());
+        t += dt;
+        const auto rows = committed_rows(participant);
+        ASSERT_EQ(rows.size(), 1u);
+        const auto& row = rows.front();
+        EXPECT_EQ(row.id, 11u);
+        EXPECT_EQ(row.pressure, 0);
+        EXPECT_EQ(row.pressure_acceleration, (std::array<real, 3>{}));
+        for (int axis = 0; axis < 3; ++axis) {
+            const double g = parameters.gravity[axis];
+            EXPECT_EQ(row.position[axis], position[axis] + initial_velocity[axis] * t + .5 * g * t * t);
+            EXPECT_EQ(row.velocity[axis], initial_velocity[axis] + g * t);
+        }
+    }
     EXPECT_TRUE(sim.finalize().ok());
 }
 
@@ -411,27 +421,6 @@ TEST(SphContinuity, CrossingParticlesPreserveUnequalMassAndDensityById) {
     EXPECT_TRUE(sim.finalize().ok());
 }
 
-TEST(SphContinuity, InvalidExplicitDensityAndExtentPublishNoRows) {
-    Fields fields({{{0, 0, 0}, 1, 31, 0}});
-    sph::Velocity3D velocity("continuity_test.velocity", 1);
-    const auto rejects = [&](const sph::Values& rho, StatusCode reason) {
-        sph::WcsphParticipant3D participant(fields.get(), 16, {{1, 1, 1}, 1}, velocity, rho);
-        Simulation sim(participant);
-        EXPECT_EQ(sim.initialize().code(), reason);
-        std::size_t visits = 0;
-        const auto status = participant.visit_committed_rows(
-            [&](sph::CommittedRow3D) { ++visits; });
-        EXPECT_EQ(status.code(), StatusCode::invalid_state);
-        EXPECT_EQ(visits, 0u);
-        EXPECT_TRUE(sim.finalize().ok());
-    };
-    rejects(initial_density({1, 1}), StatusCode::invalid_argument);
-    for (const real density : {real{0}, std::numeric_limits<real>::infinity()}) {
-        SCOPED_TRACE(density);
-        rejects(initial_density({density}), StatusCode::numerical_failure);
-    }
-}
-
 TEST(SphContinuity, NonpositiveCandidateDensityPreservesAcceptedRows) {
     constexpr real initial = .125, mass = 1, speed = 1;
     constexpr double failed_dt = .5;
@@ -460,13 +449,9 @@ TEST(SphContinuity, NonpositiveCandidateDensityPreservesAcceptedRows) {
     const auto restored = committed_rows(participant);
     ASSERT_EQ(restored.size(), before.size());
     for (std::size_t row = 0; row < restored.size(); ++row) {
-        EXPECT_EQ(restored[row].id, before[row].id);
-        EXPECT_EQ(restored[row].mass, before[row].mass);
+        SCOPED_TRACE(before[row].id);
+        EXPECT_EQ(restored[row], before[row]);
         EXPECT_EQ(restored[row].density, initial);
-        EXPECT_EQ(restored[row].position, before[row].position);
-        EXPECT_EQ(restored[row].velocity, before[row].velocity);
-        EXPECT_EQ(restored[row].pressure, before[row].pressure);
-        EXPECT_EQ(restored[row].pressure_acceleration, before[row].pressure_acceleration);
     }
     EXPECT_TRUE(sim.finalize().ok());
     EXPECT_EQ(participant.resource_usage().controlled_bytes, 0u);

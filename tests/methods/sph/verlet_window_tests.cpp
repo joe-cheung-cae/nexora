@@ -190,17 +190,13 @@ CommittedSample committed(const sph::WcsphParticipant3D& participant) {
 
 void expect_same_rows(const CommittedSample& actual, const CommittedSample& expected) {
     ASSERT_EQ(actual.rows.size(), expected.rows.size());
-    for (std::size_t i = 0; i < actual.rows.size(); ++i) {
-        const auto& a = actual.rows[i];
-        const auto& e = expected.rows[i];
-        EXPECT_EQ(a.id, e.id);
-        EXPECT_EQ(a.mass, e.mass);
-        EXPECT_EQ(a.position, e.position);
-        EXPECT_EQ(a.density, e.density);
-        EXPECT_EQ(a.pressure, e.pressure);
-        EXPECT_EQ(a.pressure_acceleration, e.pressure_acceleration);
-        EXPECT_EQ(a.velocity, e.velocity);
-    }
+    for (std::size_t i = 0; i < actual.rows.size(); ++i)
+        EXPECT_EQ(actual.rows[i], expected.rows[i]) << "row " << i << ", expected ID " << expected.rows[i].id;
+}
+
+void expect_same_sample(const CommittedSample& actual, const CommittedSample& expected) {
+    EXPECT_EQ(actual.stamp, expected.stamp);
+    expect_same_rows(actual, expected);
 }
 
 // The shared force oracle consumes independent host values and neighbor data
@@ -556,10 +552,9 @@ TEST(SphVerlet, GridCapacityFailurePreservesRowsAndTime) {
     EXPECT_EQ(simulation.time().accepted_time, 0);
     EXPECT_EQ(participant.time_constraint().maximum_step, limit);
     EXPECT_EQ(participant.resource_usage().controlled_bytes, bytes);
-    EXPECT_EQ(committed(participant).stamp, before.stamp);
-    expect_same_rows(committed(participant), before);
-    ASSERT_NO_FATAL_FAILURE(
-        check_trajectory(committed(participant), initial, parameters.eos, 0));
+    const auto after = committed(participant);
+    expect_same_sample(after, before);
+    ASSERT_NO_FATAL_FAILURE(check_trajectory(after, initial, parameters.eos, 0));
     ASSERT_TRUE(simulation.finalize().ok());
     EXPECT_EQ(participant.resource_usage().controlled_bytes, 0u);
 }
@@ -576,8 +571,7 @@ TEST(SphVerlet, DriftOverflowPreservesRowsAndTime) {
     ASSERT_TRUE(simulation.initialize().ok());
     const auto before = committed(participant);
     ASSERT_EQ(simulation.run(4).code(), StatusCode::numerical_failure);
-    EXPECT_EQ(committed(participant).stamp, before.stamp);
-    expect_same_rows(committed(participant), before);
+    expect_same_sample(committed(participant), before);
     EXPECT_EQ(simulation.time().accepted_time, 0);
     ASSERT_TRUE(simulation.finalize().ok());
 }
@@ -602,15 +596,14 @@ TEST(SphVerlet, DurationOutsideSolverRangePreservesRowsAndTime) {
         EXPECT_EQ(simulation.run(dt).code(), StatusCode::invalid_argument);
         EXPECT_EQ(simulation.time().accepted_steps, 0u);
         EXPECT_EQ(simulation.time().accepted_time, 0);
-        EXPECT_EQ(committed(participant).stamp, before.stamp);
         EXPECT_EQ(participant.resource_usage().controlled_bytes, usage.controlled_bytes);
-        expect_same_rows(committed(participant), before);
+        expect_same_sample(committed(participant), before);
         ASSERT_TRUE(simulation.finalize().ok());
     }
 }
 #endif
 
-TEST(SphVerlet, ChecksInitialVelocityCflAndOwnershipBeforePublishing) {
+TEST(SphVerlet, ChecksInitialVelocityDensityCflAndOwnershipBeforePublishing) {
     const sph::WcsphVerletParameters parameters{{1, 1, 3}, .5};
     Fields fields({{{0, 0, 0}, 1, 1, 0}});
     sph::Velocity3D velocity("test.initial_velocity", 1);
@@ -621,8 +614,10 @@ TEST(SphVerlet, ChecksInitialVelocityCflAndOwnershipBeforePublishing) {
         sph::WcsphParticipant3D participant(fields.get(), 1, p, v, rho);
         Simulation simulation(participant);
         EXPECT_EQ(simulation.initialize().code(), reason);
-        EXPECT_EQ(participant.visit_committed_rows([](sph::CommittedRow3D) {}).code(),
-                  StatusCode::invalid_state);
+        const auto visit = participant.visit_committed_rows([](sph::CommittedRow3D) {
+            ADD_FAILURE() << "Rejected initialization published a fluid row";
+        });
+        EXPECT_EQ(visit.code(), StatusCode::invalid_state);
         EXPECT_EQ(participant.resource_usage().controlled_bytes, 0u);
         EXPECT_TRUE(simulation.finalize().ok());
     };
@@ -636,6 +631,9 @@ TEST(SphVerlet, ChecksInitialVelocityCflAndOwnershipBeforePublishing) {
 #endif
     rejects(parameters, {}, density, StatusCode::invalid_argument);
     rejects(parameters, velocity, {}, StatusCode::invalid_argument);
+    const sph::Values oversized_density("test.oversized_density", 2);
+    Kokkos::deep_copy(oversized_density, real{1});
+    rejects(parameters, velocity, oversized_density, StatusCode::invalid_argument);
     velocity(0, 2) = std::numeric_limits<real>::quiet_NaN();
     rejects(parameters, velocity, density, StatusCode::invalid_argument);
     // The component is finite, while its squared speed exceeds real range.
@@ -686,9 +684,7 @@ TEST(SphVerlet, DirectStepRequiresTheAcceptedBeginAndMatchingEnd) {
     for (const auto invalid : {TimeInterval{1.25, 1.375, .125},
                                TimeInterval{1, 1.126, .125}})
         EXPECT_EQ(participant.step(invalid).code(), StatusCode::invalid_argument);
-    const auto unchanged = committed(participant);
-    EXPECT_EQ(unchanged.stamp, before.stamp);
-    expect_same_rows(unchanged, before);
+    expect_same_sample(committed(participant), before);
     ASSERT_TRUE(participant.step(interval).ok());
     const auto after = committed(participant);
     EXPECT_EQ(after.stamp.time.physical_time, 1.125);
@@ -993,8 +989,7 @@ TEST(SphVerlet, ReusedWorkspaceIsReleasedWithoutChangingCommittedRows) {
     EXPECT_GT(participant.resource_usage().controlled_bytes, sizeof(LocalIndex));
     const auto read_start = observed.events.size();
     const auto after = committed(participant);
-    EXPECT_EQ(after.stamp, before.stamp);
-    expect_same_rows(after, before);
+    expect_same_sample(after, before);
     EXPECT_EQ(observed.events.size(), read_start);
     EXPECT_EQ(WcsphTestAccess::rates(participant), rates_before_eviction);
     EXPECT_EQ(WcsphTestAccess::row_to_input(participant), (std::vector<LocalIndex>{0}));
@@ -1030,9 +1025,7 @@ TEST(SphVerlet, HistoryAndCandidatesRespectControlledByteLimit) {
         EXPECT_EQ(simulation.run(dt, 2).code(), StatusCode::resource_exhausted);
         expect_metadata(participant, simulation, 0, 0, maximum_step);
         EXPECT_EQ(participant.resource_usage().controlled_bytes, bytes);
-        const auto after = committed(participant);
-        EXPECT_EQ(after.stamp, before.stamp);
-        expect_same_rows(after, before);
+        expect_same_sample(committed(participant), before);
         ASSERT_TRUE(simulation.finalize().ok());
         EXPECT_EQ(participant.resource_usage().controlled_bytes, 0u);
     }
@@ -1313,8 +1306,7 @@ TEST(SphVerlet, CommittedNeighborsAndRatesSurviveGridEviction) {
     EXPECT_LT(participant.resource_usage().controlled_bytes, warm_bytes);
     const auto after_release = allocations.events.size();
     const auto readback = committed(participant);
-    expect_same_rows(readback, crossed);
-    EXPECT_EQ(readback.stamp, crossed.stamp);
+    expect_same_sample(readback, crossed);
     EXPECT_EQ(WcsphTestAccess::row_to_input(participant), row_table);
     EXPECT_EQ(allocations.events.size(), after_release);
     ASSERT_NO_FATAL_FAILURE(expect_fixed_rows(readback, first.end, wall, gravity));
@@ -1351,15 +1343,6 @@ struct M4FixedWallFixture {
                 ParticipantId{1}, limits};
     }
 };
-
-void expect_same_wall(const sph::WallValue3D& actual, const sph::WallValue3D& expected) {
-    EXPECT_EQ(actual.id, expected.id);
-    EXPECT_EQ(actual.mass, expected.mass);
-    EXPECT_EQ(actual.position, expected.position);
-    EXPECT_EQ(actual.stamp, expected.stamp);
-    EXPECT_EQ(actual.phase, expected.phase);
-}
-
 
 TEST(SphVerlet, RegularStepUpdatesOneGridAndEvaluatesEachDerivativeOnce) {
     // Two neighboring fluid rows share one wall in support; the second wall is out of range.
@@ -1439,7 +1422,7 @@ TEST(SphVerlet, RegularStepBudgetFailureAllowsShorterRetry) {
     EXPECT_EQ(WcsphTestAccess::rates(participant), rates);
     expect_metadata(participant, simulation, first, 1, identity.maximum_step);
     expect_same_rows(committed(participant), before);
-    expect_same_wall(checked(participant.read_committed_wall(30)), wall);
+    EXPECT_EQ(checked(participant.read_committed_wall(30)), wall);
 
     double time = first;
     for (int retry = 0; retry < 2; ++retry) {
@@ -1447,9 +1430,8 @@ TEST(SphVerlet, RegularStepBudgetFailureAllowsShorterRetry) {
         const auto status = participant.step({time, time + small, small});
         ASSERT_TRUE(status.ok()) << status.message();
         time += small;
-        expect_same_rows(committed(participant), committed(reference));
+        expect_same_sample(committed(participant), committed(reference));
         EXPECT_EQ(WcsphTestAccess::rates(participant), WcsphTestAccess::rates(reference));
-        EXPECT_EQ(WcsphTestAccess::stamp(participant), WcsphTestAccess::stamp(reference));
         EXPECT_EQ(participant.time_constraint().maximum_step, reference.time_constraint().maximum_step);
     }
     RecordProperty("retry_budget_bytes", upper);
@@ -1522,7 +1504,7 @@ TEST(SphVerlet, PressurePublicationAllocationFailurePreservesHistory) {
             ASSERT_EQ(result.code(), StatusCode::resource_exhausted) << result.message();
             expect_metadata(participant, simulation, first, 1, identity.maximum_step);
             expect_same_rows(committed(participant), before);
-            expect_same_wall(checked(participant.read_committed_wall(30)), wall);
+            EXPECT_EQ(checked(participant.read_committed_wall(30)), wall);
             EXPECT_EQ(WcsphTestAccess::accepted_identity(participant), identity);
             EXPECT_EQ(WcsphTestAccess::row_to_input(participant), row_map);
             EXPECT_EQ(WcsphTestAccess::rates(participant), before_rates);
@@ -1534,9 +1516,8 @@ TEST(SphVerlet, PressurePublicationAllocationFailurePreservesHistory) {
             ASSERT_TRUE(result.ok()) << result.message();
             publication_allocations = host_fault.calls;
         }
-        expect_same_rows(committed(participant), expected);
+        expect_same_sample(committed(participant), expected);
         EXPECT_EQ(WcsphTestAccess::rates(participant), expected_rates);
-        EXPECT_EQ(WcsphTestAccess::stamp(participant), expected.stamp);
         ASSERT_TRUE(simulation.finalize().ok());
         EXPECT_EQ(participant.resource_usage().controlled_bytes, 0u);
     };
@@ -1592,7 +1573,7 @@ TEST(SphVerlet, CommittedReadsGuardReentrancyAndRecoverAfterVisitorException) {
     EXPECT_EQ(thrown.code(), StatusCode::execution_failure);
     EXPECT_EQ(calls, 1u);
     expect_same_rows(committed(participant), before);
-    expect_same_wall(checked(participant.read_committed_wall(30)), wall);
+    EXPECT_EQ(checked(participant.read_committed_wall(30)), wall);
     expect_metadata(participant, simulation, 0, 0, maximum);
     ASSERT_TRUE(simulation.run(fixture.step).ok());
     EXPECT_TRUE(simulation.finalize().ok());
@@ -1737,7 +1718,7 @@ TEST(SphVerlet, FixedWallBudgetRejectionPreservesRowsAndWall) {
     }
     expect_metadata(participant, simulation, 0, 0, maximum_step);
     expect_same_rows(committed(participant), before);
-    expect_same_wall(checked(participant.read_committed_wall(30)), before_wall);
+    EXPECT_EQ(checked(participant.read_committed_wall(30)), before_wall);
     EXPECT_EQ(WcsphTestAccess::accepted_identity(participant), identity);
     EXPECT_EQ(WcsphTestAccess::row_to_input(participant), row_map);
     EXPECT_EQ(participant.resource_usage().controlled_bytes, initial_bytes + held_bytes);
@@ -1862,7 +1843,7 @@ TEST(SphVerlet, MovingWallRejectsUnrepresentableGroupDurationBeforeSampling) {
         EXPECT_EQ(failure.code(), StatusCode::numerical_failure);
         EXPECT_TRUE(calls.empty());
         expect_metadata(participant, simulation, 0, 1, t);
-        expect_same_wall(checked(participant.read_committed_wall(70)), before);
+        EXPECT_EQ(checked(participant.read_committed_wall(70)), before);
         EXPECT_EQ(WcsphTestAccess::wall_groups(participant), accepted_phases);
         ASSERT_TRUE(simulation.finalize().ok());
         EXPECT_EQ(participant.resource_usage().controlled_bytes, 0u);
@@ -2383,15 +2364,14 @@ TEST(SphLeptonWall, FailedAdamiEndpointPreservesPoseAndRatesForShorterRetry) {
     EXPECT_EQ(WcsphTestAccess::accepted_identity(participant), identity);
     EXPECT_EQ(WcsphTestAccess::rates(participant), before_rates);
     expect_same_rows(committed(participant), before);
-    expect_same_wall(checked(participant.read_committed_wall(41)), before_wall);
+    EXPECT_EQ(checked(participant.read_committed_wall(41)), before_wall);
     ASSERT_TRUE(participant.release_workspace().ok());
     for (const double start : {first, first + small}) {
         ASSERT_TRUE(step(reference, *reference_owner, start, small).ok());
         const auto retry = step(participant, *owner, start, small);
         ASSERT_TRUE(retry.ok()) << retry.message();
         expect_same_rows(committed(participant), committed(reference));
-        expect_same_wall(checked(participant.read_committed_wall(41)),
-                         checked(reference.read_committed_wall(41)));
+        EXPECT_EQ(checked(participant.read_committed_wall(41)), checked(reference.read_committed_wall(41)));
         EXPECT_EQ(WcsphTestAccess::rates(participant), WcsphTestAccess::rates(reference));
     }
     ASSERT_TRUE(participant.finalize().ok());
@@ -3105,7 +3085,7 @@ TEST(SphVerlet, MovingWallGroupsPreserveIdentityAcrossPermutations) {
         expect_mixed_rows(observed, fluid_state, stage, gravity);
         for (const auto& p : stage.walls) {
             const auto row = checked(participant.read_committed_wall(p.id));
-            expect_same_wall(row, checked(permuted.read_committed_wall(p.id)));
+            EXPECT_EQ(row, checked(permuted.read_committed_wall(p.id))) << "wall ID " << p.id;
             EXPECT_EQ(row.id, p.id);
             EXPECT_EQ(row.mass, p.mass);
             EXPECT_EQ(row.position, p.position);

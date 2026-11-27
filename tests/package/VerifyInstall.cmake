@@ -84,15 +84,7 @@ set(cli_oracle_copy "${scratch}/cli oracle${cli_executable_suffix}")
 file(COPY_FILE "${cli_oracle}" "${cli_oracle_copy}" ONLY_IF_DIFFERENT)
 set(cli_fixture_copy "${scratch}/relocated cli fixtures")
 file(REMOVE_RECURSE "${cli_fixture_copy}")
-file(MAKE_DIRECTORY "${cli_fixture_copy}")
-foreach(fixture IN ITEMS cli-nonbinary-tail.case cli-invalid.case cli-underflow.case
-                         cli-invalid-sign.case cli-too-many-steps.case cli-duplicate.case
-                         cli-unknown-version.case cli-unsupported-execution.case
-                         cli-invalid-interval.case cli-quantum.case cli-nan.case cli-inf.case
-                         cli-rounded-stall.case cli-rounded-clock.case
-                         cli-max-window-boundary.case cli-over-window-boundary.case)
-    file(COPY_FILE "${fixture_dir}/${fixture}" "${cli_fixture_copy}/${fixture}")
-endforeach()
+file(COPY "${fixture_dir}/" DESTINATION "${cli_fixture_copy}" FILES_MATCHING PATTERN "*.case")
 file(COPY_FILE "${cli_suite}" "${scratch}/relocated-cli-suite.cmake")
 set(relocated_cli "${scratch}/relocated/${cli_install_bindir}/${cli_executable_name}")
 if(NOT EXISTS "${relocated_cli}")
