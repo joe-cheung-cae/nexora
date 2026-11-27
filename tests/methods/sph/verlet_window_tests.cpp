@@ -28,7 +28,14 @@ struct HostAllocationFault {
 thread_local HostAllocationFault host_fault;
 
 void* allocate_test_storage(std::size_t bytes) {
-    if (host_fault.active && !*host_fault.committed_grid && ++host_fault.calls == host_fault.fail_at) {
+    bool inject = host_fault.active;
+#if defined(_MSC_VER) && _ITERATOR_DEBUG_LEVEL != 0
+    // MSVC's noexcept container constructors allocate an iterator proxy. Failing
+    // that allocation terminates the process (microsoft/STL#1035). Allocations
+    // of this size remain covered by the Release run without debug iterators.
+    inject = inject && bytes != sizeof(std::_Container_proxy);
+#endif
+    if (inject && !*host_fault.committed_grid && ++host_fault.calls == host_fault.fail_at) {
         host_fault.active = false;
         host_fault.threw = true;
         throw std::bad_alloc{};

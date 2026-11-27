@@ -183,8 +183,9 @@ case "${1:-}" in
     *) echo 'Usage: bash tools/ci_doxygen.sh prepare|verify' >&2; exit 2 ;;
 esac
 # Retain failure output, commands, exit status and wall time in the uploaded artifact.
-exec > >(tee "$logs/$1.log") 2>&1
-trap 'status=$?; echo "[$(date --iso-8601=seconds)] $1 exit $status"' EXIT
-echo "[$(date --iso-8601=seconds)] $1"
+phase=$1
+exec > >(tee "$logs/$phase.log") 2>&1
+trap 'status=$?; echo "[$(date --iso-8601=seconds)] $phase exit $status"' EXIT
+echo "[$(date --iso-8601=seconds)] $phase"
 set -x
-"$1"
+"$phase"

@@ -116,7 +116,9 @@ Result<TimeConstraint> Participant::case_time_constraint(real lambda) {
         }
         return step * lambda <= 1.0;
     };
-    double max_step = std::min(1.0 / lambda, static_cast<double>(real_max));
+    // Cap the step before dividing when the reciprocal would exceed the real range.
+    constexpr double step_limit = static_cast<double>(real_max);
+    double max_step = lambda <= 1.0 / step_limit ? step_limit : 1.0 / lambda;
     constexpr auto invalid_bounds = "reference lambda has no supported step bounds";
     // Rounding to real can cross the upper stability limit, especially for
     // subnormals. A predecessor in real is below the original double bound.

@@ -213,13 +213,19 @@ TEST(Reference, AdvertisedTimeConstraintEndpointsAreUsable) {
                              std::numeric_limits<real>::max(), real{0x1.8p-1}, real{0x1.34p126},
                              real{0x1.06ee48p126}};
     for (const real lambda : lambdas) {
+        SCOPED_TRACE(::testing::Message() << "lambda=" << std::hexfloat << lambda);
         Participant probe(Config{{0}, {1}, {0}, lambda});
         const TimeConstraint constraint = probe.time_constraint();
+        ASSERT_TRUE(constraint.available) << Participant::case_time_constraint(lambda).status().message();
         ASSERT_TRUE(std::isfinite(constraint.minimum_step));
         ASSERT_GT(constraint.minimum_step, 0.0);
         ASSERT_TRUE(std::isfinite(constraint.maximum_step));
         ASSERT_GT(constraint.maximum_step, 0.0);
         ASSERT_LE(constraint.minimum_step, constraint.maximum_step);
+        if (lambda == std::numeric_limits<real>::denorm_min()) {
+            EXPECT_EQ(constraint.minimum_step, 1.0);
+            EXPECT_EQ(constraint.maximum_step, static_cast<double>(std::numeric_limits<real>::max()));
+        }
         ASSERT_TRUE(validate_time_constraint(constraint).ok());
         for (const double step : {constraint.minimum_step, constraint.maximum_step}) {
             ASSERT_TRUE(validate_time_step(constraint, step).ok());

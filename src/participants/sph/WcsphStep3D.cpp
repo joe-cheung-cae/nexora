@@ -69,8 +69,8 @@ InitialInput capture_input(const Kokkos::Serial& exec, const Budget& budget,
         n * (4 * sizeof(real) + sizeof(std::uint64_t) + sizeof(std::uint8_t))));
     auto position = allocate<Velocity3D>(exec, "sph.geometry.input_position", n);
     auto mass = allocate<Values>(exec, "sph.geometry.input_mass", n);
-    auto ids = allocate<decltype(fluid.ids)::non_const_type>(exec, "sph.geometry.input_ids", n);
-    auto ghost = allocate<decltype(fluid.ghost)::non_const_type>(exec, "sph.geometry.input_ghost", n);
+    auto ids = allocate<decltype(ParticleFields3D::ids)::non_const_type>(exec, "sph.geometry.input_ids", n);
+    auto ghost = allocate<decltype(ParticleFields3D::ghost)::non_const_type>(exec, "sph.geometry.input_ghost", n);
     Kokkos::parallel_for("sph.geometry.capture_fluid", Policy(exec, 0, nf), [&](std::size_t i) {
         ghost(i) = 0;
         ids(i) = fluid.ids(i);
