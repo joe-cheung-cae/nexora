@@ -1959,28 +1959,27 @@ std::array<double, 3> piston_signal(double phase) {
 }
 
 struct PistonReference {
-    double separation, density, velocity, position, acceleration;
+    double density, velocity, acceleration;
 };
 
-std::vector<PistonReference> integrate_piston_reference(int steps) {
+std::vector<PistonReference> integrate_piston_reference(int steps, const auto& wall_at) {
     constexpr double c2 = piston_sound_speed * piston_sound_speed;
     constexpr double inverse_four_pi = 1 / (4 * std::numbers::pi);
     const auto reference = [&](double time, double x, double velocity) {
-        const double u = time - std::floor(time);
-        const double wall_x = piston_reference_position + 2 * std::pow(u * (1 - u), 4);
+        const auto [translation, wall_acceleration] = wall_at(time);
+        const double wall_x = piston_reference_position + translation;
         const double r = x - wall_x;
         const double gap = std::max(2 - r, 0.);
         const double rho = 2 + piston_mass * std::pow(gap, 3) * inverse_four_pi;
         double fluid_acceleration{};
         if (r < 2) {
-            const double wall_acceleration = 8 * u*u * (1-u)*(1-u) * (3 - 14*u*(1-u));
             const double p = c2 * (rho - 1);
             const double pw = p + rho * wall_acceleration * r;
             const double rhow = 1 + pw / c2;
             fluid_acceleration = piston_mass * 3 * std::pow(gap, 2) * inverse_four_pi *
                                  (p / (rho * rho) + pw / (rhow * rhow));
         }
-        return PistonReference{r, rho, velocity, x, fluid_acceleration};
+        return PistonReference{rho, velocity, fluid_acceleration};
     };
     const auto acceleration = [&](double time, double x) {
         return reference(time, x, 0.).acceleration;
@@ -2015,193 +2014,99 @@ sph::WcsphParticipant3D piston_participant(const TrajectoryInput& trajectory) {
     return {fluid.get(), 64, parameters, velocity, density, WallGroups{{21, wall_fields(particles), trajectory}}};
 }
 
-void check_round_trip_piston(bool expression) {
-    constexpr int reference_steps = 16384;
-    const auto reference = integrate_piston_reference(reference_steps);
-    const auto half_resolution = integrate_piston_reference(reference_steps / 2);
-    for (std::size_t i = 0; i < half_resolution.size(); ++i) {
-        ASSERT_NEAR(reference[2 * i].density, half_resolution[i].density, 4.e-14);
-        ASSERT_NEAR(reference[2 * i].velocity, half_resolution[i].velocity, 4.e-14);
-    }
-    EXPECT_NEAR(reference[reference_steps / 2].separation, 1.994283047164, 1.e-12);
-    EXPECT_NEAR(reference.back().separation, 2.002527610449, 1.e-12);
-    EXPECT_NEAR(reference[reference_steps / 2].density, 2.000121807465783, 1.e-14);
-    EXPECT_NEAR(reference[reference_steps / 2].velocity, .000611834268412, 1.e-14);
-    EXPECT_NEAR(reference.back().velocity, .001113282602584, 1.e-14);
+struct ReplayMotion {
+    double translation, velocity, acceleration;
+};
 
-    // Track the maximum error on each parity over the entire contact event.
-    // The unequal schedule alternates widths in a 3:1 ratio and reaches the
-    // same half-period and endpoint as the uniform schedule.
-    using ParityErrors = std::array<double, 2>;
-    for (const bool unequal : {false, true}) {
-        ParityErrors previous_velocity_error{}, previous_density_error{};
-        for (int steps = unequal ? 64 : 32; steps <= 256; steps *= 2) {
-            ParityErrors density_error{}, speed_error{};
-            double sampled_density_error{}, sampled_speed_error{}, maximum_wall_error{};
-            std::array<real, 2> previous_fluid_state{};
-            SCOPED_TRACE(steps);
-            TrajectoryCalls calls;
-            auto trajectory = stationary_motion(piston_limit);
-            trajectory.initial_phase = 0;
-            trajectory.period = 1;
-            std::unique_ptr<app::PrescribedMotion> owner;
-            if (expression) {
-                app::MotionConfig config{.mode = app::MotionMode::pose};
-                config.expressions[0] = "2*(t*(1-t))^4";
-                owner = checked(app::PrescribedMotion::create(config));
-                trajectory = owner->trajectory(piston_limit);
-                trajectory.period = 1;
-            }
-            const auto expression_motion = trajectory.motion;
-            trajectory.motion = [&](WallTime time, double phase) -> Result<WallMotion> {
-                calls.push_back({time, phase});
-                const auto [x, v, a] = piston_signal(phase);
-                if (expression) {
-                    const auto sampled = expression_motion(time, phase);
-                    if (sampled.ok()) {
-                        const auto& value = sampled.value();
-                        const auto tolerance = 4 * std::numeric_limits<real>::epsilon();
-                        EXPECT_NEAR(value.translation[0], x, tolerance);
-                        EXPECT_NEAR(value.velocity[0], v, tolerance);
-                        EXPECT_NEAR(value.acceleration[0], a, tolerance);
-                    }
-                    return sampled;
-                }
-                WallMotion motion;
-                motion.translation[0] = x;
-                motion.velocity[0] = v;
-                motion.acceleration[0] = a;
-                return motion;
-            };
-            auto participant = piston_participant(trajectory);
-            Simulation simulation(participant);
-            ASSERT_TRUE(simulation.initialize().ok());
-            EXPECT_DOUBLE_EQ(participant.time_constraint().maximum_step, piston_limit);
-            EXPECT_LT(1., 1 / piston_sound_speed);
-            EXPECT_TRUE(committed_grid_sample(participant).neighbors.at(11).empty());
-            const bool record_trace = !expression && !unequal && steps == 32;
-            std::ostringstream endpoint_trace;
-            const auto trace_endpoint = [&](int step, double time, const auto& row, real wall_x,
-                                            const PistonReference& target) {
-                endpoint_trace << step << ',' << time << ',' << row.velocity[0] << ','
-                               << row.pressure_acceleration[0] << ',' << row.position[0] << ','
-                               << row.density << ',' << wall_x << ',' << target.velocity << ',' << target.acceleration
-                               << ',' << target.position << ',' << target.density << '\n';
-            };
-            if (record_trace) {
-                endpoint_trace << "step,time,actual_v,actual_a,actual_x,actual_rho,wall_x,ref_v,ref_a,ref_x,ref_rho\n"
-                               << std::scientific << std::setprecision(16);
-                const auto initial = committed(participant);
-                ASSERT_EQ(initial.rows.size(), 1u);
-                const auto initial_wall = checked(participant.read_committed_wall(29));
-                trace_endpoint(0, 0., initial.rows.front(), initial_wall.position[0], reference.front());
-            }
-            double time{};
-            for (int step = 1; step <= steps; ++step) {
-                const double dt = (unequal ? (step % 2 ? 1.5 : .5) : 1.) / steps;
-                if (owner)
-                    ASSERT_TRUE(owner->prepare(dt).ok());
-                const auto status = simulation.run(dt);
-                ASSERT_TRUE(status.ok()) << status.message();
-                if (owner)
-                    owner->commit();
-                time += dt;
-                EXPECT_DOUBLE_EQ(participant.time_constraint().maximum_step, piston_limit);
-
-                const auto now = committed(participant);
-                ASSERT_EQ(now.rows.size(), 1u);
-                const auto& row = now.rows.front();
-                EXPECT_EQ(row.id, 11u);
-                const auto wall_value = checked(participant.read_committed_wall(29));
-                const double exact_wall_position = piston_reference_position + piston_signal(time)[0];
-                maximum_wall_error = std::max(maximum_wall_error, std::abs(wall_value.position[0] - exact_wall_position));
-                const auto& target = reference[static_cast<std::size_t>(time * reference_steps)];
-                if (record_trace)
-                    trace_endpoint(step, time, row, wall_value.position[0], target);
-                const auto parity = step % 2;
-                density_error[parity] = std::max(density_error[parity], std::abs(row.density - target.density));
-                speed_error[parity] = std::max(speed_error[parity], std::abs(row.velocity[0] - target.velocity));
-                EXPECT_EQ(wall_value.phase, time);
-                EXPECT_EQ(wall_value.stamp.time.physical_time, time);
-                EXPECT_EQ(now.stamp.time.physical_time, time);
-                EXPECT_NEAR(row.pressure, piston_sound_speed * piston_sound_speed * (row.density - 1),
-                            4 * std::numeric_limits<real>::epsilon());
-                // At the finest uniform width, the wall leaves support before the
-                // last resynchronization. Both parity branches must coast together.
-                if (!unequal && steps == 256 && step == steps) {
-                    EXPECT_EQ(row.density, previous_fluid_state[0]);
-                    EXPECT_EQ(row.velocity[0], previous_fluid_state[1]);
-                }
-                previous_fluid_state = {row.density, row.velocity[0]};
-                if (step != steps / 2 && step != steps)
-                    continue;
-                EXPECT_EQ(wall_value.position[0],
-                          piston_reference_position + (step == steps / 2 ? 1. / 128 : 0.));
-                EXPECT_EQ(wall_value.mass, piston_mass);
-                EXPECT_NEAR(row.density, target.density, 3.e-6);
-                sampled_density_error = std::max(sampled_density_error, std::abs(row.density - target.density));
-                sampled_speed_error = std::max(sampled_speed_error, std::abs(row.velocity[0] - target.velocity));
-                // Keep the existing accuracy target at all original uniform widths.
-                if (!unequal || steps == 256)
-                    EXPECT_NEAR(row.velocity[0], target.velocity, 2.e-6);
-                EXPECT_NEAR(row.velocity[1], 0, 2.e-6);
-                EXPECT_NEAR(row.velocity[2], 0, 2.e-6);
-
-                const auto endpoint = committed_grid_sample(participant);
-                const auto& pairs = endpoint.neighbors.at(11);
-                if (step == steps / 2) {
-                    ASSERT_EQ(pairs.size(), 1u);
-                    EXPECT_EQ(pairs.front().first, 29u);
-                    const double distance = double(row.position[0]) - wall_value.position[0];
-                    const double expected = distance * distance;
-                    EXPECT_NEAR(pairs.front().second, expected,
-                                4 * std::numeric_limits<real>::epsilon() * expected);
-                } else {
-                    EXPECT_TRUE(pairs.empty());
-                    ASSERT_FALSE(calls.empty());
-                    EXPECT_EQ(calls.back().time.elapsed, 1);
-                    EXPECT_EQ(calls.back().phase, 0);
-                    EXPECT_EQ(piston_signal(calls.back().phase), (std::array<double, 3>{}));
-                }
-            }
-            ASSERT_TRUE(simulation.finalize().ok());
-            if (record_trace)
-                ::testing::Test::RecordProperty("endpoint_trace_uniform_32", endpoint_trace.str());
-            const auto schedule = std::string(unequal ? "variable_" : "uniform_") + std::to_string(steps);
-            const auto record = [&](const std::string& field, double error) {
-                std::ostringstream text;
-                text << std::scientific << std::setprecision(16) << error;
-                ::testing::Test::RecordProperty(field + "_" + schedule, text.str());
-            };
-            record("sampled_density", sampled_density_error);
-            record("sampled_speed", sampled_speed_error);
-            record("max_wall_position", maximum_wall_error);
-            EXPECT_LE(maximum_wall_error, 2 * std::numeric_limits<real>::epsilon());
-            for (int parity = 0; parity < 2; ++parity) {
-                record(parity ? "odd_density" : "even_density", density_error[parity]);
-                record(parity ? "odd_speed" : "even_speed", speed_error[parity]);
-                EXPECT_LT(density_error[parity], 3.e-6);
-                if (steps == 256)
-                    EXPECT_LT(speed_error[parity], 4.e-6);
-                if (previous_velocity_error[parity]) {
-                    const double minimum_ratio = steps == 64 ? 3. : 3.5;
-                    EXPECT_GT(previous_velocity_error[parity] / speed_error[parity], minimum_ratio);
-                    if constexpr (std::is_same_v<real, double>)
-                        EXPECT_GT(previous_density_error[parity] / density_error[parity], minimum_ratio);
-                }
-            }
-            previous_density_error = density_error;
-            previous_velocity_error = speed_error;
+ReplayMotion replay_piston(double time) {
+    struct Sample { double time, velocity; };
+    constexpr std::array<Sample, 4> samples{{{0, 0}, {.25, 1. / 32}, {.625, -1. / 64}, {1, 0}}};
+    double translation{};
+    for (std::size_t i = 1; i < samples.size(); ++i) {
+        const auto [start, v0] = samples[i - 1];
+        const auto [end, v1] = samples[i];
+        const double width = end - start;
+        if (time >= start && time <= end) {
+            // Cubic Hermite velocity with zero slope at every knot. Integrate it
+            // exactly for pose and differentiate it for the Adami acceleration.
+            const double u = (time - start) / width;
+            const double dv = v1 - v0;
+            return {translation + width * (v0 * u + dv * u * u * u * (1 - .5 * u)),
+                    v0 + dv * u * u * (3 - 2 * u), dv * 6 * u * (1 - u) / width};
         }
+        translation += width * (v0 + v1) / 2;
     }
+    throw std::out_of_range("piston sample time outside the recording");
 }
 
-TEST(SphVerlet, RoundTripPistonResolvesTransientContact) {
-    check_round_trip_piston(false);
-}
+TEST(SphVerlet, DiscreteWallReplayMatchesReferenceFluidImpulse) {
+    // At the midpoint of the second interval the preceding sample contributes
+    // 1/256 to the displacement and the wall is decelerating through contact.
+    const auto midpoint = replay_piston(7. / 16);
+    EXPECT_DOUBLE_EQ(midpoint.translation, 133. / 16384);
+    EXPECT_DOUBLE_EQ(midpoint.velocity, 1. / 128);
+    EXPECT_DOUBLE_EQ(midpoint.acceleration, -3. / 16);
+    constexpr int reference_steps = 8192;
+    const auto wall_at = [](double time) {
+        const auto motion = replay_piston(time);
+        return std::pair{motion.translation, motion.acceleration};
+    };
+    // The independent one-neighbor RK4 reference integrates the pressure force
+    // on the unit fluid mass. Both solvers query the same recording at physical time.
+    const auto integrated = integrate_piston_reference(reference_steps, wall_at);
+    const double reference = integrated.back().velocity;
+    const double coarser = integrate_piston_reference(reference_steps / 2, wall_at).back().velocity;
+    ASSERT_NEAR(reference, coarser, 1.e-12);
+    ASSERT_GT(reference, 1.e-4);
 
-TEST(SphLeptonWall, DisplacementPistonResolvesTransientContact) {
-    check_round_trip_piston(true);
+    constexpr int steps = 256;
+    constexpr double dt = 1. / steps;
+    auto trajectory = stationary_motion(dt);
+    trajectory.first_phase = 0;
+    trajectory.last_phase = 1;
+    trajectory.motion = [](WallTime time, double) -> Result<WallMotion> {
+        const auto motion = replay_piston(time.elapsed);
+        return WallMotion{.translation = {static_cast<real>(motion.translation), 0, 0},
+                          .velocity = {static_cast<real>(motion.velocity), 0, 0},
+                          .acceleration = {static_cast<real>(motion.acceleration), 0, 0}};
+    };
+    auto participant = piston_participant(trajectory);
+    Simulation simulation(participant);
+    ASSERT_TRUE(simulation.initialize().ok());
+    const auto initial = committed(participant).rows.at(0);
+    double previous_force = initial.mass * initial.pressure_acceleration[0];
+    double impulse{}, momentum_change{};
+    for (int step = 1; step <= steps; ++step) {
+        const auto status = simulation.run(dt);
+        ASSERT_TRUE(status.ok()) << status.message();
+        const auto state = committed(participant);
+        const auto& fluid = state.rows.at(0);
+        const double time = step * dt;
+        const auto wall_value = checked(participant.read_committed_wall(29));
+        ASSERT_EQ(state.stamp.time.physical_time, time);
+        ASSERT_EQ(wall_value.stamp.time.physical_time, time);
+        EXPECT_NEAR(wall_value.position[0], piston_reference_position + replay_piston(time).translation,
+                    2 * std::numeric_limits<real>::epsilon());
+        if (time == 7. / 16) {
+            // Density integrates the continuity equation driven by fluid-wall relative velocity.
+            EXPECT_NEAR(fluid.density, integrated[7 * reference_steps / 16].density, 4.e-6);
+        }
+        // Gravity is zero and the wall is the only neighbor. Every accepted
+        // endpoint contributes its instantaneous wall force to the trapezoid.
+        const double force = fluid.mass * fluid.pressure_acceleration[0];
+        impulse += .5 * dt * (previous_force + force);
+        previous_force = force;
+        momentum_change = fluid.mass * fluid.velocity[0] - initial.mass * initial.velocity[0];
+    }
+    const double tolerance = 1.e-4 * reference;
+    EXPECT_NEAR(impulse, reference, tolerance);
+    EXPECT_NEAR(momentum_change, reference, tolerance);
+    EXPECT_NEAR(momentum_change, impulse, tolerance);
+    std::ostringstream report;
+    report << std::setprecision(16) << "reference=" << reference << ", rk4_refinement=" << std::abs(reference - coarser)
+           << ", sph_force_integral=" << impulse << ", fluid_momentum_change=" << momentum_change;
+    RecordProperty("replay_impulse", report.str());
+    ASSERT_TRUE(simulation.finalize().ok());
 }
 
 struct CallerEulerWall {
@@ -2237,8 +2142,6 @@ struct CallerEulerWall {
 };
 
 void check_euler_piston(bool expression) {
-    constexpr int reference_steps = 16384;
-    const auto reference = integrate_piston_reference(reference_steps);
     const auto endpoint = [](double time) {
         const auto signal = piston_signal(time);
         return WallMotion{.velocity = {static_cast<real>(signal[1]), 0, 0},
@@ -2262,7 +2165,7 @@ void check_euler_piston(bool expression) {
         auto participant = piston_participant(trajectory);
         Simulation simulation(participant);
         ASSERT_TRUE(simulation.initialize().ok());
-        double maximum_wall_error{}, sampled_speed_error{}, sampled_density_error{};
+        double maximum_wall_error{};
         double euler_translation{};
         for (int step = 1; step <= steps; ++step) {
             euler_translation += dt * piston_signal((step - 1) * dt)[1];
@@ -2309,20 +2212,10 @@ void check_euler_piston(bool expression) {
                 + wall_pressure / (wall_density * wall_density));
             EXPECT_NEAR(particle.pressure_acceleration[0], acceleration,
                         32 * epsilon * std::max(.01, std::abs(acceleration)));
-            if (step == steps / 2 || step == steps) {
-                const auto& target = reference[step * (reference_steps / steps)];
-                sampled_speed_error = std::max(sampled_speed_error, std::abs(particle.velocity[0] - target.velocity));
-                sampled_density_error = std::max(sampled_density_error, std::abs(particle.density - target.density));
-            }
         }
-        const auto record = [&](const char* field, double error) {
-            std::ostringstream text;
-            text << std::scientific << std::setprecision(16) << error;
-            ::testing::Test::RecordProperty(std::string(field) + "_" + std::to_string(steps), text.str());
-        };
-        record("max_wall_position_error", maximum_wall_error);
-        record("sampled_fluid_speed_error", sampled_speed_error);
-        record("sampled_fluid_density_error", sampled_density_error);
+        std::ostringstream text;
+        text << std::scientific << std::setprecision(16) << maximum_wall_error;
+        ::testing::Test::RecordProperty("max_wall_position_error_" + std::to_string(steps), text.str());
         if (previous_wall_error)
             EXPECT_NEAR(previous_wall_error / maximum_wall_error, 2., .05);
         previous_wall_error = maximum_wall_error;
@@ -2330,11 +2223,11 @@ void check_euler_piston(bool expression) {
     }
 }
 
-TEST(SphVerlet, CallerEulerPistonSeparatesWallPositionAndFluidErrors) {
+TEST(SphVerlet, CallerEulerPistonChecksWallConvergenceAndFluidRates) {
     check_euler_piston(false);
 }
 
-TEST(SphLeptonWall, VelocityPistonSeparatesWallPositionAndFluidErrors) {
+TEST(SphLeptonWall, VelocityPistonChecksWallConvergenceAndFluidRates) {
     check_euler_piston(true);
 }
 

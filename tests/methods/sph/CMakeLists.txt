@@ -5,7 +5,7 @@ nexora_add_test(nexora_sph_tests cell_grid_tests.cpp KOKKOS
     nexora_participants_sph nexora::simulation nexora_prescribed_motion)
 target_sources(nexora_sph_tests PRIVATE
     pressure_3d_tests.cpp verlet_window_tests.cpp adami_wall_tests.cpp hydrostatic_initial_tests.cpp
-    continuity_tests.cpp)
+    continuity_tests.cpp mbd_exchange_tests.cpp)
 target_include_directories(nexora_sph_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/HydrostaticTankTimeout.cmake")

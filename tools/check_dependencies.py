@@ -162,6 +162,7 @@ SPH_TARGET_DIRS = {
 SPH_PRESSURE_ORACLE = SPH_CELL_GRID_TEST.with_name("wcsph_oracle.hpp")
 SPH_WINDOW_TESTS = {SPH_ADAMI_TEST,
                     SPH_CELL_GRID_TEST.with_name("hydrostatic_tank_tests.cpp"),
+                    SPH_CELL_GRID_TEST.with_name("mbd_exchange_tests.cpp"),
                     SPH_VERLET_TEST, SPH_HYDROSTATIC_INITIAL_TEST, SPH_CONTINUITY_TEST}
 SPH_PARTICIPANT_CONSUMERS = (SPH_WINDOW_TESTS - {SPH_HYDROSTATIC_INITIAL_TEST}) | {SPH_TANK_TRAJECTORY}
 SPH_PARTICIPANT_HEADER = "participants/sph/WcsphParticipant3D.hpp"
